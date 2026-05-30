@@ -1,0 +1,264 @@
+@import "tailwindcss";
+
+:root {
+  --papyrus-ink: #171714;
+  --papyrus-muted: #6f7168;
+  --papyrus-paper: #fbfaf6;
+  --papyrus-paper-deep: #f3ead9;
+  --papyrus-line: #e8ddc7;
+  --papyrus-sage: #6f7f68;
+  --papyrus-sage-dark: #3f5845;
+  --papyrus-gold: #d7aa4f;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Microsoft YaHei", sans-serif;
+  color: var(--papyrus-ink);
+  background: var(--papyrus-paper);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: default;
+}
+
+textarea {
+  scrollbar-gutter: stable;
+}
+
+::selection {
+  background: rgba(215, 170, 79, 0.28);
+}
+
+.papyrus-grain {
+  background: #fbfaf6;
+  transition:
+    background-color 260ms ease,
+    background-image 260ms ease;
+}
+
+.papyrus-grain[data-vibe="rain-outline"] {
+  background: #f7fafb;
+}
+
+.papyrus-grain[data-vibe="cinema-draft"] {
+  background: #fbf8fc;
+}
+
+.papyrus-grain[data-vibe="deadline-heat"] {
+  background: #fcf8f4;
+}
+
+.papyrus-surface {
+  border-color: rgba(238, 232, 220, 0.96);
+  background: rgba(255, 254, 250, 0.96);
+  box-shadow: 0 8px 24px rgba(43, 34, 19, 0.045);
+}
+
+.papyrus-icon-button {
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(232, 221, 199, 0.95);
+  background: rgba(255, 254, 250, 0.86);
+  color: #6f7168;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.papyrus-icon-button:hover {
+  border-color: rgba(215, 170, 79, 0.55);
+  background: #fffdf7;
+  color: var(--papyrus-ink);
+  box-shadow: 0 6px 16px rgba(43, 34, 19, 0.05);
+}
+
+.papyrus-scrollbar {
+  scrollbar-color: rgba(111, 127, 104, 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.papyrus-editor .ProseMirror {
+  min-height: 560px;
+  font-size: 16px;
+  line-height: 2;
+  color: #26231d;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  transition:
+    color 220ms ease,
+    background-color 220ms ease;
+}
+
+.papyrus-editor .ProseMirror:focus {
+  outline: none;
+}
+
+.papyrus-editor h1 {
+  margin: 0 0 28px;
+  font-size: 28px;
+  line-height: 1.35;
+  font-weight: 650;
+  color: #171714;
+}
+
+.papyrus-editor p {
+  margin: 0 0 22px;
+}
+
+.papyrus-editor p:last-child {
+  margin-bottom: 0;
+}
+
+.papyrus-editor .is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  color: #94a3b8;
+  pointer-events: none;
+}
+
+.papyrus-editor-vibe-rain-outline .ProseMirror {
+  color: #202a31;
+}
+
+.papyrus-editor-vibe-cinema-draft .ProseMirror {
+  color: #251f2b;
+}
+
+.papyrus-editor-vibe-deadline-heat .ProseMirror {
+  color: #2d211a;
+}
+
+.vibe-dock {
+  position: relative;
+}
+
+.vibe-dock::after {
+  position: absolute;
+  right: 28px;
+  bottom: -1px;
+  left: 28px;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, transparent, rgba(215, 170, 79, 0.6), transparent);
+  animation: vibe-breathe 4s ease-in-out infinite;
+}
+
+.vibe-range {
+  accent-color: var(--papyrus-sage-dark);
+}
+
+.ai-diff-replacement {
+  border-radius: 4px;
+  background: rgba(215, 170, 79, 0.2);
+  box-shadow: inset 0 -1px 0 rgba(215, 170, 79, 0.55);
+  animation: ai-diff-pulse 1.6s ease-out;
+}
+
+.papyrus-ghost-text {
+  color: #8a8b82;
+  opacity: 0.54;
+  pointer-events: none;
+  user-select: none;
+  white-space: pre-wrap;
+}
+
+.papyrus-mention {
+  border-radius: 4px;
+  background: rgba(111, 127, 104, 0.14);
+  color: #3f5845;
+  padding: 0 3px;
+}
+
+.papyrus-mention-menu {
+  position: fixed;
+  z-index: 80;
+  width: min(280px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid var(--papyrus-line);
+  border-radius: 8px;
+  background: #fffefa;
+  box-shadow: 0 18px 50px rgba(43, 34, 19, 0.16);
+}
+
+.papyrus-mention-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 10px;
+  border: 0;
+  background: #fffefa;
+  color: #4a463b;
+  text-align: left;
+  font-size: 13px;
+}
+
+.papyrus-mention-item small {
+  color: #9d988a;
+  font-size: 11px;
+}
+
+.papyrus-mention-item.is-selected,
+.papyrus-mention-item:hover {
+  background: #f6f0e2;
+  color: var(--papyrus-sage-dark);
+}
+
+.papyrus-mention-empty {
+  padding: 10px;
+  color: #9d988a;
+  font-size: 13px;
+}
+
+@keyframes ai-diff-pulse {
+  0% {
+    background: rgba(215, 170, 79, 0.42);
+  }
+  100% {
+    background: rgba(215, 170, 79, 0.18);
+  }
+}
+
+@keyframes vibe-breathe {
+  0%,
+  100% {
+    opacity: 0.18;
+    transform: scaleX(0.82);
+  }
+  50% {
+    opacity: 0.78;
+    transform: scaleX(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vibe-dock::after {
+    animation: none;
+  }
+}

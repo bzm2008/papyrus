@@ -1,0 +1,4 @@
+interface:
+  display_name: "Papyrus Copyediting"
+  short_description: "Final pass for grammar and clarity"
+  default_prompt: "Use this skill when Papyrus needs a final copyediting pass for grammar, terminology, repetition, and clarity."

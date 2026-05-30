@@ -1,0 +1,180 @@
+import { AnimatePresence, motion } from 'framer-motion'
+import { Settings, Sparkles } from 'lucide-react'
+import { useEffect } from 'react'
+import { useContextAutomation } from '../hooks/useContextAutomation'
+import { useProjectGuidance } from '../hooks/useProjectGuidance'
+import { fetchScallionProxyModels } from '../services/llmClient'
+import { useAppStore } from '../stores/useAppStore'
+import { BrandMark } from './BrandMark'
+import { EditorPane } from './EditorPane'
+import { FlowWorkspace } from './FlowWorkspace'
+import { LeftSidebar } from './LeftSidebar'
+import { MaintenanceConsole } from './MaintenanceConsole'
+import { ModeSwitch } from './ModeSwitch'
+import { OnboardingShowcase } from './OnboardingShowcase'
+import { RightPanel } from './RightPanel'
+import { SettingsPanel } from './SettingsPanel'
+import { StatusBar } from './StatusBar'
+
+export function AppShell() {
+  const isFirstLaunch = useAppStore((state) => state.isFirstLaunch)
+  const isEnvReady = useAppStore((state) => state.isEnvReady)
+
+  return (
+    <AnimatePresence mode="wait" initial={false}>
+      {isFirstLaunch ? (
+        <motion.div
+          key="onboarding"
+          className="h-screen"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.24 }}
+        >
+          <OnboardingShowcase />
+        </motion.div>
+      ) : !isEnvReady ? (
+        <motion.div
+          key="maintenance"
+          className="h-screen"
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+        >
+          <MaintenanceConsole />
+        </motion.div>
+      ) : (
+        <motion.div
+          key="workbench"
+          className="h-screen"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.24 }}
+        >
+          <MainWorkbench />
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+function MainWorkbench() {
+  useContextAutomation()
+  useProjectGuidance()
+
+  const columnMode = useAppStore((state) => state.columnMode)
+  const isLeftCollapsed = useAppStore((state) => state.isLeftCollapsed)
+  const mode = useAppStore((state) => state.mode)
+  const activeVibeId = useAppStore((state) => state.activeVibeId)
+  const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
+
+  useEffect(() => {
+    const store = useAppStore.getState()
+    const provider = store.providerConfigs.qwen36
+
+    void fetchScallionProxyModels(provider)
+      .then((models) => {
+        const qwen36 =
+          models.find((model) => model.id === 'qwen3.6') ||
+          models.find((model) => model.modelName === provider.modelName) ||
+          models[0]
+
+        if (qwen36?.contextWindowTokens || qwen36?.modelName) {
+          useAppStore.getState().updateProviderModelMetadata('qwen36', {
+            contextWindowTokens: qwen36.contextWindowTokens,
+            modelName: qwen36.modelName || provider.modelName,
+          })
+        }
+      })
+      .catch(() => {
+        // The app keeps the preset context window when the proxy metadata endpoint is unavailable.
+      })
+  }, [])
+
+  const isFlowMode = mode === 'flow'
+  const showLeft = columnMode === 3
+  const showRight = !isFlowMode && columnMode >= 2
+
+  return (
+    <div
+      data-vibe={activeVibeId}
+      className="papyrus-grain flex h-screen min-h-0 flex-col overflow-hidden text-[#171714]"
+    >
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#eee8dc] bg-[#fffefa] px-4">
+        <div className="flex items-center gap-3">
+          <BrandMark size="sm" />
+          <div className="leading-tight">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              Papyrus
+              <Sparkles size={13} className="text-[#d7aa4f]" />
+            </div>
+            <div className="text-xs text-[#6f7168]">全能文科生 AI 写作工作站</div>
+          </div>
+        </div>
+
+        <ModeSwitch />
+
+        <button
+          type="button"
+          title="打开模型与全局设置"
+          onClick={() => setSettingsOpen(true)}
+          className="papyrus-icon-button size-9 rounded-lg"
+        >
+          <Settings size={18} />
+        </button>
+      </header>
+
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <AnimatePresence initial={false}>
+          {showLeft ? (
+            <motion.aside
+              key="left-sidebar"
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: isLeftCollapsed ? 72 : 280, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+              className="min-h-0 shrink-0 overflow-hidden border-r border-[#eee8dc] bg-[#fffefa]"
+            >
+              <LeftSidebar />
+            </motion.aside>
+          ) : null}
+        </AnimatePresence>
+
+        <main className="min-w-0 flex-1 bg-[#fbfaf6]">
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={mode}
+              className="h-full min-h-0"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {isFlowMode ? <FlowWorkspace /> : <EditorPane />}
+            </motion.div>
+          </AnimatePresence>
+        </main>
+
+        <AnimatePresence initial={false}>
+          {showRight ? (
+            <motion.aside
+              key="right-panel"
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: 420, opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+              className="min-h-0 shrink-0 overflow-hidden border-l border-[#eee8dc] bg-[#fffefa]"
+            >
+              <RightPanel />
+            </motion.aside>
+          ) : null}
+        </AnimatePresence>
+      </div>
+
+      <StatusBar />
+      <SettingsPanel />
+    </div>
+  )
+}
