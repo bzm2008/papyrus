@@ -47,6 +47,26 @@ export type DocumentPatchOperation =
   | 'replace_document'
 export type DocumentPatchStatus = 'pending' | 'approved' | 'applied' | 'rejected'
 export type ImportedResourceType = 'txt' | 'md' | 'docx' | 'html' | 'folder' | 'unknown'
+export type StoryStrand = 'quest' | 'fire' | 'constellation'
+export type StoryEventType =
+  | 'character_state_changed'
+  | 'relationship_changed'
+  | 'world_rule_revealed'
+  | 'timeline_event'
+  | 'open_loop_created'
+  | 'open_loop_closed'
+  | 'reader_promise_created'
+  | 'artifact_obtained'
+  | 'scene_committed'
+export type StoryMemoryCategory =
+  | 'character_state'
+  | 'story_fact'
+  | 'world_rule'
+  | 'timeline'
+  | 'open_loop'
+  | 'reader_promise'
+  | 'relationship'
+export type StoryCommitStatus = 'accepted' | 'rejected'
 export type UpdateStatus =
   | 'idle'
   | 'checking'
@@ -200,10 +220,127 @@ export type DocumentPatch = {
   content: string
   title: string
   status: DocumentPatchStatus
+  chapterId?: string
+  commitIntent?: boolean
+  memoryExtractionRequired?: boolean
   targetArticleId?: string
   targetChatId?: string
   createArticle?: boolean
   createdAt: number
+}
+
+export type StoryProject = {
+  id: string
+  chatId: string
+  title: string
+  genre: string
+  targetScale: string
+  premise: string
+  protagonist: string
+  coreConflict: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type StoryContract = {
+  id: string
+  projectId: string
+  title: string
+  genre: string
+  premise: string
+  tone: string
+  rules: string[]
+  taboos: string[]
+  readerPromise: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type ChapterContract = {
+  id: string
+  projectId: string
+  chapterNumber: number
+  title: string
+  goal: string
+  requiredBeats: string[]
+  forbiddenZones: string[]
+  activeCharacters: string[]
+  endingHook: string
+  strand: StoryStrand
+  createdAt: number
+}
+
+export type ReviewContract = {
+  id: string
+  chapterId: string
+  checks: string[]
+  blockingRules: string[]
+  createdAt: number
+}
+
+export type StoryReviewIssue = {
+  id: string
+  severity: 'critical' | 'high' | 'medium' | 'low'
+  category: 'continuity' | 'setting' | 'character' | 'timeline' | 'logic' | 'ai_flavor' | 'pacing' | 'other'
+  evidence: string
+  fixHint: string
+  blocking: boolean
+}
+
+export type ChapterCommit = {
+  id: string
+  projectId: string
+  chapterId: string
+  articleId?: string
+  status: StoryCommitStatus
+  summary: string
+  wordCount: number
+  dominantStrand: StoryStrand
+  issues: StoryReviewIssue[]
+  createdAt: number
+}
+
+export type StoryEvent = {
+  id: string
+  projectId: string
+  chapterId: string
+  type: StoryEventType
+  subject: string
+  content: string
+  createdAt: number
+}
+
+export type MemoryItem = {
+  id: string
+  projectId: string
+  category: StoryMemoryCategory
+  subject: string
+  field: string
+  value: string
+  evidence: string
+  status: 'active' | 'outdated' | 'tentative'
+  sourceChapterId?: string
+  updatedAt: number
+}
+
+export type OpenLoop = {
+  id: string
+  projectId: string
+  content: string
+  plantedChapterId: string
+  targetChapterHint?: string
+  status: 'active' | 'urgent' | 'resolved'
+  urgency: number
+  updatedAt: number
+}
+
+export type ReaderPromise = {
+  id: string
+  projectId: string
+  content: string
+  sourceChapterId?: string
+  status: 'active' | 'paid_off'
+  updatedAt: number
 }
 
 export type ImportedResource = {
@@ -301,6 +438,17 @@ type AppState = TokenSnapshot & {
   authUserCode?: string
   authStatus: ScallionAuthStatus
   providerConfigs: Record<ProviderId, LlmProviderConfig>
+  storyProjects: StoryProject[]
+  activeStoryProjectId?: string
+  storyContracts: StoryContract[]
+  chapterContracts: ChapterContract[]
+  reviewContracts: ReviewContract[]
+  chapterCommits: ChapterCommit[]
+  storyEvents: StoryEvent[]
+  storyMemories: MemoryItem[]
+  openLoops: OpenLoop[]
+  readerPromises: ReaderPromise[]
+  isStoryDashboardOpen: boolean
   setMode: (mode: AppMode) => void
   setColumnMode: (columnMode: ColumnMode) => void
   toggleLeftCollapsed: () => void
@@ -375,6 +523,17 @@ type AppState = TokenSnapshot & {
   setScallionAuthStatus: (status: ScallionAuthStatus) => void
   setScallionSession: (token: string, user: ScallionUser) => void
   clearScallionSession: () => void
+  upsertStoryProject: (project: Omit<StoryProject, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }) => StoryProject
+  setActiveStoryProject: (projectId?: string) => void
+  addStoryContract: (contract: Omit<StoryContract, 'id' | 'createdAt' | 'updatedAt'>) => StoryContract
+  addChapterContract: (contract: Omit<ChapterContract, 'id' | 'createdAt'>) => ChapterContract
+  addReviewContract: (contract: Omit<ReviewContract, 'id' | 'createdAt'>) => ReviewContract
+  addChapterCommit: (commit: Omit<ChapterCommit, 'id' | 'createdAt'>) => ChapterCommit
+  addStoryEvents: (events: Array<Omit<StoryEvent, 'id' | 'createdAt'>>) => void
+  upsertStoryMemories: (memories: Array<Omit<MemoryItem, 'id' | 'updatedAt' | 'status'> & { status?: MemoryItem['status'] }>) => void
+  upsertOpenLoops: (loops: Array<Omit<OpenLoop, 'id' | 'updatedAt'>>) => void
+  upsertReaderPromises: (promises: Array<Omit<ReaderPromise, 'id' | 'updatedAt'>>) => void
+  setStoryDashboardOpen: (open: boolean) => void
   setFirstLaunchComplete: () => void
   setEnvReady: (ready: boolean) => void
   setMaintenanceTab: (tab: MaintenanceTab) => void
@@ -509,6 +668,17 @@ export const useAppStore = create<AppState>()(
       authUserCode: undefined,
       authStatus: 'idle',
       providerConfigs: defaultProviderConfigs,
+      storyProjects: [],
+      activeStoryProjectId: undefined,
+      storyContracts: [],
+      chapterContracts: [],
+      reviewContracts: [],
+      chapterCommits: [],
+      storyEvents: [],
+      storyMemories: [],
+      openLoops: [],
+      readerPromises: [],
+      isStoryDashboardOpen: false,
       ...calculateTokenSnapshot(initialEditorText, initialFlowMessages, ''),
       setMode: (mode) => set({ mode }),
       setColumnMode: (columnMode) => set({ columnMode }),
@@ -1377,6 +1547,147 @@ export const useAppStore = create<AppState>()(
           authUserCode: undefined,
           authStatus: 'idle',
         }),
+      upsertStoryProject: (input) => {
+        const now = Date.now()
+        const existing = get().storyProjects.find((item) => item.id === input.id)
+        const project: StoryProject = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `story-project-${now}`,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        }
+
+        set((state) => ({
+          activeStoryProjectId: project.id,
+          storyProjects: [
+            project,
+            ...state.storyProjects.filter((item) => item.id !== project.id),
+          ].slice(0, 40),
+        }))
+
+        return project
+      },
+      setActiveStoryProject: (activeStoryProjectId) => set({ activeStoryProjectId }),
+      addStoryContract: (input) => {
+        const now = Date.now()
+        const contract: StoryContract = {
+          ...input,
+          id: globalThis.crypto?.randomUUID?.() ?? `story-contract-${now}`,
+          createdAt: now,
+          updatedAt: now,
+        }
+
+        set((state) => ({
+          storyContracts: [
+            contract,
+            ...state.storyContracts.filter((item) => item.projectId !== contract.projectId),
+          ].slice(0, 80),
+        }))
+
+        return contract
+      },
+      addChapterContract: (input) => {
+        const now = Date.now()
+        const contract: ChapterContract = {
+          ...input,
+          id: globalThis.crypto?.randomUUID?.() ?? `chapter-contract-${now}`,
+          createdAt: now,
+        }
+
+        set((state) => ({
+          chapterContracts: [contract, ...state.chapterContracts].slice(0, 240),
+        }))
+
+        return contract
+      },
+      addReviewContract: (input) => {
+        const now = Date.now()
+        const contract: ReviewContract = {
+          ...input,
+          id: globalThis.crypto?.randomUUID?.() ?? `review-contract-${now}`,
+          createdAt: now,
+        }
+
+        set((state) => ({
+          reviewContracts: [contract, ...state.reviewContracts].slice(0, 240),
+        }))
+
+        return contract
+      },
+      addChapterCommit: (input) => {
+        const now = Date.now()
+        const commit: ChapterCommit = {
+          ...input,
+          id: globalThis.crypto?.randomUUID?.() ?? `chapter-commit-${now}`,
+          createdAt: now,
+        }
+
+        set((state) => ({
+          chapterCommits: [commit, ...state.chapterCommits].slice(0, 240),
+        }))
+
+        return commit
+      },
+      addStoryEvents: (events) =>
+        set((state) => {
+          const now = Date.now()
+          const next = events.map((event, index) => ({
+            ...event,
+            id: globalThis.crypto?.randomUUID?.() ?? `story-event-${now}-${index}`,
+            createdAt: now,
+          }))
+
+          return { storyEvents: [...next, ...state.storyEvents].slice(0, 800) }
+        }),
+      upsertStoryMemories: (memories) =>
+        set((state) => {
+          const now = Date.now()
+          const keyed = new Map(
+            state.storyMemories.map((item) => [
+              `${item.projectId}:${item.category}:${item.subject}:${item.field}`,
+              item,
+            ]),
+          )
+
+          for (const memory of memories) {
+            const key = `${memory.projectId}:${memory.category}:${memory.subject}:${memory.field}`
+            keyed.set(key, {
+              ...memory,
+              id: keyed.get(key)?.id ?? globalThis.crypto?.randomUUID?.() ?? `memory-${now}`,
+              status: memory.status ?? 'active',
+              updatedAt: now,
+            })
+          }
+
+          return {
+            storyMemories: [...keyed.values()]
+              .sort((a, b) => b.updatedAt - a.updatedAt)
+              .slice(0, 800),
+          }
+        }),
+      upsertOpenLoops: (loops) =>
+        set((state) => {
+          const now = Date.now()
+          const next = loops.map((loop, index) => ({
+            ...loop,
+            id: globalThis.crypto?.randomUUID?.() ?? `open-loop-${now}-${index}`,
+            updatedAt: now,
+          }))
+
+          return { openLoops: [...next, ...state.openLoops].slice(0, 300) }
+        }),
+      upsertReaderPromises: (promises) =>
+        set((state) => {
+          const now = Date.now()
+          const next = promises.map((promise, index) => ({
+            ...promise,
+            id: globalThis.crypto?.randomUUID?.() ?? `reader-promise-${now}-${index}`,
+            updatedAt: now,
+          }))
+
+          return { readerPromises: [...next, ...state.readerPromises].slice(0, 300) }
+        }),
+      setStoryDashboardOpen: (isStoryDashboardOpen) => set({ isStoryDashboardOpen }),
       setFirstLaunchComplete: () => set({ isFirstLaunch: false, isEnvReady: false }),
       setEnvReady: (isEnvReady) => set({ isEnvReady }),
       setMaintenanceTab: (maintenanceTab) => set({ maintenanceTab }),
@@ -1441,6 +1752,16 @@ export const useAppStore = create<AppState>()(
         scallionToken: state.scallionToken,
         authStatus: state.authStatus,
         providerConfigs: state.providerConfigs,
+        storyProjects: state.storyProjects,
+        activeStoryProjectId: state.activeStoryProjectId,
+        storyContracts: state.storyContracts,
+        chapterContracts: state.chapterContracts,
+        reviewContracts: state.reviewContracts,
+        chapterCommits: state.chapterCommits,
+        storyEvents: state.storyEvents,
+        storyMemories: state.storyMemories,
+        openLoops: state.openLoops,
+        readerPromises: state.readerPromises,
       }),
       merge: (persisted, current) => {
         const persistedState = persisted as Partial<AppState>
@@ -1504,6 +1825,17 @@ export const useAppStore = create<AppState>()(
           updateProgress: 0,
           authStatus: (persistedState.scallionToken ? 'approved' : 'idle') as ScallionAuthStatus,
           providerConfigs,
+          storyProjects: persistedState.storyProjects ?? current.storyProjects,
+          activeStoryProjectId: persistedState.activeStoryProjectId ?? current.activeStoryProjectId,
+          storyContracts: persistedState.storyContracts ?? current.storyContracts,
+          chapterContracts: persistedState.chapterContracts ?? current.chapterContracts,
+          reviewContracts: persistedState.reviewContracts ?? current.reviewContracts,
+          chapterCommits: persistedState.chapterCommits ?? current.chapterCommits,
+          storyEvents: persistedState.storyEvents ?? current.storyEvents,
+          storyMemories: persistedState.storyMemories ?? current.storyMemories,
+          openLoops: persistedState.openLoops ?? current.openLoops,
+          readerPromises: persistedState.readerPromises ?? current.readerPromises,
+          isStoryDashboardOpen: false,
           contextLimitTokens,
           effectiveContextLimitTokens: contextLimitTokens,
           modelContextSource: getModelContextSource(provider),

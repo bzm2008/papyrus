@@ -15,6 +15,14 @@ import {
   type ChatMessage,
 } from './llmClient'
 import { retrieveMentionContext } from './projectContext'
+import {
+  buildOrUpdateStoryProject,
+  commitChapter,
+  createChapterBrief,
+  reviewDraft,
+  shouldUseStoryPipeline,
+  type StoryBrief,
+} from './storyEngine'
 import { searchWeb } from './webSearchService'
 import {
   type AgentTodo,
@@ -281,6 +289,9 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
 export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promise<AgentRunResult> {
   useAppStore.getState().setAgentTodos(createTodos(prompt, plan))
   const subAgentStepIds = new Map<FlowAgentId, string>()
+  const storyBrief = shouldUseStoryPipeline(prompt, plan.writeIntent)
+    ? runStoryPreparation(prompt)
+    : undefined
 
   useAppStore
     .getState()
@@ -347,12 +358,17 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
       content: visibleText || '主笔开始整合结果…',
     })
   }
-  let writerText = await runWriter(prompt, plan, outputs, sources, updateStream)
+  let writerText = await runWriter(prompt, plan, outputs, sources, updateStream, storyBrief)
   let patchContent = plan.writeIntent ? extractDraftText(writerText) : undefined
 
   if (plan.writeIntent && isInsufficientDraft(patchContent, prompt)) {
     writerText = await repairDraft(prompt, plan, outputs, sources, writerText, updateStream)
     patchContent = extractDraftText(writerText)
+  }
+
+  if (storyBrief && patchContent) {
+    const reviewed = await runStoryReviewAndCommit(prompt, storyBrief, patchContent)
+    patchContent = reviewed.patchContent
   }
 
   const response = plan.writeIntent ? stripDraftSection(writerText) : writerText
@@ -370,6 +386,125 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
     sources,
     streamedMessageId: assistantMessage.id,
   }
+}
+
+function runStoryPreparation(prompt: string) {
+  const prep = useAppStore.getState().addAgentStep({
+    type: 'plan',
+    title: '建立作品合同',
+    status: 'running',
+    details: '识别题材、作品目标、章节合同和审查闸门。',
+    isExpanded: true,
+    agentId: 'archivist',
+  })
+  const { project, genre } = buildOrUpdateStoryProject(prompt)
+  const brief = createChapterBrief(prompt, project, genre)
+
+  useAppStore.getState().updateAgentStep(prep.id, {
+    status: 'completed',
+    details: [
+      `作品: ${project.title}`,
+      `题材: ${project.genre}`,
+      `章节: 第${brief.chapter.chapterNumber}章《${brief.chapter.title}》`,
+      `任务书:\n${brief.briefText}`,
+    ].join('\n'),
+    endedAt: Date.now(),
+  })
+
+  return brief
+}
+
+async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchContent: string) {
+  const reviewStep = useAppStore.getState().addAgentStep({
+    type: 'sub_agent',
+    title: '审查闸门: 多维 Reviewer',
+    status: 'running',
+    details: '检查设定、时间线、角色、逻辑、AI 味和节奏。',
+    isExpanded: true,
+    agentId: 'critic',
+  })
+  let issues = reviewDraft(patchContent, brief)
+
+  useAppStore.getState().updateAgentStep(reviewStep.id, {
+    status: 'completed',
+    details: issues.length
+      ? issues.map((item) => `${item.blocking ? '[阻断]' : '[建议]'} ${item.evidence} -> ${item.fixHint}`).join('\n')
+      : '未发现阻断问题，可以进入提交链。',
+    endedAt: Date.now(),
+  })
+
+  if (issues.some((item) => item.blocking)) {
+    const repairStep = useAppStore.getState().addAgentStep({
+      type: 'generation',
+      title: '二稿修复',
+      status: 'running',
+      details: '初稿未过闸门，主笔根据审查结果补写二稿。',
+      isExpanded: true,
+      agentId: 'writer',
+    })
+    const store = useAppStore.getState()
+    const provider = store.providerConfigs[store.activeProviderId]
+
+    if (canCallProvider(provider)) {
+      const fixed = await callOpenAICompatible(provider, [
+        {
+          role: 'system',
+          content:
+            '你是 Papyrus 主笔。请根据章节任务书和审查问题，直接输出修复后的正文，不要解释过程。',
+        },
+        {
+          role: 'user',
+          content: [
+            `用户请求:\n${prompt}`,
+            `章节任务书:\n${brief.briefText}`,
+            `审查问题:\n${issues.map((item) => `${item.evidence}: ${item.fixHint}`).join('\n')}`,
+            `初稿:\n${patchContent}`,
+          ].join('\n\n'),
+        },
+      ])
+      patchContent = fixed.trim() || patchContent
+      issues = reviewDraft(patchContent, brief)
+      useAppStore.getState().updateAgentStep(repairStep.id, {
+        status: 'completed',
+        content: patchContent.slice(0, 1200),
+        details: issues.some((item) => item.blocking)
+          ? '二稿仍有阻断问题，将保留为 rejected commit，不写入长期事实。'
+          : '二稿已通过阻断闸门。',
+        endedAt: Date.now(),
+      })
+    } else {
+      useAppStore.getState().updateAgentStep(repairStep.id, {
+        status: 'completed',
+        details: '当前模型不可用，保留原稿并记录 rejected commit。',
+        endedAt: Date.now(),
+      })
+    }
+  }
+
+  const commitStep = useAppStore.getState().addAgentStep({
+    type: 'tool',
+    title: '章节提交与记忆投影',
+    status: 'running',
+    details: '抽取事件、人物状态、伏笔和摘要；accepted 后写入长期记忆。',
+    isExpanded: true,
+    agentId: 'archivist',
+    toolName: 'chapter_commit',
+  })
+  const commit = commitChapter(patchContent, brief, issues)
+
+  useAppStore.getState().updateAgentStep(commitStep.id, {
+    status: 'completed',
+    details: [
+      `提交状态: ${commit.status}`,
+      `字数: ${commit.wordCount}`,
+      `节奏线: ${commit.dominantStrand}`,
+      `摘要: ${commit.summary}`,
+      commit.status === 'rejected' ? '阻断问题未写入长期事实。' : '事件、伏笔和摘要已进入作品记忆。',
+    ].join('\n'),
+    endedAt: Date.now(),
+  })
+
+  return { patchContent, commit }
 }
 
 function createTodos(
@@ -600,6 +735,7 @@ async function runWriter(
   outputs: AgentOutput[],
   sources?: FlowTrace['sources'],
   onText?: (text: string) => void,
+  storyBrief?: StoryBrief,
 ) {
   const store = useAppStore.getState()
   const provider = store.providerConfigs[store.activeProviderId]
@@ -642,6 +778,7 @@ async function runWriter(
               ? `@ 提及对象：\n${await retrieveMentionContext(store.mentionContextItems)}`
               : '',
             contextResources(store.resources),
+            storyBrief ? `Story Contract / 写作任务书:\n${storyBrief.briefText}` : '',
             sources?.length ? `联网来源：\n${formatSources(sources)}` : '',
             outputs.length
               ? `子 Agent 结论：\n${outputs

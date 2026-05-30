@@ -15,6 +15,7 @@ import { OnboardingShowcase } from './OnboardingShowcase'
 import { RightPanel } from './RightPanel'
 import { SettingsPanel } from './SettingsPanel'
 import { StatusBar } from './StatusBar'
+import { StoryDashboard } from './StoryDashboard'
 
 export function AppShell() {
   const isFirstLaunch = useAppStore((state) => state.isFirstLaunch)
@@ -175,6 +176,7 @@ function MainWorkbench() {
 
       <StatusBar />
       <SettingsPanel />
+      <StoryDashboard />
     </div>
   )
 }

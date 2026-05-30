@@ -2,8 +2,8 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   FilePlus2,
   FileText,
-  FolderOpen,
   FolderPlus,
+  Gauge,
   MessageSquare,
   Pencil,
   Pin,
@@ -12,21 +12,17 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { importResourceFiles, openProjectFolder } from '../services/resourceImportService'
-import {
-  useAppStore,
-  type ArticleRecord,
-  type ChatSession,
-  type ImportedResource,
-} from '../stores/useAppStore'
+import { useAppStore, type ArticleRecord, type ChatSession } from '../stores/useAppStore'
 
 export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean }) {
   const articles = useAppStore((state) => state.articles)
   const activeArticleId = useAppStore((state) => state.activeArticleId)
-  const resources = useAppStore((state) => state.resources)
   const chatSessions = useAppStore((state) => state.chatSessions)
   const activeChatId = useAppStore((state) => state.activeChatId)
+  const resources = useAppStore((state) => state.resources)
   const switchChatSession = useAppStore((state) => state.switchChatSession)
   const renameChatSession = useAppStore((state) => state.renameChatSession)
   const deleteChatSession = useAppStore((state) => state.deleteChatSession)
@@ -37,6 +33,7 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
   const renameArticle = useAppStore((state) => state.renameArticle)
   const deleteArticle = useAppStore((state) => state.deleteArticle)
   const toggleArticlePinned = useAppStore((state) => state.toggleArticlePinned)
+  const setStoryDashboardOpen = useAppStore((state) => state.setStoryDashboardOpen)
   const sortedChats = sortPinned(chatSessions)
 
   return (
@@ -45,8 +42,9 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
         <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-[#e8ddc7] p-3">
           <SmallAction icon={Plus} label="新建对话" primary onClick={newChatSession} />
           <SmallAction icon={FilePlus2} label="新建文章" onClick={() => newArticleInChat()} />
-          <SmallAction icon={FolderPlus} label="文件夹" onClick={() => void openProjectFolder()} />
-          <SmallAction icon={Upload} label="导入" onClick={() => void importResourceFiles()} />
+          <SmallAction icon={Gauge} label="作品体检" onClick={() => setStoryDashboardOpen(true)} />
+          <SmallAction icon={Upload} label="导入文件" onClick={() => void importResourceFiles()} />
+          <SmallAction icon={FolderPlus} label="打开文件夹" onClick={() => void openProjectFolder()} />
         </div>
       ) : null}
 
@@ -75,9 +73,7 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
                     if (title) renameChatSession(chat.id, title)
                   }}
                   onDelete={() => {
-                    if (window.confirm(`删除对话「${chat.title}」？`)) {
-                      deleteChatSession(chat.id)
-                    }
+                    if (window.confirm(`删除对话「${chat.title}」？`)) deleteChatSession(chat.id)
                   }}
                   onTogglePin={() => toggleChatPinned(chat.id)}
                   onRenameArticle={(article) => {
@@ -102,7 +98,26 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
           {resources.length ? (
             <AnimatedList>
               {resources.map((resource) => (
-                <ResourceItem key={resource.id} resource={resource} collapsed={collapsed} />
+                <motion.article
+                  key={resource.id}
+                  layout
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, x: -12 }}
+                  className="rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-2"
+                >
+                  <div className="flex items-start gap-2">
+                    <FileText size={16} className="mt-0.5 shrink-0 text-[#6f7f68]" />
+                    {!collapsed ? (
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-[#2f2b22]">{resource.name}</div>
+                        <div className="mt-0.5 truncate text-xs text-[#8f897a]">
+                          {resource.type.toUpperCase()} · {resource.tokenCount.toLocaleString()} tokens
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </motion.article>
               ))}
             </AnimatedList>
           ) : (
@@ -120,7 +135,7 @@ function SmallAction({
   primary = false,
   onClick,
 }: {
-  icon: typeof Plus
+  icon: LucideIcon
   label: string
   primary?: boolean
   onClick: () => void
@@ -130,27 +145,19 @@ function SmallAction({
       type="button"
       title={label}
       onClick={onClick}
-      className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-medium transition ${
+      className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-medium transition ${
         primary
           ? 'bg-[#171714] text-[#fffefa] hover:bg-[#3f5845]'
           : 'border border-[#e8ddc7] bg-[#fffefa] text-[#6f7168] hover:text-[#171714]'
       }`}
     >
       <Icon size={14} />
-      {label}
+      {!label.includes('打开') ? label : <span className="hidden xl:inline">{label}</span>}
     </button>
   )
 }
 
-function NavigatorSection({
-  title,
-  collapsed,
-  children,
-}: {
-  title: string
-  collapsed: boolean
-  children: ReactNode
-}) {
+function NavigatorSection({ title, collapsed, children }: { title: string; collapsed: boolean; children: ReactNode }) {
   return (
     <section>
       {!collapsed ? <div className="mb-2 text-xs font-medium uppercase text-[#9d988a]">{title}</div> : null}
@@ -286,32 +293,6 @@ function ArticleRow({
   )
 }
 
-function ResourceItem({ resource, collapsed }: { resource: ImportedResource; collapsed: boolean }) {
-  const Icon = resource.type === 'folder' ? FolderOpen : FileText
-
-  return (
-    <motion.article
-      layout
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, x: -12 }}
-      className="rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-2"
-    >
-      <div className="flex items-start gap-2">
-        <Icon size={16} className="mt-0.5 shrink-0 text-[#6f7f68]" />
-        {!collapsed ? (
-          <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium text-[#2f2b22]">{resource.name}</div>
-            <div className="mt-0.5 truncate text-xs text-[#8f897a]">
-              {resource.type.toUpperCase()} · {resource.tokenCount.toLocaleString()} tokens
-            </div>
-          </div>
-        ) : null}
-      </div>
-    </motion.article>
-  )
-}
-
 function ItemActions({
   active,
   pinned,
@@ -342,7 +323,7 @@ function MiniAction({
   onClick,
   className = 'text-[#d6d0c4] hover:bg-white/10',
 }: {
-  icon: typeof Pencil
+  icon: LucideIcon
   title: string
   onClick: () => void
   className?: string
@@ -360,7 +341,7 @@ function EmptyRow({
   text,
 }: {
   collapsed: boolean
-  icon: typeof FilePlus2
+  icon: LucideIcon
   text: string
 }) {
   return (

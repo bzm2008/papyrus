@@ -19,6 +19,7 @@ src-tauri/target
 
 # Tauri updater signing private keys
 src-tauri/keys/*.key
+src-tauri/keys/*.key.*
 
 # Editor directories and files
 .vscode/*

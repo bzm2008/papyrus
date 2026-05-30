@@ -57,6 +57,9 @@ export function FlowWorkspace() {
   }
 
   const pickCommand = (command: SlashCommand) => {
+    if (command.id === 'story-health') {
+      useAppStore.getState().setStoryDashboardOpen(true)
+    }
     setPrompt((value) => applySlashCommand(value, command))
   }
 

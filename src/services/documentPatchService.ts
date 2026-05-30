@@ -5,6 +5,9 @@ type CreatePatchInput = {
   operation: DocumentPatchOperation
   title: string
   content: string
+  chapterId?: string
+  commitIntent?: boolean
+  memoryExtractionRequired?: boolean
   targetArticleId?: string
   targetChatId?: string
   createArticle?: boolean
@@ -24,6 +27,9 @@ export function queueDocumentPatch(input: CreatePatchInput) {
       operation: input.operation,
       title: input.title,
       content,
+      chapterId: input.chapterId,
+      commitIntent: input.commitIntent,
+      memoryExtractionRequired: input.memoryExtractionRequired,
       targetArticleId: input.targetArticleId,
       targetChatId: input.targetChatId,
       createArticle: input.createArticle,
