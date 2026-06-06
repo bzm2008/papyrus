@@ -28,17 +28,17 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     id: 'literary-drafting',
     name: '文学正文起草',
     shortName: '正文起草',
-    trigger: '续写、改写、扩写、生成正文、把想法落成段落时使用。',
+    trigger: '续写、扩写、改写、生成正文、把想法落成段落时使用。',
     agents: ['writer', 'stylist', 'dramatist'],
-    keywords: /正文|成稿|写一段|续写|扩写|改写|落笔|写入|插入|段落|章节/,
+    keywords: /正文|成稿|写一段|续写|扩写|改写|落笔|写入|插入|段落|章节|作文|文章/,
     instructions: [
-      '先判断写作意图：叙事、论证、抒情、说明、人物塑造、场景推进或章节衔接。',
+      '先判断写作意图：叙事、说明、论证、抒情、人物塑造、场景推进或章节衔接。',
       '正文必须具体，有动作、感官细节、判断推进或可验证材料，不用抽象概念堆叠。',
-      '保持作者原声，不把文稿改成营销腔、网文套路腔或过度华丽的展示性辞藻。',
-      '需要写入文稿时，把可写入内容放在“正文：”之后，便于 DocumentPatch 提取。',
+      '保留作者原声，不把文稿改成营销腔、套路网文腔或过度华丽的展示性辞藻。',
+      '需要写入文稿时，把可写入内容放在“正文:”之后，便于文稿补丁提取。',
     ],
     outputRules: [
-      '若用户要求可写入正文，输出必须包含“正文：”。',
+      '若用户要求写入正文，输出必须包含“正文:”。',
       '不要解释自己是 AI，不要用“以下是”开场。',
     ],
   },
@@ -46,13 +46,13 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     id: 'structure-room',
     name: '结构诊断室',
     shortName: '结构诊断',
-    trigger: '处理大纲、章节节奏、场景推进、人物行动线、叙事张力或结构修复时使用。',
+    trigger: '处理大纲、章节节奏、场景推进、人物行动线、叙事张力或文章结构修复时使用。',
     agents: ['writer', 'dramatist', 'critic'],
-    keywords: /结构|大纲|章节|节奏|场景|叙事|张力|行动线|转折|铺垫|高潮|承接/,
+    keywords: /结构|大纲|章节|节奏|场景|叙事|张力|行动线|转折|铺垫|高潮|承接|开头|结尾/,
     instructions: [
       '把文本拆成目标、阻力、转折、后果四个结构单元。',
-      '检查每段是否推动情节、推进论证或改变读者认知；无推进的段落要标记。',
-      '给出可执行的章节或场景顺序，不只给抽象建议。',
+      '检查每段是否推动情节、推进论证或改变读者认知；无推进的段落要标出。',
+      '给出可执行的章节、场景或段落顺序，不只给抽象建议。',
       '优先修复因果链、视角位置、信息释放顺序和段落承接。',
     ],
     outputRules: [
@@ -66,10 +66,10 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     shortName: '检索反证',
     trigger: '涉及事实、来源、资料、联网搜索、反例、漏洞、审查、论证风险时使用。',
     agents: ['researcher', 'critic', 'archivist'],
-    keywords: /搜索|联网|资料|来源|事实|引用|查证|核验|反例|漏洞|审查|论证|风险|批判/,
+    keywords: /搜索|联网|资料|来源|事实|引用|查证|核验|反例|漏洞|审查|论证|风险|批判|最新|背景/,
     instructions: [
       '先区分事实、推断、创作设定和作者判断，不把推断伪装成事实。',
-      '需要外部资料时调用 web_search；刺客优先搜索反例、批评、争议和边界案例。',
+      '需要外部资料时调用搜索；批判任务优先寻找反例、争议、边界案例和反方论据。',
       '来源链必须保留标题、链接和摘要；无法确认的内容明确标为“待核实”。',
       '审查时指出问题位置、为什么有问题、如何改，而不只给评价词。',
     ],
@@ -84,7 +84,7 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     shortName: '文风连续',
     trigger: '涉及 STYLE.md、文风、语气、作者原声、节奏、句法、降噪或长期一致性时使用。',
     agents: ['writer', 'stylist', 'proofreader'],
-    keywords: /文风|风格|语气|作者原声|节奏|句法|STYLE|降噪|AIGC|润色|统一/,
+    keywords: /文风|风格|语气|作者原声|节奏|句法|STYLE|降噪|AIGC|润色|统一|像我/,
     instructions: [
       '把 STYLE.md 和负向记忆视为高优先级约束。',
       '识别作者常用句长、转折方式、意象密度和抽象/具体比例。',
@@ -102,7 +102,7 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     shortName: '终校',
     trigger: '涉及错别字、病句、术语一致性、重复表达、标点和最终清稿时使用。',
     agents: ['proofreader', 'stylist'],
-    keywords: /校对|错别字|病句|纠错|标点|术语|重复|清稿|终校|一致性/,
+    keywords: /校对|错别字|病句|纠错|标点|术语|重复|清稿|终校|一致性|语病/,
     instructions: [
       '先做低风险修正：错别字、标点、重复词、搭配不当。',
       '再做中风险修正：病句、指代不清、术语前后不一致。',
@@ -120,7 +120,7 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     shortName: '档案记忆',
     trigger: '涉及资源树、人物卡、设定卡、摘要、导入资料、上下文压缩或长期记忆时使用。',
     agents: ['archivist', 'researcher'],
-    keywords: /资源|文件|导入|设定|世界观|人物卡|记忆|摘要|档案|上下文|压缩|入库/,
+    keywords: /资源|文件|导入|设定|世界观|人物卡|记忆|摘要|档案|上下文|压缩|入库|#file/,
     instructions: [
       '把导入资源整理为人物、地点、事件、术语、时间线和待核实事实。',
       '摘要要保留可复用约束，不保留临时寒暄。',
@@ -136,9 +136,9 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     id: 'humanities-argument',
     name: '文科论证锻造',
     shortName: '论证锻造',
-    trigger: '写论文、评论、随笔、批评文章、观点段落、材料分析和概念辨析时使用。',
+    trigger: '写议论文、评论、随笔、批评文章、观点段落、材料分析和概念辨析时使用。',
     agents: ['writer', 'critic', 'researcher'],
-    keywords: /论文|评论|观点|论证|概念|辨析|材料分析|命题|反驳|立论|随笔|批评/,
+    keywords: /议论文|评论|观点|论证|概念|辨析|材料分析|命题|反驳|立论|随笔|批评|作文/,
     instructions: [
       '把核心判断压缩成一句可争辩命题，而不是主题词。',
       '为每个判断匹配材料、解释路径、反驳对象和限制条件。',
@@ -160,7 +160,7 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
     instructions: [
       '先确认人物的欲望、恐惧、遮掩方式、社会位置和说话禁忌。',
       '对白必须让人物试图达成某个目的，而不是解释设定。',
-      '人物语言用词、句长、停顿和回避方式要稳定。',
+      '人物语言的用词、句长、停顿和回避方式要稳定。',
       '发现 OOC 时指出偏离哪条人设约束，并给出替代写法。',
     ],
     outputRules: [
@@ -222,32 +222,57 @@ export const agentSkillAssignments: Record<FlowAgentId, AgentSkillId[]> = {
   archivist: ['archival-memory', 'research-and-critique', 'character-voice'],
 }
 
+export function searchAgentSkills(query: string, limit = 8) {
+  const normalized = query.trim().toLowerCase()
+
+  return Object.values(agentSkills)
+    .filter((skill) => {
+      if (!normalized) {
+        return true
+      }
+
+      return `${skill.name} ${skill.shortName} ${skill.trigger} ${skill.id}`
+        .toLowerCase()
+        .includes(normalized)
+    })
+    .slice(0, limit)
+}
+
+export function findMentionedSkills(prompt: string) {
+  return Object.values(agentSkills).filter((skill) =>
+    new RegExp(`@\\s*${escapeRegExp(skill.name)}|@\\s*${escapeRegExp(skill.shortName)}`).test(
+      prompt,
+    ),
+  )
+}
+
 export function inferSkillsForPrompt(prompt: string, agentId?: FlowAgentId) {
   const baseIds = agentId ? agentSkillAssignments[agentId] : []
+  const explicitIds = findMentionedSkills(prompt).map((skill) => skill.id)
   const matchedIds = Object.values(agentSkills)
     .filter((skill) => skill.keywords.test(prompt))
     .map((skill) => skill.id)
-  const ids = [...new Set([...matchedIds, ...baseIds.slice(0, 2)])]
+  const ids = [...new Set([...explicitIds, ...matchedIds, ...baseIds.slice(0, 2)])]
 
   return ids.map((id) => agentSkills[id])
 }
 
 export function composeSkillPrompt(agentId: FlowAgentId, prompt = '') {
-  const skills = inferSkillsForPrompt(prompt, agentId).slice(0, 4)
+  const skills = inferSkillsForPrompt(prompt, agentId).slice(0, 5)
 
   if (!skills.length) {
     return ''
   }
 
   return [
-    '本轮可用专业 Skill。只在相关时使用，使用后要让输出呈现该 Skill 的约束，而不是解释 Skill 名称。',
+    '本轮可用专业 Skill。若用户显式输入 @skill，必须优先遵守该技能；否则只在相关时使用。输出要体现技能约束，不要解释技能名称。',
     ...skills.map((skill) =>
       [
         `Skill: ${skill.name}`,
-        `触发：${skill.trigger}`,
-        '执行规则：',
+        `触发: ${skill.trigger}`,
+        '执行规则:',
         ...skill.instructions.map((instruction) => `- ${instruction}`),
-        '输出规则：',
+        '输出规则:',
         ...skill.outputRules.map((rule) => `- ${rule}`),
       ].join('\n'),
     ),
@@ -261,4 +286,8 @@ export function formatSkillTrace(prompt: string, agentId?: FlowAgentId) {
     names: skills.map((skill) => skill.shortName),
     detail: skills.map((skill) => `${skill.shortName}: ${skill.trigger}`).join('\n'),
   }
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

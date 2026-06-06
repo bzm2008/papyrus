@@ -77,6 +77,16 @@ export type UpdateStatus =
   | 'unavailable'
   | 'error'
 
+export type RemoteRelayPlatform =
+  | 'clawbot'
+  | 'feishu'
+  | 'wecom'
+  | 'qq'
+  | 'wechat'
+  | 'custom'
+export type RemoteRelayMode = 'companion' | 'flow'
+export type RemoteRelayStatus = 'idle' | 'connecting' | 'online' | 'error'
+
 export type ScallionAuthStatus =
   | 'idle'
   | 'starting'
@@ -356,7 +366,7 @@ export type ImportedResource = {
 
 export type MentionContextItem = {
   id: string
-  type: 'chapter' | 'character' | 'world'
+  type: 'chapter' | 'character' | 'world' | 'file' | 'skill'
   label: string
   excerpt: string
 }
@@ -437,6 +447,16 @@ type AppState = TokenSnapshot & {
   authDeviceCode?: string
   authUserCode?: string
   authStatus: ScallionAuthStatus
+  remoteRelayEnabled: boolean
+  remoteRelayEndpoint: string
+  remoteRelayChannelId?: string
+  remoteRelayAccessKey?: string
+  remoteRelayAllowedPlatforms: RemoteRelayPlatform[]
+  remoteRelayDefaultMode: RemoteRelayMode
+  remoteRelayPollIntervalSeconds: number
+  remoteRelayStatus: RemoteRelayStatus
+  remoteRelayMessage: string
+  remoteRelayLastJobAt?: number
   providerConfigs: Record<ProviderId, LlmProviderConfig>
   storyProjects: StoryProject[]
   activeStoryProjectId?: string
@@ -523,6 +543,20 @@ type AppState = TokenSnapshot & {
   setScallionAuthStatus: (status: ScallionAuthStatus) => void
   setScallionSession: (token: string, user: ScallionUser) => void
   clearScallionSession: () => void
+  setRemoteRelayConfig: (patch: {
+    enabled?: boolean
+    endpoint?: string
+    channelId?: string
+    accessKey?: string
+    allowedPlatforms?: RemoteRelayPlatform[]
+    defaultMode?: RemoteRelayMode
+    pollIntervalSeconds?: number
+  }) => void
+  setRemoteRelayState: (patch: {
+    status?: RemoteRelayStatus
+    message?: string
+    lastJobAt?: number
+  }) => void
   upsertStoryProject: (project: Omit<StoryProject, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }) => StoryProject
   setActiveStoryProject: (projectId?: string) => void
   addStoryContract: (contract: Omit<StoryContract, 'id' | 'createdAt' | 'updatedAt'>) => StoryContract
@@ -667,6 +701,16 @@ export const useAppStore = create<AppState>()(
       authDeviceCode: undefined,
       authUserCode: undefined,
       authStatus: 'idle',
+      remoteRelayEnabled: false,
+      remoteRelayEndpoint: 'https://scallion.uno/api/papyrus/remote',
+      remoteRelayChannelId: undefined,
+      remoteRelayAccessKey: undefined,
+      remoteRelayAllowedPlatforms: ['clawbot', 'feishu', 'wecom', 'qq', 'wechat', 'custom'],
+      remoteRelayDefaultMode: 'companion',
+      remoteRelayPollIntervalSeconds: 12,
+      remoteRelayStatus: 'idle',
+      remoteRelayMessage: '远程中继未启用',
+      remoteRelayLastJobAt: undefined,
       providerConfigs: defaultProviderConfigs,
       storyProjects: [],
       activeStoryProjectId: undefined,
@@ -1547,6 +1591,26 @@ export const useAppStore = create<AppState>()(
           authUserCode: undefined,
           authStatus: 'idle',
         }),
+      setRemoteRelayConfig: (patch) =>
+        set((state) => ({
+          remoteRelayEnabled: patch.enabled ?? state.remoteRelayEnabled,
+          remoteRelayEndpoint: patch.endpoint ?? state.remoteRelayEndpoint,
+          remoteRelayChannelId: patch.channelId ?? state.remoteRelayChannelId,
+          remoteRelayAccessKey: patch.accessKey ?? state.remoteRelayAccessKey,
+          remoteRelayAllowedPlatforms:
+            patch.allowedPlatforms ?? state.remoteRelayAllowedPlatforms,
+          remoteRelayDefaultMode: patch.defaultMode ?? state.remoteRelayDefaultMode,
+          remoteRelayPollIntervalSeconds: Math.max(
+            8,
+            Math.min(120, Math.round(patch.pollIntervalSeconds ?? state.remoteRelayPollIntervalSeconds)),
+          ),
+        })),
+      setRemoteRelayState: (patch) =>
+        set((state) => ({
+          remoteRelayStatus: patch.status ?? state.remoteRelayStatus,
+          remoteRelayMessage: patch.message ?? state.remoteRelayMessage,
+          remoteRelayLastJobAt: patch.lastJobAt ?? state.remoteRelayLastJobAt,
+        })),
       upsertStoryProject: (input) => {
         const now = Date.now()
         const existing = get().storyProjects.find((item) => item.id === input.id)
@@ -1751,6 +1815,13 @@ export const useAppStore = create<AppState>()(
         scallionUser: state.scallionUser,
         scallionToken: state.scallionToken,
         authStatus: state.authStatus,
+        remoteRelayEnabled: state.remoteRelayEnabled,
+        remoteRelayEndpoint: state.remoteRelayEndpoint,
+        remoteRelayChannelId: state.remoteRelayChannelId,
+        remoteRelayAccessKey: state.remoteRelayAccessKey,
+        remoteRelayAllowedPlatforms: state.remoteRelayAllowedPlatforms,
+        remoteRelayDefaultMode: state.remoteRelayDefaultMode,
+        remoteRelayPollIntervalSeconds: state.remoteRelayPollIntervalSeconds,
         providerConfigs: state.providerConfigs,
         storyProjects: state.storyProjects,
         activeStoryProjectId: state.activeStoryProjectId,
@@ -1824,6 +1895,21 @@ export const useAppStore = create<AppState>()(
           updateMessage: '自动更新待命',
           updateProgress: 0,
           authStatus: (persistedState.scallionToken ? 'approved' : 'idle') as ScallionAuthStatus,
+          remoteRelayEnabled: persistedState.remoteRelayEnabled ?? current.remoteRelayEnabled,
+          remoteRelayEndpoint: persistedState.remoteRelayEndpoint ?? current.remoteRelayEndpoint,
+          remoteRelayChannelId: persistedState.remoteRelayChannelId ?? current.remoteRelayChannelId,
+          remoteRelayAccessKey: persistedState.remoteRelayAccessKey ?? current.remoteRelayAccessKey,
+          remoteRelayAllowedPlatforms:
+            persistedState.remoteRelayAllowedPlatforms ?? current.remoteRelayAllowedPlatforms,
+          remoteRelayDefaultMode:
+            persistedState.remoteRelayDefaultMode ?? current.remoteRelayDefaultMode,
+          remoteRelayPollIntervalSeconds:
+            persistedState.remoteRelayPollIntervalSeconds ?? current.remoteRelayPollIntervalSeconds,
+          remoteRelayStatus: 'idle' as const,
+          remoteRelayMessage: persistedState.remoteRelayEnabled
+            ? '远程中继等待连接'
+            : '远程中继未启用',
+          remoteRelayLastJobAt: persistedState.remoteRelayLastJobAt,
           providerConfigs,
           storyProjects: persistedState.storyProjects ?? current.storyProjects,
           activeStoryProjectId: persistedState.activeStoryProjectId ?? current.activeStoryProjectId,

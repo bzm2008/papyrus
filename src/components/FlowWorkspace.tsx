@@ -22,6 +22,7 @@ import { type AgentStep, type FlowMessage, type FlowReviewMode, useAppStore } fr
 import { AgentTraceRenderer } from './AgentTraceRenderer'
 import { EditorPane } from './EditorPane'
 import { ModelSelector } from './ModelSelector'
+import { PromptAssistMenu } from './PromptAssistMenu'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, type SlashCommand } from './slashCommands'
 
@@ -95,14 +96,16 @@ export function FlowWorkspace() {
   return (
     <section className="flex h-full min-h-0 bg-[#fbfaf6]">
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#eee8dc] bg-[#fffefa] px-5">
+        <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#e1dccf] bg-[#fffefa] px-5">
           <div className="flex min-w-0 items-center gap-3">
             <div className="grid size-8 place-items-center rounded-lg bg-[#20201d] text-[#fffefa]">
               <PenLine size={16} />
             </div>
             <div className="min-w-0 leading-tight">
-              <div className="truncate text-sm font-semibold text-[#20201d]">Flow</div>
-              <div className="truncate text-xs text-[#86857c]">主笔自主规划，必要时调用工具和子 Agent</div>
+              <div className="truncate text-sm font-semibold text-[#20201d]">Flow 工作流</div>
+              <div className="truncate text-xs text-[#6f7168]">
+                小说、作文、论证、资料和文学常识都可以交给主笔分流
+              </div>
             </div>
           </div>
 
@@ -139,10 +142,10 @@ export function FlowWorkspace() {
           </div>
         </div>
 
-        <div className="shrink-0 border-t border-[#eee8dc] bg-[#fffefa] px-4 py-3">
+        <div className="shrink-0 border-t border-[#e1dccf] bg-[#fffefa] px-4 py-3">
           <form
             onSubmit={submitFlowPrompt}
-            className="mx-auto max-w-[900px] rounded-xl border border-[#e8ddc7] bg-white p-2 shadow-[0_8px_24px_rgba(43,34,19,0.05)]"
+            className="mx-auto max-w-[900px] rounded-xl border border-[#dfe4d6] bg-white p-2 shadow-[0_8px_24px_rgba(43,34,19,0.045)]"
           >
             <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
               <ModelSelector compact />
@@ -152,7 +155,7 @@ export function FlowWorkspace() {
                 title="重新生成上一轮"
                 onClick={regenerateLast}
                 disabled={llmRunState === 'running'}
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714] disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#dfe4d6] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714] disabled:opacity-50"
               >
                 <RotateCcw size={13} />
                 重生成
@@ -161,21 +164,25 @@ export function FlowWorkspace() {
                 type="button"
                 title="回退上一轮"
                 onClick={rollbackLast}
-                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#dfe4d6] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
               >
                 <Undo2 size={13} />
                 回退
               </button>
+              <span className="rounded-full bg-[#edf6eb] px-2 py-1 text-[11px] text-[#315d39]">
+                / 命令  @ 技能  # 文件
+              </span>
             </div>
             <div className="relative flex items-end gap-2">
               <SlashCommandMenu scope="flow" value={prompt} onPick={pickCommand} />
+              <PromptAssistMenu value={prompt} onChange={setPrompt} />
               <textarea
                 aria-label="Flow 指令"
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
-                placeholder="把写作目标交给主笔，输入 / 唤起指令..."
+                placeholder="交给主笔：写章节、改作文、查资料、做论证。输入 / 命令，@ 技能，# 文件..."
                 rows={1}
-                className="max-h-32 min-h-10 min-w-0 flex-1 resize-none border-none bg-transparent px-2 py-2 text-sm leading-6 text-[#2f2b22] outline-none placeholder:text-[#aaa398]"
+                className="max-h-32 min-h-10 min-w-0 flex-1 resize-none border-none bg-transparent px-2 py-2 text-sm leading-6 text-[#2f2b22] outline-none placeholder:text-[#8f897a]"
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey) {
                     event.preventDefault()
@@ -187,7 +194,7 @@ export function FlowWorkspace() {
                 type="submit"
                 title="发送给主笔"
                 disabled={llmRunState === 'running'}
-                className="grid size-10 shrink-0 place-items-center rounded-xl bg-[#20201d] text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-wait disabled:opacity-50"
+                className="grid size-10 shrink-0 place-items-center rounded-xl bg-[#20201d] text-[#fffefa] transition hover:bg-[#315d39] disabled:cursor-wait disabled:opacity-50"
               >
                 <Send size={16} />
               </button>
@@ -204,10 +211,10 @@ export function FlowWorkspace() {
             animate={{ width: 460, opacity: 1 }}
             exit={{ width: 0, opacity: 0 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="min-h-0 shrink-0 overflow-hidden border-l border-[#eee8dc] bg-[#fffefa]"
+            className="min-h-0 shrink-0 overflow-hidden border-l border-[#e1dccf] bg-[#fffefa]"
           >
-            <div className="flex h-12 items-center gap-2 border-b border-[#eee8dc] px-3 text-sm font-medium text-[#2f2b22]">
-              <FileText size={16} className="text-[#6f7f68]" />
+            <div className="flex h-12 items-center gap-2 border-b border-[#e1dccf] px-3 text-sm font-medium text-[#20201d]">
+              <FileText size={16} className="text-[#315d39]" />
               文稿
             </div>
             <div className="h-[calc(100%-3rem)] min-h-0">
@@ -229,7 +236,7 @@ function PendingPatchReview() {
   }
 
   return (
-    <section className="mb-4 rounded-lg border border-[#ded5c5] bg-[#fffaf0] p-3 text-[#3f5845]">
+    <section className="mb-4 rounded-lg border border-[#cfd8c7] bg-[#f4fbf2] p-3 text-[#315d39]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold">
@@ -252,14 +259,14 @@ function PendingPatchReview() {
             <button
               type="button"
               onClick={approveDocumentPatch}
-              className="h-8 rounded-lg bg-[#20201d] px-3 text-xs font-medium text-[#fffefa] transition hover:bg-[#3f5845]"
+              className="h-8 rounded-lg bg-[#20201d] px-3 text-xs font-medium text-[#fffefa] transition hover:bg-[#315d39]"
             >
               写入文稿
             </button>
             <button
               type="button"
               onClick={rejectDocumentPatch}
-              className="h-8 rounded-lg border border-[#d9c69c] px-3 text-xs font-medium text-[#6f7168] transition hover:bg-[#fffefa]"
+              className="h-8 rounded-lg border border-[#cfd8c7] px-3 text-xs font-medium text-[#6f7168] transition hover:bg-[#fffefa]"
             >
               拒绝
             </button>
@@ -292,15 +299,15 @@ function ChatBubble({
         initial={{ opacity: 0, y: 8, scale: 0.99 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-        className={`min-w-0 overflow-hidden rounded-xl border px-4 py-3 text-sm leading-7 shadow-[0_8px_24px_rgba(43,34,19,0.05)] ${
+        className={`min-w-0 overflow-hidden rounded-xl border px-4 py-3 text-sm leading-7 shadow-[0_8px_24px_rgba(43,34,19,0.045)] ${
           isUser
             ? 'max-w-[78%] border-[#20201d] bg-[#20201d] text-[#fffefa]'
-            : 'w-full max-w-[860px] border-[#eee8dc] bg-white text-[#2f2b22]'
+            : 'w-full max-w-[860px] border-[#e1dccf] bg-white text-[#2f2b22]'
         }`}
       >
         <div
           className={`mb-1 flex items-center justify-between gap-3 text-xs font-medium ${
-            isUser ? 'text-[#d6d0c4]' : 'text-[#3f5845]'
+            isUser ? 'text-[#d6d0c4]' : 'text-[#315d39]'
           }`}
         >
           <span className="inline-flex items-center gap-1.5">
@@ -312,7 +319,7 @@ function ChatBubble({
             title="复制"
             onClick={() => void navigator.clipboard?.writeText(message.content)}
             className={`rounded-md p-1 opacity-0 transition group-hover:opacity-100 ${
-              isUser ? 'hover:bg-white/10' : 'hover:bg-[#f4ead8]'
+              isUser ? 'hover:bg-white/10' : 'hover:bg-[#edf6eb]'
             }`}
           >
             <Clipboard size={13} />
@@ -330,7 +337,7 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
   const [stageIndex, setStageIndex] = useState(0)
   const activeTodo = todos.find((todo) => todo.status === 'running') ?? todos.find((todo) => todo.status === 'pending')
   const latestStep = [...steps].reverse().find((step) => step.status === 'running') ?? steps.at(-1)
-  const stages = useMemo(() => ['规划', '检索', '结构', '起草', '审阅', '润色'], [])
+  const stages = useMemo(() => ['规划', '检索', '结构', '起草', '审阅', '清稿'], [])
 
   useEffect(() => {
     const timer = window.setInterval(() => setElapsed((value) => value + 1), 1000)
@@ -353,10 +360,10 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
       exit={{ opacity: 0, y: -8, scale: 0.99 }}
       className="flex justify-start"
     >
-      <div className="max-w-[78%] rounded-xl border border-[#eee8dc] bg-white px-4 py-3 text-sm text-[#6f7168] shadow-[0_8px_24px_rgba(43,34,19,0.05)]">
+      <div className="max-w-[78%] rounded-xl border border-[#e1dccf] bg-white px-4 py-3 text-sm text-[#6f7168] shadow-[0_8px_24px_rgba(43,34,19,0.045)]">
         <div className="flex items-start justify-between gap-4">
           <span className="inline-flex items-center gap-2">
-            <Sparkles size={14} className="animate-pulse text-[#d7aa4f]" />
+            <Sparkles size={14} className="animate-pulse text-[#31a96b]" />
             主笔正在执行
             <TypingDots />
           </span>
@@ -364,9 +371,9 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
             {formatElapsed(elapsed)}
           </span>
         </div>
-        <div className="mt-3 overflow-hidden rounded-lg border border-[#eee8dc] bg-[#fffefa]">
+        <div className="mt-3 overflow-hidden rounded-lg border border-[#e1dccf] bg-[#fffefa]">
           <motion.div
-            className="h-1 bg-[#6f7f68]"
+            className="h-1 bg-[#315d39]"
             initial={{ x: '-100%' }}
             animate={{ x: '100%' }}
             transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
@@ -378,7 +385,7 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -6 }}
-                className="text-xs font-medium text-[#2f2b22]"
+                className="text-xs font-medium text-[#20201d]"
               >
                 {stages[stageIndex]}
               </motion.div>
@@ -405,7 +412,7 @@ function TypingDots() {
       {[0, 1, 2].map((index) => (
         <motion.span
           key={index}
-          className="size-1 rounded-full bg-[#d7aa4f]"
+          className="size-1 rounded-full bg-[#31a96b]"
           animate={{ opacity: [0.25, 1, 0.25], y: [0, -2, 0] }}
           transition={{ duration: 0.9, repeat: Infinity, delay: index * 0.14 }}
         />
@@ -430,7 +437,7 @@ function ReviewModeInline() {
   ]
 
   return (
-    <div className="flex h-8 items-center rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-0.5">
+    <div className="flex h-8 items-center rounded-lg border border-[#dfe4d6] bg-[#fffefa] p-0.5">
       {modes.map((mode) => {
         const Icon = mode.icon
         const active = flowReviewMode === mode.value

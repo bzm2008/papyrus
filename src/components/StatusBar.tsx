@@ -8,8 +8,8 @@ const columnControls: Array<{
   icon: typeof PanelLeft
 }> = [
   { value: 1, label: '一栏', title: '只显示主编辑区', icon: PanelLeft },
-  { value: 2, label: '二栏', title: '显示主编辑区和右侧 AI 区', icon: PanelRight },
-  { value: 3, label: '三栏', title: '显示资源树、主编辑区和右侧 AI 区', icon: Columns3 },
+  { value: 2, label: '二栏', title: '显示主编辑区和右侧文学秘书', icon: PanelRight },
+  { value: 3, label: '三栏', title: '显示项目导航、主编辑区和右侧文学秘书', icon: Columns3 },
 ]
 
 export function StatusBar() {
@@ -29,17 +29,17 @@ export function StatusBar() {
   const activeProvider = providerConfigs[activeProviderId]
   const contextPercent = Math.min(
     999,
-    Math.round((contextUsedTokens / effectiveContextLimitTokens) * 100),
+    Math.round((contextUsedTokens / Math.max(1, effectiveContextLimitTokens)) * 100),
   )
   const contextSourceLabel =
     modelContextSource === 'server'
       ? '服务端'
       : modelContextSource === 'custom_tier'
-        ? '自定义档位'
+        ? '自定义'
         : '预设'
 
   return (
-    <footer className="flex h-9 shrink-0 items-center justify-between border-t border-[#e8ddc7] bg-[#fffefa]/92 px-3 text-xs text-[#6f7168] backdrop-blur">
+    <footer className="flex h-9 shrink-0 items-center justify-between border-t border-[#e1dccf] bg-[#fffefa]/92 px-3 text-xs text-[#6f7168] backdrop-blur">
       <div className="flex items-center gap-1">
         {columnControls.map((item) => {
           const Icon = item.icon
@@ -55,7 +55,7 @@ export function StatusBar() {
               className={`flex h-7 items-center gap-1 rounded-lg px-2 transition ${
                 active
                   ? 'bg-[#171714] text-[#fffefa] shadow-[0_8px_18px_rgba(23,23,20,0.14)]'
-                  : 'text-[#6f7168] hover:bg-[#f4ead8] hover:text-[#171714]'
+                  : 'text-[#6f7168] hover:bg-[#edf6eb] hover:text-[#171714]'
               }`}
             >
               <Icon size={14} />
@@ -66,32 +66,33 @@ export function StatusBar() {
       </div>
 
       <div className="flex min-w-0 items-center gap-4">
-        <span className="truncate">模式：{mode === 'companion' ? '伴写' : 'Flow'}</span>
+        <span className="truncate">模式: {mode === 'companion' ? '秘书' : 'Flow'}</span>
         <span className="truncate">
-          模型：{activeProvider.label} / {activeProvider.type === 'scallion_proxy' ? '代理' : activeProvider.modelName || '未设置'}
+          模型: {activeProvider.label} /{' '}
+          {activeProvider.type === 'scallion_proxy' ? '代理' : activeProvider.modelName || '未设置'}
         </span>
         <span className="truncate">
-          Context：{contextPercent}% · {Math.round(effectiveContextLimitTokens / 1024)}K ·{' '}
+          Context: {contextPercent}% · {Math.round(effectiveContextLimitTokens / 1024)}K ·{' '}
           {contextSourceLabel}
         </span>
-        {updateStatus !== 'idle' ? <span className="truncate">更新：{updateMessage}</span> : null}
+        {updateStatus !== 'idle' ? <span className="truncate">更新: {updateMessage}</span> : null}
         {scallionUser ? (
           <span className="truncate">Scallion: {scallionUser.username}</span>
         ) : (
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-[#e8ddc7] bg-[#fffdf7] px-2 text-[#5f6159] transition hover:border-[#d7aa4f] hover:text-[#171714]"
+            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-[#dfe4d6] bg-[#fffdf7] px-2 text-[#5f6159] transition hover:border-[#31a96b] hover:text-[#171714]"
           >
             <LogIn size={12} />
             {authStatus === 'polling' ? '等待主站授权' : '登录 Scallion'}
           </button>
         )}
-        <span className="flex items-center gap-1 text-[#3f5845]">
+        <span className="flex items-center gap-1 text-[#315d39]">
           <Radio size={14} />
           本地工作台就绪
         </span>
-        <Sparkles size={13} className="text-[#d7aa4f]" />
+        <Sparkles size={13} className="text-[#31a96b]" />
       </div>
     </footer>
   )

@@ -24,6 +24,7 @@ import {
   type StoryBrief,
 } from './storyEngine'
 import { searchWeb } from './webSearchService'
+import { composeWritingTaskPrompt } from './writingTaskTypes'
 import {
   type AgentTodo,
   type DocumentPatchOperation,
@@ -717,6 +718,7 @@ async function callAgent(
       role: 'user',
       content: [
         `主笔计划：\n${JSON.stringify(plan, null, 2)}`,
+        composeWritingTaskPrompt(prompt),
         `用户任务：\n${prompt}`,
         sources?.length ? `联网来源：\n${formatSources(sources)}` : '',
         contextResources(store.resources),
@@ -773,6 +775,7 @@ async function runWriter(
           role: 'user',
           content: [
             `执行计划：\n${JSON.stringify(plan, null, 2)}`,
+            composeWritingTaskPrompt(prompt),
             store.compressedSummary ? `压缩摘要：\n${store.compressedSummary}` : '',
             store.mentionContextItems.length
               ? `@ 提及对象：\n${await retrieveMentionContext(store.mentionContextItems)}`

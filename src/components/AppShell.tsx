@@ -3,6 +3,7 @@ import { Settings, Sparkles } from 'lucide-react'
 import { useEffect } from 'react'
 import { useContextAutomation } from '../hooks/useContextAutomation'
 import { useProjectGuidance } from '../hooks/useProjectGuidance'
+import { useRemoteRelay } from '../hooks/useRemoteRelay'
 import { fetchScallionProxyModels } from '../services/llmClient'
 import { useAppStore } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
@@ -16,6 +17,7 @@ import { RightPanel } from './RightPanel'
 import { SettingsPanel } from './SettingsPanel'
 import { StatusBar } from './StatusBar'
 import { StoryDashboard } from './StoryDashboard'
+import { UsageBubble } from './UsageBubble'
 
 export function AppShell() {
   const isFirstLaunch = useAppStore((state) => state.isFirstLaunch)
@@ -64,6 +66,7 @@ export function AppShell() {
 function MainWorkbench() {
   useContextAutomation()
   useProjectGuidance()
+  useRemoteRelay()
 
   const columnMode = useAppStore((state) => state.columnMode)
   const isLeftCollapsed = useAppStore((state) => state.isLeftCollapsed)
@@ -103,15 +106,15 @@ function MainWorkbench() {
       data-vibe={activeVibeId}
       className="papyrus-grain flex h-screen min-h-0 flex-col overflow-hidden text-[#171714]"
     >
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#eee8dc] bg-[#fffefa] px-4">
+      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#e1dccf] bg-[#fffefa] px-4">
         <div className="flex items-center gap-3">
           <BrandMark size="sm" />
           <div className="leading-tight">
             <div className="flex items-center gap-2 text-sm font-semibold">
               Papyrus
-              <Sparkles size={13} className="text-[#d7aa4f]" />
+              <Sparkles size={13} className="text-[#31a96b]" />
             </div>
-            <div className="text-xs text-[#6f7168]">全能文科生 AI 写作工作站</div>
+            <div className="text-xs text-[#6f7168]">全能文学与文科写作工作台</div>
           </div>
         </div>
 
@@ -136,7 +139,7 @@ function MainWorkbench() {
               animate={{ width: isLeftCollapsed ? 72 : 280, opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-              className="min-h-0 shrink-0 overflow-hidden border-r border-[#eee8dc] bg-[#fffefa]"
+              className="min-h-0 shrink-0 overflow-hidden border-r border-[#e1dccf] bg-[#fffefa]"
             >
               <LeftSidebar />
             </motion.aside>
@@ -166,7 +169,7 @@ function MainWorkbench() {
               animate={{ width: 420, opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-              className="min-h-0 shrink-0 overflow-hidden border-l border-[#eee8dc] bg-[#fffefa]"
+              className="min-h-0 shrink-0 overflow-hidden border-l border-[#e1dccf] bg-[#fffefa]"
             >
               <RightPanel />
             </motion.aside>
@@ -175,6 +178,7 @@ function MainWorkbench() {
       </div>
 
       <StatusBar />
+      <UsageBubble />
       <SettingsPanel />
       <StoryDashboard />
     </div>

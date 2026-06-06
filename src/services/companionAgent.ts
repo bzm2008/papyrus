@@ -1,8 +1,15 @@
 import { composeSystemPrompt } from './agentPromptContext'
 import { composeWritingContext } from './contextComposer'
-import { extractDraftText, inferPatchOperation, queueDocumentPatch, shouldCreateDocumentPatch } from './documentPatchService'
+import {
+  extractDraftText,
+  inferPatchOperation,
+  queueDocumentPatch,
+  shouldCreateDocumentPatch,
+} from './documentPatchService'
 import { callOpenAICompatible, canCallProvider } from './llmClient'
 import { retrieveMentionContext } from './projectContext'
+import { searchWeb } from './webSearchService'
+import { composeWritingTaskPrompt } from './writingTaskTypes'
 import { useAppStore, type DocumentPatchOperation } from '../stores/useAppStore'
 
 export type CompanionAgentResult = {
@@ -30,11 +37,11 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
   const userMessage = store.addCompanionMessage({ role: 'user', content })
   const assistantMessage = store.addCompanionMessage({
     role: 'assistant',
-    content: selectedText ? '正在处理选区...' : '正在阅读文稿...',
+    content: selectedText ? '正在处理选区...' : '正在阅读文稿与资料...',
   })
 
   store.setCompanionRunState('running')
-  store.setLlmRunState('running', '伴写 Agent 正在处理')
+  store.setLlmRunState('running', '文学秘书正在处理')
 
   try {
     const result = selectedText
@@ -47,11 +54,11 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
       content: result.reply,
     })
     useAppStore.getState().setCompanionRunState('idle')
-    useAppStore.getState().setLlmRunState('idle', '伴写 Agent 已完成')
+    useAppStore.getState().setLlmRunState('idle', '文学秘书已完成')
 
     return result
   } catch (error) {
-    const message = error instanceof Error ? error.message : '伴写 Agent 处理失败'
+    const message = error instanceof Error ? error.message : '文学秘书处理失败'
     useAppStore.getState().updateCompanionMessage(assistantMessage.id, { content: message })
     useAppStore.getState().setCompanionRunState('error')
     useAppStore.getState().setLlmRunState('error', message)
@@ -63,20 +70,28 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
     }
   }
 
-  async function runSelectedTextAgent(instruction: string, selection: string): Promise<CompanionAgentResult> {
-    const replacement = await callOrMock([
-      '你是 Papyrus 的伴写 Agent。',
-      '用户给出了一个局部选区和处理指令。',
-      '只返回可直接替换选区的正文，不要解释，不要加标题。',
-    ].join('\n'), [
-      `指令：${instruction}`,
-      `选区：\n${selection}`,
-      contextBlock(),
-    ].join('\n\n'), createSelectionMock(selection, instruction))
+  async function runSelectedTextAgent(
+    instruction: string,
+    selection: string,
+  ): Promise<CompanionAgentResult> {
+    const replacement = await callOrMock(
+      [
+        companionSystemBase(),
+        '用户给出了局部选区和处理指令。',
+        '只返回可直接替换选区的正文，不要解释，不要加标题。',
+      ].join('\n'),
+      [
+        composeWritingTaskPrompt(instruction),
+        `指令:\n${instruction}`,
+        `选区:\n${selection}`,
+        await contextBlock(instruction),
+      ].join('\n\n'),
+      createSelectionMock(selection, instruction),
+    )
 
     const patch = {
       operation: 'replace_selection' as const,
-      title: '伴写选区改写',
+      title: '文学秘书选区改写',
       content: replacement,
     }
 
@@ -94,19 +109,22 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
   }
 
   async function runPatchAgent(instruction: string): Promise<CompanionAgentResult> {
-    const response = await callOrMock([
-      '你是 Papyrus 的伴写 Agent。',
-      '用户希望生成、续写、补写或改写文稿。',
-      '输出格式必须是：答复: 一句话说明。然后 正文: 后面给出可写入文稿的内容。',
-      '不要把执行过程、来源解释或计划写入正文。',
-    ].join('\n'), [
-      `指令：${instruction}`,
-      contextBlock(),
-    ].join('\n\n'), `答复: 已准备好可写入文稿的内容。\n\n正文: ${instruction}`)
+    const response = await callOrMock(
+      [
+        companionSystemBase(),
+        '用户希望生成、续写、补写或改写文稿。',
+        '输出格式必须是：答复: 一句话说明。然后“正文:”后面给出可写入文稿的内容。',
+        '不要把执行过程、来源解释、计划或工具轨迹写入正文。',
+      ].join('\n'),
+      [composeWritingTaskPrompt(instruction), `指令:\n${instruction}`, await contextBlock(instruction)].join(
+        '\n\n',
+      ),
+      `答复: 已准备好可写入文稿的内容。\n\n正文: ${instruction}`,
+    )
     const draft = extractDraftText(response)
     const patch = {
       operation: inferPatchOperation(instruction),
-      title: '伴写 Agent 文稿补丁',
+      title: '文学秘书文稿补丁',
       content: draft,
     }
 
@@ -123,14 +141,17 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
   }
 
   async function runAdviceAgent(instruction: string): Promise<CompanionAgentResult> {
-    const reply = await callOrMock([
-      '你是 Papyrus 的伴写 Agent。',
-      '用户现在需要写作建议、诊断、方向或解释。',
-      '只在对话里回答，不要生成文稿补丁。回答要简洁、具体、可执行。',
-    ].join('\n'), [
-      `问题：${instruction}`,
-      contextBlock(),
-    ].join('\n\n'), '我会先看结构、语气和事实风险，再给出最小可执行修改建议。')
+    const reply = await callOrMock(
+      [
+        companionSystemBase(),
+        '用户现在需要对话式协助：文学常识、写作知识、作文建议、结构诊断、资料整理、文件解读或作业辅导。',
+        '只在对话里回答，不要生成文稿补丁。回答要直接、具体、可执行。',
+      ].join('\n'),
+      [composeWritingTaskPrompt(instruction), `问题:\n${instruction}`, await contextBlock(instruction)].join(
+        '\n\n',
+      ),
+      '我会先判断任务类型，再给出最小可执行建议：概念边界、可用材料、结构路径和下一步写法。',
+    )
 
     return { reply, mode: 'advice' }
   }
@@ -149,36 +170,50 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
   function createSelectionMock(selection: string, instruction: string) {
     return `${selection}（已按“${instruction}”调整）`
   }
+}
 
-  function contextBlock() {
-    const state = useAppStore.getState()
-    const mentionContextPromise = retrieveMentionContext(state.mentionContextItems)
-    void mentionContextPromise
-    const context = composeWritingContext({ includeFullCurrentArticle: true })
+function companionSystemBase() {
+  return [
+    '你是 Papyrus 的文学秘书 Agent。',
+    'Papyrus 不是单一网文助手，而是文学、写作、作业、说明文、议论文、记叙文、非虚构与网文连载的全能文字工作台。',
+    '你可以解释文学常识、回答写作问题、诊断结构、批改作文、整理素材、搜索资料、解读文件、生成或改写正文。',
+    '事实、推断、创作设定和写作建议必须分开。不要编造来源。',
+    '当用户要求写作或改写时，保留作者原意和声音；当用户要求知识解释时，先直接回答，再给例子和可迁移写法。',
+  ].join('\n')
+}
 
-    return [
-      context.text,
-      state.mentionContextItems.length
-        ? `@ mentions:\n${state.mentionContextItems.map((item) => `${item.label}: ${item.excerpt}`).join('\n')}`
-        : '',
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+async function contextBlock(instruction: string) {
+  const state = useAppStore.getState()
+  const context = composeWritingContext({ includeFullCurrentArticle: true })
+  const mentionContext = state.mentionContextItems.length
+    ? await retrieveMentionContext(state.mentionContextItems)
+    : ''
+  const searchContext = shouldSearch(instruction) ? await safeSearch(instruction) : ''
 
-    const resources = state.resources
-      .filter((resource) => resource.content)
+  return [
+    context.text,
+    mentionContext ? `提及上下文:\n${mentionContext}` : '',
+    searchContext ? `联网资料:\n${searchContext}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function shouldSearch(prompt: string) {
+  return /(搜索|联网|资料|来源|最新|今天|最近|查证|引用|背景|新闻|政策|现实|例子|案例|research|source|latest)/i.test(
+    prompt,
+  )
+}
+
+async function safeSearch(prompt: string) {
+  try {
+    const results = await searchWeb(prompt)
+
+    return results
       .slice(0, 5)
-      .map((resource) => `[${resource.name}]\n${resource.content.slice(0, 900)}`)
+      .map((result, index) => `${index + 1}. ${result.title}\n${result.url}\n${result.excerpt}`)
       .join('\n\n')
-
-    return [
-      state.projectGuidance.style ? `STYLE.md:\n${state.projectGuidance.style}` : '',
-      state.projectGuidance.world ? `WORLD.md:\n${state.projectGuidance.world}` : '',
-      state.negativeMemories.length ? `负向记忆:\n${state.negativeMemories.join('\n')}` : '',
-      resources ? `项目资料:\n${resources}` : '',
-      `当前文稿:\n${state.editorText.slice(0, 6000)}`,
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+  } catch (error) {
+    return `搜索暂不可用：${error instanceof Error ? error.message : '未知错误'}`
   }
 }

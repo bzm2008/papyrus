@@ -4,6 +4,7 @@ import { useState, type FormEvent } from 'react'
 import { sendCompanionMessage } from '../services/companionAgent'
 import { useAppStore } from '../stores/useAppStore'
 import { ModelSelector } from './ModelSelector'
+import { PromptAssistMenu } from './PromptAssistMenu'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, type SlashCommand } from './slashCommands'
 
@@ -50,21 +51,21 @@ function CompanionPanel() {
       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
       className="flex h-full min-h-0 flex-col bg-[#fffefa]"
     >
-      <div className="flex h-14 shrink-0 items-center gap-3 border-b border-[#eee8dc] px-4">
-        <div className="grid size-8 place-items-center rounded-lg bg-[#f5f2ea] text-[#3f5845]">
+      <div className="flex h-14 shrink-0 items-center gap-3 border-b border-[#e1dccf] px-4">
+        <div className="grid size-8 place-items-center rounded-lg bg-[#edf6eb] text-[#315d39]">
           <Sparkles size={16} />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-[#20201d]">伴写 Agent</div>
-          <div className="truncate text-xs text-[#86857c]">
-            {selectedText ? `选区 ${selectedText.length} 字` : '全文上下文'}
+          <div className="truncate text-sm font-semibold text-[#20201d]">文学秘书</div>
+          <div className="truncate text-xs text-[#6f7168]">
+            {selectedText ? `选区 ${selectedText.length} 字` : '全文、文件与对话上下文'}
           </div>
         </div>
         <ModelSelector compact />
       </div>
 
       <div className="papyrus-scrollbar min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-        <div className="rounded-lg border border-[#eee8dc] bg-white/70 p-3">
+        <div className="rounded-lg border border-[#e1dccf] bg-white/76 p-3">
           <div className="mb-1 flex items-center justify-between text-xs text-[#6f7168]">
             <span className="inline-flex items-center gap-1.5">
               <Activity size={13} />
@@ -74,7 +75,7 @@ function CompanionPanel() {
           </div>
           <div className="h-1 overflow-hidden rounded-full bg-[#e8e1d3]">
             <motion.div
-              className="h-full rounded-full bg-[#6f7f68]"
+              className="h-full rounded-full bg-[#315d39]"
               initial={false}
               animate={{ width: `${percent}%` }}
               transition={{ duration: 0.25 }}
@@ -88,14 +89,14 @@ function CompanionPanel() {
               <motion.div
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="rounded-xl border border-dashed border-[#d9c69c] bg-[#fffdf7] p-4 text-sm leading-6 text-[#6f7168]"
+                className="rounded-xl border border-dashed border-[#cfd8c7] bg-[#fffdf7] p-4 text-sm leading-6 text-[#6f7168]"
               >
-                <div className="mb-2 flex items-center gap-2 font-medium text-[#2f2b22]">
-                  <MessageSquareText size={15} className="text-[#3f5845]" />
-                  可以直接聊天，也可以输入 `/` 选择指令
+                <div className="mb-2 flex items-center gap-2 font-medium text-[#20201d]">
+                  <MessageSquareText size={15} className="text-[#315d39]" />
+                  直接提问，或用 `/`、`@技能`、`#文件` 精确调度
                 </div>
                 <div className="text-xs leading-5 text-[#8f897a]">
-                  选中文稿后优先处理选区；没有选区时，会基于当前文章、同一聊天内文章和导入资料给建议或生成补丁。
+                  选中文稿时优先处理选区；没有选区时，可以解释文学常识、批改作文、整理素材、检索资料、诊断结构，或像秘书一样按指令协助当前写作。
                 </div>
               </motion.div>
             ) : null}
@@ -110,11 +111,11 @@ function CompanionPanel() {
                 className={`group rounded-lg border px-3 py-2 text-sm leading-6 ${
                   message.role === 'user'
                     ? 'border-[#20201d] bg-[#20201d] text-[#fffefa]'
-                    : 'border-[#eee8dc] bg-white/78 text-[#2f2b22]'
+                    : 'border-[#e1dccf] bg-white/84 text-[#2f2b22]'
                 }`}
               >
                 <div className="mb-1 flex items-center justify-between text-[11px] opacity-70">
-                  <span>{message.role === 'user' ? '你' : '伴写'}</span>
+                  <span>{message.role === 'user' ? '你' : '秘书'}</span>
                   <button
                     type="button"
                     title="复制"
@@ -124,30 +125,37 @@ function CompanionPanel() {
                     <Clipboard size={12} />
                   </button>
                 </div>
-                <div className="whitespace-pre-wrap">{message.content}</div>
+                <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                  {message.content}
+                </div>
               </motion.div>
             ))}
           </AnimatePresence>
         </div>
       </div>
 
-      <form onSubmit={submitPrompt} className="shrink-0 border-t border-[#eee8dc] p-3">
+      <form onSubmit={submitPrompt} className="shrink-0 border-t border-[#e1dccf] p-3">
         <div className="mb-2 flex items-center justify-between gap-2 px-1 text-xs text-[#8f897a]">
           <span className="inline-flex items-center gap-1.5">
             <Feather size={13} />
-            输入 `/` 唤起指令
+            / 命令  @ 技能  # 文件
           </span>
           <span>{runState === 'running' ? '处理中...' : selectedText ? '选区优先' : '全文模式'}</span>
         </div>
-        <div className="relative flex items-end gap-2 rounded-xl border border-[#e8ddc7] bg-white px-3 py-2 shadow-[0_8px_24px_rgba(43,34,19,0.05)]">
+        <div className="relative flex items-end gap-2 rounded-xl border border-[#dfe4d6] bg-white px-3 py-2 shadow-[0_8px_24px_rgba(43,34,19,0.045)]">
           <SlashCommandMenu scope="companion" value={prompt} onPick={pickCommand} />
+          <PromptAssistMenu value={prompt} onChange={setPrompt} />
           <textarea
             aria-label="伴写指令"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             rows={1}
-            placeholder={selectedText ? '告诉伴写如何处理选区，或输入 /' : '询问建议、续写、补写，或输入 /'}
-            className="max-h-28 min-h-8 min-w-0 flex-1 resize-none border-none bg-transparent text-sm leading-6 text-[#2f2b22] outline-none placeholder:text-[#aaa398]"
+            placeholder={
+              selectedText
+                ? '告诉秘书如何处理选区，或输入 @技能 / #文件'
+                : '问文学常识、作文建议、资料搜集、续写改写，或输入 /'
+            }
+            className="max-h-28 min-h-8 min-w-0 flex-1 resize-none border-none bg-transparent text-sm leading-6 text-[#2f2b22] outline-none placeholder:text-[#8f897a]"
             onKeyDown={(event) => {
               if (event.key === 'Enter' && !event.shiftKey) {
                 event.preventDefault()
@@ -157,9 +165,9 @@ function CompanionPanel() {
           />
           <button
             type="submit"
-            title="发送给伴写"
+            title="发送给文学秘书"
             disabled={runState === 'running'}
-            className="grid size-9 shrink-0 place-items-center rounded-lg bg-[#20201d] text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-wait disabled:opacity-50"
+            className="grid size-9 shrink-0 place-items-center rounded-lg bg-[#20201d] text-[#fffefa] transition hover:bg-[#315d39] disabled:cursor-wait disabled:opacity-50"
           >
             <Send size={14} />
           </button>

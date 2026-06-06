@@ -26,6 +26,7 @@ import { checkAndDownloadUpdate, relaunchToInstallUpdate } from '../services/upd
 import { logoutScallion, startScallionLogin } from '../services/scallionAuth'
 import { providerOrder, useAppStore, type ProviderId } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
+import { RemoteRelaySettings } from './RemoteRelaySettings'
 
 export function SettingsPanel() {
   const [checkingProviderId, setCheckingProviderId] = useState<ProviderId | null>(null)
@@ -277,6 +278,8 @@ export function SettingsPanel() {
                     </button>
                   </div>
                 </section>
+
+                <RemoteRelaySettings />
 
                 <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
                   <div className="mb-3">

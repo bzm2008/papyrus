@@ -1,7 +1,7 @@
 import Mention from '@tiptap/extension-mention'
 import type { Editor } from '@tiptap/core'
-import { useAppStore, type MentionContextItem } from '../stores/useAppStore'
 import { searchProjectMentionItems } from '../services/projectContext'
+import { useAppStore, type MentionContextItem } from '../stores/useAppStore'
 
 type MentionCommandProps = {
   editor: Editor
@@ -65,7 +65,7 @@ export const ProjectMention = Mention.configure({
           const button = document.createElement('button')
           button.type = 'button'
           button.className = `papyrus-mention-item ${index === selectedIndex ? 'is-selected' : ''}`
-          button.innerHTML = `<span>${item.label}</span><small>${labelForType(item.type)}</small>`
+          button.innerHTML = `<span>${escapeHtml(item.label)}</span><small>${labelForType(item.type)}</small>`
           button.addEventListener('mousedown', (event) => {
             event.preventDefault()
             currentProps?.command(item)
@@ -156,7 +156,7 @@ function findMentionItem(props: MentionCommandProps['props']): MentionContextIte
     item ?? {
       id,
       label,
-      type: props.type === 'character' || props.type === 'world' ? props.type : 'chapter',
+      type: normalizeMentionType(props.type),
       excerpt: label,
     }
   )
@@ -164,10 +164,34 @@ function findMentionItem(props: MentionCommandProps['props']): MentionContextIte
 
 function labelForType(type: MentionContextItem['type']) {
   const labels: Record<MentionContextItem['type'], string> = {
-    chapter: '章节',
-    character: '人物',
+    chapter: '文稿',
+    character: '角色',
     world: '设定',
+    file: '文件',
+    skill: '技能',
   }
 
   return labels[type]
+}
+
+function normalizeMentionType(type?: string | null): MentionContextItem['type'] {
+  if (
+    type === 'chapter' ||
+    type === 'character' ||
+    type === 'world' ||
+    type === 'file' ||
+    type === 'skill'
+  ) {
+    return type
+  }
+
+  return 'chapter'
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
 }

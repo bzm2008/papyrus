@@ -7,7 +7,7 @@ const modes: Array<{
   label: string
   icon: typeof Feather
 }> = [
-  { value: 'companion', label: '伴写模式', icon: Feather },
+  { value: 'companion', label: '秘书模式', icon: Feather },
   { value: 'flow', label: 'Flow 模式', icon: BrainCircuit },
 ]
 
@@ -16,7 +16,7 @@ export function ModeSwitch() {
   const setMode = useAppStore((state) => state.setMode)
 
   return (
-    <div className="relative flex h-10 items-center rounded-xl border border-[#e8ddc7] bg-[#f4ead8] p-1 shadow-[0_1px_0_rgba(255,255,255,0.72)_inset]">
+    <div className="relative flex h-10 items-center rounded-xl border border-[#dfe4d6] bg-[#edf6eb] p-1 shadow-[0_1px_0_rgba(255,255,255,0.72)_inset]">
       {modes.map((item) => {
         const Icon = item.icon
         const active = mode === item.value
@@ -38,9 +38,9 @@ export function ModeSwitch() {
             ) : null}
             <Icon
               size={16}
-              className={active ? 'relative text-[#3f5845]' : 'relative text-[#8f897a]'}
+              className={active ? 'relative text-[#315d39]' : 'relative text-[#6f7168]'}
             />
-            <span className={active ? 'relative text-[#171714]' : 'relative text-[#6f7168]'}>
+            <span className={active ? 'relative text-[#171714]' : 'relative text-[#5f6159]'}>
               {item.label}
             </span>
           </button>
