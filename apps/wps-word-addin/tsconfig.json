@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.app.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "../../node_modules/.tmp/tsconfig.wps-addin.tsbuildinfo",
+    "rootDir": "./src",
+    "noEmit": true
+  },
+  "include": ["src"]
+}

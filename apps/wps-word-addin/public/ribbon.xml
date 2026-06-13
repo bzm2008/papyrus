@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<customUI xmlns="http://schemas.microsoft.com/office/2006/01/customui" onLoad="OnAddinLoad">
+  <ribbon startFromScratch="false">
+    <tabs>
+      <tab idMso="TabHome">
+        <group id="groupPapyrusWriting" label="Writing Agent">
+          <button
+            id="btnPapyrusTaskPane"
+            label="Open Sidebar"
+            size="large"
+            enabled="true"
+            visible="true"
+            onAction="ShowPapyrusTaskPane"
+          />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>

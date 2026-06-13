@@ -9,6 +9,7 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-wps-addin
 dist-ssr
 artifacts
 src-tauri/target
