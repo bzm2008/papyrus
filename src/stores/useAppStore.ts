@@ -513,6 +513,7 @@ type AppState = TokenSnapshot & {
   markDocumentPatch: (status: DocumentPatchStatus) => void
   addResources: (resources: ImportedResource[]) => void
   updateResource: (id: string, patch: Partial<ImportedResource>) => void
+  deleteResource: (id: string) => void
   addMentionContextItem: (item: MentionContextItem) => void
   clearMentionContextItems: () => void
   addNegativeMemory: (memory: string) => void
@@ -1286,6 +1287,20 @@ export const useAppStore = create<AppState>()(
           const resources = state.resources.map((resource) =>
             resource.id === id ? { ...resource, ...patch } : resource,
           )
+
+          return {
+            resources,
+            ...calculateTokenSnapshot(
+              state.editorText,
+              state.flowMessages,
+              state.compressedSummary,
+              resources,
+            ),
+          }
+        }),
+      deleteResource: (id) =>
+        set((state) => {
+          const resources = state.resources.filter((resource) => resource.id !== id)
 
           return {
             resources,

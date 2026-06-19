@@ -4,18 +4,20 @@ import {
   FileText,
   FolderPlus,
   Gauge,
+  MinusCircle,
   MessageSquare,
   Pencil,
   Pin,
   PinOff,
   Plus,
+  PlusCircle,
   Trash2,
   Upload,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { importResourceFiles, openProjectFolder } from '../services/resourceImportService'
-import { useAppStore, type ArticleRecord, type ChatSession } from '../stores/useAppStore'
+import { importResourceFiles, insertResourceIntoDocument, openProjectFolder } from '../services/resourceImportService'
+import { useAppStore, type ArticleRecord, type ChatSession, type ImportedResource } from '../stores/useAppStore'
 
 export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean }) {
   const articles = useAppStore((state) => state.articles)
@@ -34,6 +36,8 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
   const deleteArticle = useAppStore((state) => state.deleteArticle)
   const toggleArticlePinned = useAppStore((state) => state.toggleArticlePinned)
   const setStoryDashboardOpen = useAppStore((state) => state.setStoryDashboardOpen)
+  const updateResource = useAppStore((state) => state.updateResource)
+  const deleteResource = useAppStore((state) => state.deleteResource)
   const sortedChats = sortPinned(chatSessions)
 
   return (
@@ -98,26 +102,20 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
           {resources.length ? (
             <AnimatedList>
               {resources.map((resource) => (
-                <motion.article
+                <ResourceItem
                   key={resource.id}
-                  layout
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, x: -12 }}
-                  className="rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-2"
-                >
-                  <div className="flex items-start gap-2">
-                    <FileText size={16} className="mt-0.5 shrink-0 text-[#6f7f68]" />
-                    {!collapsed ? (
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-[#2f2b22]">{resource.name}</div>
-                        <div className="mt-0.5 truncate text-xs text-[#8f897a]">
-                          {resource.type.toUpperCase()} · {resource.tokenCount.toLocaleString()} tokens
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                </motion.article>
+                  collapsed={collapsed}
+                  resource={resource}
+                  onToggleContext={() =>
+                    updateResource(resource.id, { includedInContext: !resource.includedInContext })
+                  }
+                  onInsert={() => insertResourceIntoDocument(resource)}
+                  onDelete={() => {
+                    if (window.confirm(`移除资料「${resource.name}」？`)) {
+                      deleteResource(resource.id)
+                    }
+                  }}
+                />
               ))}
             </AnimatedList>
           ) : (
@@ -126,6 +124,59 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
         </NavigatorSection>
       </div>
     </div>
+  )
+}
+
+function ResourceItem({
+  resource,
+  collapsed,
+  onToggleContext,
+  onInsert,
+  onDelete,
+}: {
+  resource: ImportedResource
+  collapsed: boolean
+  onToggleContext: () => void
+  onInsert: () => void
+  onDelete: () => void
+}) {
+  return (
+    <motion.article
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, x: -12 }}
+      className={`rounded-lg border p-2 transition ${
+        resource.includedInContext
+          ? 'border-[#cfd8c7] bg-[#f8fff6]'
+          : 'border-[#e8ddc7] bg-[#fffefa]'
+      }`}
+    >
+      <div className="flex items-start gap-2">
+        <FileText size={16} className="mt-0.5 shrink-0 text-[#6f7f68]" />
+        {!collapsed ? (
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium text-[#2f2b22]">{resource.name}</div>
+            <div className="mt-0.5 truncate text-xs text-[#8f897a]">
+              {resource.type.toUpperCase()} · {resource.tokenCount.toLocaleString()} tokens ·{' '}
+              {resource.includedInContext ? '已入上下文' : '未入上下文'}
+            </div>
+          </div>
+        ) : null}
+      </div>
+      {!collapsed ? (
+        <div className="mt-2 flex justify-end gap-1">
+          <MiniAction
+            icon={resource.includedInContext ? MinusCircle : PlusCircle}
+            title={resource.includedInContext ? '从上下文排除' : '加入上下文'}
+            onClick={onToggleContext}
+            className="text-[#6f7f68] hover:bg-[#edf6eb]"
+          />
+          <MiniAction icon={FilePlus2} title="插入文稿" onClick={onInsert} className="text-[#8f897a] hover:bg-[#f4ead8]" />
+          <MiniAction icon={Trash2} title="移除资料" onClick={onDelete} className="text-[#8f897a] hover:bg-[#f4ead8]" />
+        </div>
+      ) : null}
+    </motion.article>
   )
 }
 

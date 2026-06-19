@@ -25,7 +25,7 @@ export function composeWritingContext(options: { includeFullCurrentArticle?: boo
   const currentArticle = chatArticles.find((article) => article.id === state.activeArticleId)
   const otherArticles = chatArticles.filter((article) => article.id !== state.activeArticleId)
   const resources = state.resources
-    .filter((resource) => resource.content)
+    .filter((resource) => resource.content && resource.includedInContext)
     .slice(0, 8)
     .map((resource) => `[${resource.name}]\n${resource.content.slice(0, 1200)}`)
     .join('\n\n')
