@@ -6,6 +6,8 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $distDir = Join-Path $repoRoot "dist-wps-addin"
+$packageJson = Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
+$version = [string]$packageJson.version
 
 if (-not (Test-Path $distDir)) {
   throw "dist-wps-addin not found. Run npm run wps:build first."
@@ -26,6 +28,18 @@ $publishPath = Join-Path $jsAddonsRoot "publish.xml"
 
 New-Item -ItemType Directory -Force -Path $addinDir | Out-Null
 Copy-Item -Path (Join-Path $distDir "*") -Destination $addinDir -Recurse -Force
+
+$versionPath = Join-Path $addinDir "papyrus-wps-version.json"
+[ordered]@{
+  version = $version
+  product = "Papyrus WPS Add-in"
+  pubDate = (Get-Date).ToUniversalTime().ToString("o")
+} | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $versionPath -Encoding UTF8
+
+$installerUpdateScript = Join-Path $repoRoot "apps\wps-word-addin\installer\update.ps1"
+if (Test-Path $installerUpdateScript) {
+  Copy-Item -LiteralPath $installerUpdateScript -Destination (Join-Path $addinDir "update.ps1") -Force
+}
 
 if (Test-Path $publishPath) {
   [xml]$publish = Get-Content -LiteralPath $publishPath -Raw
@@ -54,5 +68,6 @@ $publish.Save($writer)
 $writer.Close()
 
 Write-Host "Synced WPS addin to: $addinDir"
+Write-Host "Wrote version file: $versionPath"
 Write-Host "Updated publish file: $publishPath"
 Write-Host "Restart WPS Writer to reload the addin."

@@ -1,5 +1,7 @@
 import type { WpsDocumentSnapshot, WpsPatchOperation } from '../types'
 
+const DEBUG_KEY = 'papyrus.wps.addin.debug'
+
 type WpsLikeWindow = Window &
   typeof globalThis & {
     wps?: {
@@ -15,6 +17,10 @@ type WpsApplicationLike = {
 
 type WpsSelectionLike = {
   Text?: string
+  Range?: {
+    Text?: string
+    EndKey?: (unit?: number) => void
+  }
   TypeText?: (text: string) => void
   WholeStory?: () => void
   EndKey?: (unit?: number) => void
@@ -22,6 +28,14 @@ type WpsSelectionLike = {
 
 type WpsDocumentLike = {
   Content?: {
+    Text?: string
+    InsertAfter?: (text: string) => void
+    Range?: {
+      Text?: string
+      InsertAfter?: (text: string) => void
+    }
+  }
+  Range?: {
     Text?: string
     InsertAfter?: (text: string) => void
   }
@@ -76,8 +90,10 @@ function createMockBridge(): WpsDocumentBridge {
       documentExcerpt: mockDocument.text.slice(0, 4200),
       cursorAvailable: true,
       wordCount: countCjkFriendlyWords(mockDocument.text),
+      mode: 'mock',
     }),
     applyPatch: async (operation, content) => {
+      recordDebug('Mock apply patch', operation)
       if (operation === 'replace_selection') {
         mockDocument.text = mockDocument.text.replace(mockDocument.selection, content)
         mockDocument.selection = content.slice(0, 120)
@@ -100,22 +116,50 @@ function getWpsApplication() {
   const wps = (window as WpsLikeWindow).wps
 
   try {
-    return wps?.WpsApplication?.() ?? wps?.Application
+    if (typeof wps?.WpsApplication === 'function') {
+      const app = wps.WpsApplication()
+
+      if (app) {
+        return app
+      }
+    }
+
+    if (wps?.Application) {
+      return wps.Application
+    }
+
+    return (window as WpsLikeWindow & { Application?: WpsApplicationLike }).Application
   } catch {
     return undefined
   }
 }
 
 async function readWpsSnapshot(app: WpsApplicationLike): Promise<WpsDocumentSnapshot> {
-  const selectionText = normalizeWpsText(app.Selection?.Text ?? '')
-  const documentText = normalizeWpsText(app.ActiveDocument?.Content?.Text ?? selectionText)
+  const selectionText = normalizeWpsText(
+    readText(app.Selection?.Text) || readText(app.Selection?.Range?.Text),
+  )
+  const documentText = normalizeWpsText(
+    readText(app.ActiveDocument?.Content?.Text) ||
+      readText(app.ActiveDocument?.Content?.Range?.Text) ||
+      readText(app.ActiveDocument?.Range?.Text) ||
+      selectionText,
+  )
 
-  return {
+  const snapshot = {
     selectionText,
     documentExcerpt: createExcerpt(documentText),
     cursorAvailable: Boolean(app.Selection),
     wordCount: countCjkFriendlyWords(documentText),
+    mode: 'wps' as const,
   }
+
+  recordDebug('Read WPS snapshot', {
+    selectionLength: selectionText.length,
+    excerptLength: snapshot.documentExcerpt.length,
+    cursorAvailable: snapshot.cursorAvailable,
+  })
+
+  return snapshot
 }
 
 async function applyWpsPatch(
@@ -131,6 +175,7 @@ async function applyWpsPatch(
 
   if (operation === 'copy_only') {
     await navigator.clipboard?.writeText(normalized)
+    recordDebug('Copied patch', { length: normalized.length })
     return
   }
 
@@ -143,10 +188,18 @@ async function applyWpsPatch(
   if (operation === 'replace_selection' || operation === 'insert_at_cursor') {
     if (typeof selection.TypeText === 'function') {
       selection.TypeText(normalized)
+      recordDebug('Applied patch via Selection.TypeText', { operation, length: normalized.length })
+      return
+    }
+
+    if (selection.Range) {
+      selection.Range.Text = normalized
+      recordDebug('Applied patch via Selection.Range.Text', { operation, length: normalized.length })
       return
     }
 
     selection.Text = normalized
+    recordDebug('Applied patch via Selection.Text', { operation, length: normalized.length })
     return
   }
 
@@ -155,11 +208,19 @@ async function applyWpsPatch(
 
     if (typeof contentRange?.InsertAfter === 'function') {
       contentRange.InsertAfter(`\n\n${normalized}`)
+      recordDebug('Applied patch via Document.Content.InsertAfter', { length: normalized.length })
+      return
+    }
+
+    if (typeof app.ActiveDocument?.Range?.InsertAfter === 'function') {
+      app.ActiveDocument.Range.InsertAfter(`\n\n${normalized}`)
+      recordDebug('Applied patch via Document.Range.InsertAfter', { length: normalized.length })
       return
     }
 
     selection.EndKey?.(6)
     selection.TypeText?.(`\n\n${normalized}`)
+    recordDebug('Applied patch via Selection.EndKey/TypeText fallback', { length: normalized.length })
     return
   }
 
@@ -168,6 +229,26 @@ async function applyWpsPatch(
 
 function normalizeWpsText(value: string) {
   return value.replace(/\r/g, '\n').split('\u0007').join('').trim()
+}
+
+function readText(value: unknown) {
+  return typeof value === 'string' ? value : ''
+}
+
+function recordDebug(message: string, detail?: unknown) {
+  try {
+    const entry = {
+      time: new Date().toISOString(),
+      message,
+      detail,
+    }
+    const raw = window.localStorage.getItem(DEBUG_KEY)
+    const items = raw ? (JSON.parse(raw) as unknown[]) : []
+    items.push(entry)
+    window.localStorage.setItem(DEBUG_KEY, JSON.stringify(items.slice(-80)))
+  } catch {
+    // Older WPS webviews can fail localStorage access; diagnostics must not break writing.
+  }
 }
 
 function createExcerpt(text: string) {

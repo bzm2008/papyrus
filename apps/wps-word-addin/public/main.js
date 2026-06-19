@@ -76,6 +76,18 @@ function GetUrlPath() {
   return locationHref.slice(0, index + 1)
 }
 
+function GetApplication(wpsApi) {
+  var app = null
+
+  try {
+    app = typeof wpsApi.WpsApplication === 'function' ? wpsApi.WpsApplication() : null
+  } catch (error) {
+    app = null
+  }
+
+  return app || wpsApi.Application || null
+}
+
 function SetTaskPaneVisible(taskPane) {
   if (!taskPane) {
     return
@@ -97,35 +109,43 @@ function SetTaskPaneVisible(taskPane) {
 }
 
 function CreatePapyrusTaskPane(wpsApi, taskPaneUrl) {
-  var candidates = [
-    function () {
-      return wpsApi.CreateTaskPane(taskPaneUrl, 'Papyrus')
-    },
-    function () {
-      return wpsApi.CreateTaskPane(taskPaneUrl)
-    },
-    function () {
-      return wpsApi.CreateTaskpane(taskPaneUrl, 'Papyrus')
-    },
-    function () {
-      return wpsApi.CreateTaskpane(taskPaneUrl)
-    },
-  ]
-  var app
+  var app = GetApplication(wpsApi)
+  var candidates = []
 
-  try {
-    app = typeof wpsApi.WpsApplication === 'function' ? wpsApi.WpsApplication() : wpsApi.Application
-  } catch (error) {
-    app = null
+  if (typeof wpsApi.CreateTaskPane === 'function') {
+    candidates.push(function () {
+      return wpsApi.CreateTaskPane(taskPaneUrl, 'Papyrus')
+    })
+    candidates.push(function () {
+      return wpsApi.CreateTaskPane(taskPaneUrl)
+    })
+  }
+
+  if (typeof wpsApi.CreateTaskpane === 'function') {
+    candidates.push(function () {
+      return wpsApi.CreateTaskpane(taskPaneUrl, 'Papyrus')
+    })
+    candidates.push(function () {
+      return wpsApi.CreateTaskpane(taskPaneUrl)
+    })
   }
 
   if (app) {
-    candidates.push(function () {
-      return app.CreateTaskPane(taskPaneUrl, 'Papyrus')
-    })
-    candidates.push(function () {
-      return app.CreateTaskpane(taskPaneUrl, 'Papyrus')
-    })
+    if (typeof app.CreateTaskPane === 'function') {
+      candidates.push(function () {
+        return app.CreateTaskPane(taskPaneUrl, 'Papyrus')
+      })
+    }
+    if (typeof app.CreateTaskpane === 'function') {
+      candidates.push(function () {
+        return app.CreateTaskpane(taskPaneUrl, 'Papyrus')
+      })
+    }
+    if (typeof app.ShowDialog === 'function') {
+      candidates.push(function () {
+        return app.ShowDialog(taskPaneUrl, 'Papyrus', 420, 720, false, true)
+      })
+    }
   }
 
   for (var index = 0; index < candidates.length; index += 1) {

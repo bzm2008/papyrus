@@ -53,6 +53,7 @@ if (Test-Path $releasePath) {
 }
 
 $updateScriptSource = Join-Path $packageRoot "update.ps1"
+$updateScriptTarget = $null
 if (Test-Path $updateScriptSource) {
   $updateScriptTarget = Join-Path $addinDir "update.ps1"
   Copy-Item -LiteralPath $updateScriptSource -Destination $updateScriptTarget -Force
@@ -61,7 +62,7 @@ if (Test-Path $updateScriptSource) {
 New-Item -ItemType Directory -Force -Path $jsAddonsRoot | Out-Null
 Update-PublishFile -Name $AddinName -PublishPath $publishPath
 
-if (Test-Path $updateScriptTarget) {
+if ($updateScriptTarget -and (Test-Path $updateScriptTarget)) {
   try {
     $taskName = "Papyrus WPS Addin Update"
     $args = "-NoProfile -ExecutionPolicy Bypass -File `"$updateScriptTarget`" -AddinName `"$AddinName`" -ManifestUrl `"$UpdateManifestUrl`" -Silent"

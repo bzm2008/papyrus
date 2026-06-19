@@ -38,6 +38,8 @@ const emptySnapshot: WpsDocumentSnapshot = {
   wordCount: 0,
 }
 
+const addinVersion = import.meta.env.VITE_PAPYRUS_WPS_VERSION || 'dev'
+
 export default function App() {
   const bridgeRef = useRef<WpsDocumentBridge | undefined>(undefined)
   const [session, setSession] = useState<ScallionSession | undefined>(() => loadStoredSession())
@@ -74,6 +76,12 @@ export default function App() {
     lastError ||
     (!session ? '登录后可使用内置模型' : '') ||
     (runState === 'running' ? '正在处理' : `${contextLabel} · ${snapshot.wordCount} 字上下文`)
+  const healthItems = [
+    { label: bridgeMode, tone: bridgeMode === 'WPS' ? 'ok' : 'warn' },
+    { label: session ? '已登录' : '未登录', tone: session ? 'ok' : 'warn' },
+    { label: snapshot.cursorAvailable ? contextLabel : '未连接文档', tone: snapshot.cursorAvailable ? 'ok' : 'warn' },
+    { label: `v${addinVersion}`, tone: 'neutral' },
+  ] as const
 
   const refreshSnapshot = useCallback(async () => {
     try {
@@ -337,6 +345,14 @@ export default function App() {
           )}
         </div>
       </header>
+
+      <section className="health-strip" aria-label="插件状态">
+        {healthItems.map((item) => (
+          <span key={item.label} className={`health-pill ${item.tone}`}>
+            {item.label}
+          </span>
+        ))}
+      </section>
 
       <section className="conversation">
         {messages.map((message) => (

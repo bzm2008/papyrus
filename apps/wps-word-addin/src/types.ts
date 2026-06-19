@@ -3,6 +3,7 @@ export type WpsDocumentSnapshot = {
   documentExcerpt: string
   cursorAvailable: boolean
   wordCount: number
+  mode?: 'wps' | 'mock'
 }
 
 export type WpsPatchOperation =

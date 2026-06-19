@@ -19,11 +19,10 @@ if (-not (Test-Path $distDir)) {
 }
 
 $outRoot = Join-Path $repoRoot $OutputDir
-$stageRoot = Join-Path $outRoot "Papyrus-WPS-Addin_$Version"
+$stageRoot = Join-Path $env:TEMP ("Papyrus-WPS-Addin_$Version-" + [Guid]::NewGuid().ToString("N"))
 $addinStage = Join-Path $stageRoot "addin"
 $zipPath = Join-Path $outRoot "Papyrus-WPS-Addin_$Version.zip"
 
-Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $addinStage | Out-Null
 New-Item -ItemType Directory -Force -Path $outRoot | Out-Null
 
@@ -43,5 +42,6 @@ $release | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stageR
 
 Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $stageRoot "*") -DestinationPath $zipPath -Force
+Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "Created WPS add-in package: $zipPath"

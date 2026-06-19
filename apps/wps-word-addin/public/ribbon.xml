@@ -9,6 +9,10 @@
             label="打开 Papyrus"
             size="large"
             onAction="ShowPapyrusTaskPane"
+            getEnabled="GetEnabled"
+            getVisible="GetVisible"
+            screentip="打开 Papyrus 侧栏"
+            supertip="在 WPS 右侧打开 Papyrus 文学秘书与写作工作台。"
           />
         </group>
       </tab>

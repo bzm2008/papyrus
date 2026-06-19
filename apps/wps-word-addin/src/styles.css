@@ -76,6 +76,40 @@ button {
   gap: 8px;
 }
 
+.health-strip {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: rgba(250, 248, 241, 0.86);
+  padding: 7px 10px;
+}
+
+.health-pill {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 3px 8px;
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.health-pill.ok {
+  border-color: rgba(49, 196, 118, 0.36);
+  background: #f0fbf4;
+  color: var(--brand);
+}
+
+.health-pill.warn {
+  border-color: rgba(214, 170, 79, 0.42);
+  background: #fff7e3;
+  color: #8a641d;
+}
+
 .brand-mark {
   display: grid;
   width: 30px;
