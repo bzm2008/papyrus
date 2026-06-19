@@ -596,6 +596,7 @@ type AppState = TokenSnapshot & {
   updateAgentMemory: (id: string, patch: Partial<Omit<AgentMemoryRecord, 'id'>>) => void
   forgetAgentMemory: (id: string) => void
   touchAgentMemory: (ids: string[]) => void
+  clearAgentMemory: () => void
   setPendingDocumentPatch: (patch?: Omit<DocumentPatch, 'id' | 'createdAt' | 'status'>) => void
   markDocumentPatch: (status: DocumentPatchStatus) => void
   addResources: (resources: ImportedResource[]) => void
@@ -1435,6 +1436,12 @@ export const useAppStore = create<AppState>()(
                 : memory,
             ),
           }
+        }),
+      clearAgentMemory: () =>
+        set({
+          agentMemoryRecords: [],
+          agentRuns: [],
+          activeAgentRunId: undefined,
         }),
       setPendingDocumentPatch: (patch) =>
         set({

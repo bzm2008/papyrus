@@ -9,6 +9,7 @@ import {
   Network,
   Play,
   RefreshCw,
+  ScrollText,
   Server,
   Settings2,
   ShieldAlert,
@@ -59,6 +60,9 @@ export function MaintenanceConsole() {
   const setMemoryUsageBytes = useAppStore((state) => state.setMemoryUsageBytes)
   const setEnvReady = useAppStore((state) => state.setEnvReady)
   const memoryUsageBytes = useAppStore((state) => state.memoryUsageBytes)
+  const agentMemoryRecords = useAppStore((state) => state.agentMemoryRecords)
+  const agentRuns = useAppStore((state) => state.agentRuns)
+  const clearAgentMemory = useAppStore((state) => state.clearAgentMemory)
   const activeProviderId = useAppStore((state) => state.activeProviderId)
   const setActiveProviderId = useAppStore((state) => state.setActiveProviderId)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
@@ -134,6 +138,10 @@ export function MaintenanceConsole() {
     }
 
     const result = confirmAction === 'clear' ? await clearGlobalMemory() : await rebuildProjectIndex()
+
+    if (confirmAction === 'clear') {
+      clearAgentMemory()
+    }
 
     if (typeof result.bytes === 'number') {
       setMemoryUsageBytes(result.bytes)
@@ -250,6 +258,8 @@ export function MaintenanceConsole() {
             {maintenanceTab === 'memory' ? (
               <MemoryPanel
                 memoryUsageBytes={memoryUsageBytes}
+                agentMemoryRecords={agentMemoryRecords}
+                agentRuns={agentRuns}
                 onClear={() => setConfirmAction('clear')}
                 onRebuild={() => setConfirmAction('rebuild')}
               />
@@ -452,13 +462,21 @@ function ModelCard({
 
 function MemoryPanel({
   memoryUsageBytes,
+  agentMemoryRecords,
+  agentRuns,
   onClear,
   onRebuild,
 }: {
   memoryUsageBytes: number
+  agentMemoryRecords: ReturnType<typeof useAppStore.getState>['agentMemoryRecords']
+  agentRuns: ReturnType<typeof useAppStore.getState>['agentRuns']
   onClear: () => void
   onRebuild: () => void
 }) {
+  const activeMemories = agentMemoryRecords.filter((memory) => memory.status !== 'archived')
+  const recentMemories = activeMemories.slice(0, 5)
+  const recentRuns = agentRuns.slice(0, 5)
+
   return (
     <section className="mx-auto max-w-4xl">
       <PanelHeading
@@ -482,6 +500,18 @@ function MemoryPanel({
         </div>
 
         <div className="mt-5 grid gap-3 md:grid-cols-2">
+          <MemoryMetricCard
+            icon={MemoryStick}
+            label="Agent memories"
+            value={String(activeMemories.length)}
+            caption="Run summaries, preferences, remote contacts"
+          />
+          <MemoryMetricCard
+            icon={ScrollText}
+            label="Harness runs"
+            value={String(agentRuns.length)}
+            caption="Flow, Companion, and remote executions"
+          />
           <DangerButton
             icon={Trash2}
             title="清空全局记忆"
@@ -496,7 +526,86 @@ function MemoryPanel({
           />
         </div>
       </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <MemoryList
+          title="Recent agent memories"
+          empty="No local agent memories yet."
+          items={recentMemories.map((memory) => ({
+            id: memory.id,
+            title: `${memory.kind} / ${memory.scope}`,
+            body: memory.content,
+            meta: `${memory.status} · confidence ${Math.round(memory.confidence * 100)}% · used ${memory.useCount}`,
+          }))}
+        />
+        <MemoryList
+          title="Recent harness runs"
+          empty="No harness runs yet."
+          items={recentRuns.map((run) => ({
+            id: run.id,
+            title: `${run.mode} / ${run.source} / ${run.status}`,
+            body: run.summary || run.prompt,
+            meta: `${run.stepCount} steps · ${run.traceCount} traces · ${new Date(run.startedAt).toLocaleString()}`,
+          }))}
+        />
+      </div>
     </section>
+  )
+}
+
+function MemoryMetricCard({
+  icon: Icon,
+  label,
+  value,
+  caption,
+}: {
+  icon: typeof MemoryStick
+  label: string
+  value: string
+  caption: string
+}) {
+  return (
+    <div className="rounded-xl border border-[#e8ddc7] bg-[#fffdf7] p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="grid size-9 place-items-center rounded-lg bg-[#f4eddf] text-[#3f5845]">
+          <Icon size={17} />
+        </div>
+        <div className="text-2xl font-semibold text-[#171714]">{value}</div>
+      </div>
+      <div className="text-sm font-semibold text-[#171714]">{label}</div>
+      <div className="mt-1 text-xs leading-5 text-[#7d7a70]">{caption}</div>
+    </div>
+  )
+}
+
+function MemoryList({
+  title,
+  empty,
+  items,
+}: {
+  title: string
+  empty: string
+  items: Array<{ id: string; title: string; body: string; meta: string }>
+}) {
+  return (
+    <div className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">
+      <div className="mb-3 text-sm font-semibold text-[#171714]">{title}</div>
+      {items.length ? (
+        <div className="space-y-2">
+          {items.map((item) => (
+            <div key={item.id} className="rounded-lg border border-[#efe5d1] bg-[#fffdf7] p-3">
+              <div className="text-xs font-semibold text-[#2f2b22]">{item.title}</div>
+              <div className="mt-1 line-clamp-3 text-xs leading-5 text-[#6f7168]">{item.body}</div>
+              <div className="mt-2 text-[11px] text-[#9d988a]">{item.meta}</div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-dashed border-[#d8d1c2] bg-[#fffdf7] p-4 text-xs text-[#8f897a]">
+          {empty}
+        </div>
+      )}
+    </div>
   )
 }
 
