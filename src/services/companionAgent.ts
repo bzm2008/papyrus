@@ -1,4 +1,5 @@
 import { composeSystemPrompt } from './agentPromptContext'
+import { failAgentRun, finishAgentRun, startAgentRun, type AgentHarnessRunInput } from './agentHarness'
 import { composeWritingContext } from './contextComposer'
 import {
   extractDraftText,
@@ -23,7 +24,10 @@ export type CompanionAgentResult = {
   mode: 'advice' | 'replacement' | 'patch'
 }
 
-export async function sendCompanionMessage(prompt: string): Promise<CompanionAgentResult> {
+export async function sendCompanionMessage(
+  prompt: string,
+  harnessInput: Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mode'>> = {},
+): Promise<CompanionAgentResult> {
   const content = prompt.trim()
 
   if (!content) {
@@ -34,6 +38,14 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
   const provider = store.providerConfigs[store.activeProviderId]
   const selectedText = store.editorSelectionText.trim()
   const writeIntent = shouldCreateDocumentPatch(content)
+  const run = startAgentRun({
+    prompt: content,
+    mode: 'companion',
+    source: harnessInput.source ?? 'local',
+    remoteJobId: harnessInput.remoteJobId,
+    remotePlatform: harnessInput.remotePlatform,
+    remoteSenderId: harnessInput.remoteSenderId,
+  })
   const userMessage = store.addCompanionMessage({ role: 'user', content })
   const assistantMessage = store.addCompanionMessage({
     role: 'assistant',
@@ -56,12 +68,20 @@ export async function sendCompanionMessage(prompt: string): Promise<CompanionAge
     useAppStore.getState().setCompanionRunState('idle')
     useAppStore.getState().setLlmRunState('idle', '文学秘书已完成')
 
+    finishAgentRun(run, {
+      status: 'completed',
+      response: result.reply,
+      patchContent: result.patch?.content ?? result.replacement,
+      summary: summarizeCompanionRun(content, result),
+    })
+
     return result
   } catch (error) {
     const message = error instanceof Error ? error.message : '文学秘书处理失败'
     useAppStore.getState().updateCompanionMessage(assistantMessage.id, { content: message })
     useAppStore.getState().setCompanionRunState('error')
     useAppStore.getState().setLlmRunState('error', message)
+    failAgentRun(run, error)
 
     return { reply: message, mode: 'advice' }
   } finally {
@@ -180,6 +200,19 @@ function companionSystemBase() {
     '事实、推断、创作设定和写作建议必须分开。不要编造来源。',
     '当用户要求写作或改写时，保留作者原意和声音；当用户要求知识解释时，先直接回答，再给例子和可迁移写法。',
   ].join('\n')
+}
+
+function summarizeCompanionRun(prompt: string, result: CompanionAgentResult) {
+  return [
+    `Prompt: ${prompt.slice(0, 220)}`,
+    `Mode: ${result.mode}`,
+    `Reply: ${result.reply.replace(/\s+/g, ' ').slice(0, 360)}`,
+    result.patch?.content || result.replacement
+      ? `Patch: ${(result.patch?.content ?? result.replacement ?? '').replace(/\s+/g, ' ').slice(0, 220)}`
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 async function contextBlock(instruction: string) {

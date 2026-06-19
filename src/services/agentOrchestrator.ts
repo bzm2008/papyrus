@@ -1,4 +1,5 @@
 import { composeSystemPrompt } from './agentPromptContext'
+import { failAgentRun, finishAgentRun, startAgentRun, type AgentHarnessRunInput } from './agentHarness'
 import { composeSkillPrompt } from './agentSkillLibrary'
 import { composeWritingContext } from './contextComposer'
 import {
@@ -125,7 +126,10 @@ const sharedAgentRules = [
   '始终遵守 STYLE.md、WORLD.md、用户负向记忆、导入资源和当前文稿上下文。',
 ].join('\n')
 
-export async function sendFlowMessage(prompt: string) {
+export async function sendFlowMessage(
+  prompt: string,
+  harnessInput: Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mode'>> = {},
+) {
   const content = prompt.trim()
 
   if (!content) {
@@ -134,8 +138,17 @@ export async function sendFlowMessage(prompt: string) {
 
   const store = useAppStore.getState()
   const provider = store.providerConfigs[store.activeProviderId]
+  const run = startAgentRun({
+    prompt: content,
+    mode: 'flow',
+    source: harnessInput.source ?? 'local',
+    remoteJobId: harnessInput.remoteJobId,
+    remotePlatform: harnessInput.remotePlatform,
+    remoteSenderId: harnessInput.remoteSenderId,
+  })
 
   store.clearFlowRun()
+  store.setActiveAgentRunId(run.id)
   store.addFlowMessage({ role: 'user', content })
   store.setLlmRunState('running', '主笔正在判断任务路径')
 
@@ -161,6 +174,13 @@ export async function sendFlowMessage(prompt: string) {
       })
     }
 
+    finishAgentRun(run, {
+      status: 'completed',
+      response: result.response,
+      patchContent: result.patchContent,
+      summary: summarizeFlowRun(content, plan, result),
+    })
+
     useAppStore
       .getState()
       .setLlmRunState(
@@ -168,6 +188,7 @@ export async function sendFlowMessage(prompt: string) {
         canCallProvider(provider) ? '主笔已完成本轮编排' : '使用本地保守编排完成',
       )
   } catch (error) {
+    failAgentRun(run, error)
     useAppStore.getState().addFlowMessage({
       role: 'assistant',
       agentId: 'writer',
@@ -1223,6 +1244,18 @@ function formatPlanDetail(plan: AgentRunPlan) {
     `工具：${plan.toolCalls.map((call) => call.name).join(' / ') || '无'}`,
     `写入文稿：${plan.writeIntent ? plan.documentPatchOperation : '否'}`,
   ].join('\n')
+}
+
+function summarizeFlowRun(prompt: string, plan: AgentRunPlan, result: AgentRunResult) {
+  return [
+    `Prompt: ${prompt.slice(0, 220)}`,
+    `Goal: ${plan.conversationGoal}`,
+    `Mode: ${plan.writeIntent ? 'document_patch' : 'conversation'}`,
+    result.sources?.length ? `Sources: ${result.sources.map((source) => source.title).slice(0, 4).join(' / ')}` : '',
+    `Result: ${(result.response || result.patchContent || '').replace(/\s+/g, ' ').slice(0, 360)}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 function taskDetailForAgent(agentId: FlowAgentId) {

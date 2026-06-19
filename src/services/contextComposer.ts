@@ -1,5 +1,6 @@
 import { composeStoryContext } from './storyEngine'
 import { estimateTokens } from './tokenizer'
+import { composeMemoryContext } from './memoryEngine'
 import { useAppStore, type ArticleRecord } from '../stores/useAppStore'
 
 export type WritingContextBundle = {
@@ -38,10 +39,24 @@ export function composeWritingContext(options: { includeFullCurrentArticle?: boo
     .map((article) => `[${article.title}]\n${article.text.slice(0, 1600)}`)
     .join('\n\n')
   const storyContext = composeStoryContext()
+  const memoryQuery = [
+    state.editorText.slice(0, 1200),
+    state.flowMessages.slice(-4).map((message) => message.content).join('\n'),
+    state.companionMessages.slice(-4).map((message) => message.content).join('\n'),
+    state.projectGuidance.style,
+    state.projectGuidance.world,
+  ].join('\n')
+  const memoryContext = composeMemoryContext(memoryQuery, {
+    chatId: state.activeChatId,
+    projectId: state.activeStoryProjectId,
+    limit: 6,
+    includeTentative: true,
+  })
   const sections = [
     state.projectGuidance.style ? `STYLE.md:\n${state.projectGuidance.style}` : '',
     state.projectGuidance.world ? `WORLD.md:\n${state.projectGuidance.world}` : '',
     state.negativeMemories.length ? `负向记忆:\n${state.negativeMemories.join('\n')}` : '',
+    memoryContext.text ? `Agent Memory:\n${memoryContext.text}` : '',
     currentArticle
       ? `当前文章:\n${
           options.includeFullCurrentArticle ? currentArticle.text : currentArticle.text.slice(0, 7000)

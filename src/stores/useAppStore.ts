@@ -37,6 +37,19 @@ export type FlowTraceStatus = 'pending' | 'running' | 'completed' | 'error'
 export type FlowTraceKind = 'plan' | 'agent' | 'tool' | 'document' | 'memory'
 export type AgentStepType = 'plan' | 'tool' | 'sub_agent' | 'generation'
 export type AgentStepStatus = 'pending' | 'running' | 'completed' | 'error'
+export type AgentRunStatus = 'running' | 'completed' | 'failed'
+export type AgentRunSource = 'local' | 'remote' | 'system'
+export type AgentMemoryScope = 'global' | 'chat' | 'project' | 'remote'
+export type AgentMemoryKind =
+  | 'preference'
+  | 'fact'
+  | 'style'
+  | 'resource'
+  | 'run_summary'
+  | 'remote_contact'
+  | 'task_pattern'
+  | 'decision'
+export type AgentMemoryStatus = 'active' | 'tentative' | 'archived'
 export type MaintenanceTab = 'connections' | 'models' | 'memory'
 export type MaintenanceCheckId = 'tauri' | 'sqlite' | 'llm'
 export type MaintenanceCheckStatus = 'idle' | 'checking' | 'ok' | 'warning' | 'error'
@@ -149,6 +162,7 @@ export type ArticleRecord = {
 
 export type AgentTodo = {
   id: string
+  agentRunId?: string
   title: string
   detail: string
   status: AgentTodoStatus
@@ -159,6 +173,7 @@ export type AgentTodo = {
 
 export type FlowTrace = {
   id: string
+  agentRunId?: string
   kind: FlowTraceKind
   title: string
   detail: string
@@ -176,6 +191,7 @@ export type FlowTrace = {
 
 export type AgentStep = {
   id: string
+  agentRunId?: string
   type: AgentStepType
   title: string
   status: AgentStepStatus
@@ -196,6 +212,7 @@ export type AgentStep = {
 export type AgentStepEvent =
   | {
       id?: string
+      agentRunId?: string
       type: AgentStepType
       title: string
       content?: string
@@ -364,6 +381,46 @@ export type ImportedResource = {
   importedAt: number
 }
 
+export type AgentMemoryRecord = {
+  id: string
+  scope: AgentMemoryScope
+  agentId?: FlowAgentId
+  chatId?: string
+  articleId?: string
+  projectId?: string
+  remotePlatform?: RemoteRelayPlatform
+  remoteSenderId?: string
+  kind: AgentMemoryKind
+  content: string
+  tags: string[]
+  confidence: number
+  source: string
+  sourceRunId?: string
+  createdAt: number
+  updatedAt: number
+  lastUsedAt?: number
+  useCount: number
+  status: AgentMemoryStatus
+}
+
+export type AgentRunRecord = {
+  id: string
+  mode: AppMode | RemoteRelayMode
+  status: AgentRunStatus
+  source: AgentRunSource
+  prompt: string
+  summary?: string
+  error?: string
+  remoteJobId?: string
+  remotePlatform?: RemoteRelayPlatform
+  remoteSenderId?: string
+  startedAt: number
+  endedAt?: number
+  stepCount: number
+  traceCount: number
+  memoryIds: string[]
+}
+
 export type MentionContextItem = {
   id: string
   type: 'chapter' | 'character' | 'world' | 'file' | 'skill'
@@ -434,6 +491,9 @@ type AppState = TokenSnapshot & {
   agentTodos: AgentTodo[]
   flowTraces: FlowTrace[]
   agentSteps: AgentStep[]
+  agentMemoryRecords: AgentMemoryRecord[]
+  agentRuns: AgentRunRecord[]
+  activeAgentRunId?: string
   resources: ImportedResource[]
   pendingDocumentPatch?: DocumentPatch
   llmRunState: LlmRunState
@@ -509,6 +569,33 @@ type AppState = TokenSnapshot & {
   toggleAgentStepExpanded: (id: string) => void
   clearAgentSteps: () => void
   clearFlowRun: () => void
+  startAgentRunRecord: (
+    run: Omit<
+      AgentRunRecord,
+      'id' | 'status' | 'startedAt' | 'stepCount' | 'traceCount' | 'memoryIds'
+    > & {
+      id?: string
+      status?: AgentRunStatus
+      startedAt?: number
+      memoryIds?: string[]
+    },
+  ) => AgentRunRecord
+  finishAgentRunRecord: (
+    id: string,
+    patch: { status: AgentRunStatus; summary?: string; error?: string; memoryIds?: string[] },
+  ) => void
+  setActiveAgentRunId: (agentRunId?: string) => void
+  upsertAgentMemory: (
+    memory: Omit<AgentMemoryRecord, 'id' | 'createdAt' | 'updatedAt' | 'useCount'> & {
+      id?: string
+      createdAt?: number
+      updatedAt?: number
+      useCount?: number
+    },
+  ) => AgentMemoryRecord
+  updateAgentMemory: (id: string, patch: Partial<Omit<AgentMemoryRecord, 'id'>>) => void
+  forgetAgentMemory: (id: string) => void
+  touchAgentMemory: (ids: string[]) => void
   setPendingDocumentPatch: (patch?: Omit<DocumentPatch, 'id' | 'createdAt' | 'status'>) => void
   markDocumentPatch: (status: DocumentPatchStatus) => void
   addResources: (resources: ImportedResource[]) => void
@@ -689,6 +776,9 @@ export const useAppStore = create<AppState>()(
       agentTodos: [],
       flowTraces: [],
       agentSteps: [],
+      agentMemoryRecords: [],
+      agentRuns: [],
+      activeAgentRunId: undefined,
       resources: [],
       pendingDocumentPatch: undefined,
       llmRunState: 'idle',
@@ -1147,18 +1237,19 @@ export const useAppStore = create<AppState>()(
           }
         }),
       setAgentTodos: (todos) =>
-        set({
+        set((state) => ({
           agentTodos: todos.map((todo) => {
             const now = Date.now()
 
             return {
               ...todo,
+              agentRunId: todo.agentRunId ?? state.activeAgentRunId,
               id: globalThis.crypto?.randomUUID?.() ?? `todo-${now}`,
               createdAt: now,
               updatedAt: now,
             }
           }),
-        }),
+        })),
       updateAgentTodo: (id, patch) =>
         set((state) => ({
           agentTodos: state.agentTodos.map((todo) =>
@@ -1168,6 +1259,7 @@ export const useAppStore = create<AppState>()(
       addFlowTrace: (trace) => {
         const flowTrace: FlowTrace = {
           ...trace,
+          agentRunId: trace.agentRunId ?? get().activeAgentRunId,
           id: globalThis.crypto?.randomUUID?.() ?? `trace-${Date.now()}`,
           startedAt: Date.now(),
         }
@@ -1185,21 +1277,23 @@ export const useAppStore = create<AppState>()(
           ),
         })),
       setAgentSteps: (steps) =>
-        set({
+        set((state) => ({
           agentSteps: steps.map((step) => {
             const now = Date.now()
 
             return {
               ...step,
+              agentRunId: step.agentRunId ?? state.activeAgentRunId,
               id: globalThis.crypto?.randomUUID?.() ?? `step-${now}`,
               startedAt: now,
             }
           }),
-        }),
+        })),
       addAgentStep: (step) => {
         const now = Date.now()
         const agentStep: AgentStep = {
           ...step,
+          agentRunId: step.agentRunId ?? get().activeAgentRunId,
           id: step.id ?? globalThis.crypto?.randomUUID?.() ?? `step-${now}`,
           startedAt: now,
           isExpanded: step.status === 'running' || step.status === 'error' || step.isExpanded,
@@ -1246,6 +1340,102 @@ export const useAppStore = create<AppState>()(
       clearAgentSteps: () => set({ agentSteps: [] }),
       clearFlowRun: () =>
         set({ agentTodos: [], flowTraces: [], agentSteps: [], pendingDocumentPatch: undefined }),
+      startAgentRunRecord: (input) => {
+        const now = Date.now()
+        const run: AgentRunRecord = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `agent-run-${now}`,
+          status: input.status ?? 'running',
+          startedAt: input.startedAt ?? now,
+          stepCount: 0,
+          traceCount: 0,
+          memoryIds: input.memoryIds ?? [],
+        }
+
+        set((state) => ({
+          activeAgentRunId: run.id,
+          agentRuns: [run, ...state.agentRuns.filter((item) => item.id !== run.id)].slice(0, 120),
+        }))
+
+        return run
+      },
+      finishAgentRunRecord: (id, patch) =>
+        set((state) => {
+          const memoryIds = patch.memoryIds ?? []
+
+          return {
+            activeAgentRunId: state.activeAgentRunId === id ? undefined : state.activeAgentRunId,
+            agentRuns: state.agentRuns.map((run) =>
+              run.id === id
+                ? {
+                    ...run,
+                    status: patch.status,
+                    summary: patch.summary ?? run.summary,
+                    error: patch.error ?? run.error,
+                    endedAt: Date.now(),
+                    stepCount: state.agentSteps.filter((step) => step.agentRunId === id).length,
+                    traceCount: state.flowTraces.filter((trace) => trace.agentRunId === id).length,
+                    memoryIds: uniqueIds([...run.memoryIds, ...memoryIds]),
+                  }
+                : run,
+            ),
+          }
+        }),
+      setActiveAgentRunId: (activeAgentRunId) => set({ activeAgentRunId }),
+      upsertAgentMemory: (input) => {
+        const now = Date.now()
+        const memory: AgentMemoryRecord = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `agent-memory-${now}`,
+          createdAt: input.createdAt ?? now,
+          updatedAt: input.updatedAt ?? now,
+          useCount: input.useCount ?? 0,
+        }
+
+        set((state) => ({
+          agentMemoryRecords: [
+            memory,
+            ...state.agentMemoryRecords.filter((item) => item.id !== memory.id),
+          ].slice(0, 600),
+        }))
+
+        return memory
+      },
+      updateAgentMemory: (id, patch) =>
+        set((state) => ({
+          agentMemoryRecords: state.agentMemoryRecords.map((memory) =>
+            memory.id === id ? { ...memory, ...patch, updatedAt: Date.now() } : memory,
+          ),
+        })),
+      forgetAgentMemory: (id) =>
+        set((state) => ({
+          agentMemoryRecords: state.agentMemoryRecords.map((memory) =>
+            memory.id === id
+              ? { ...memory, status: 'archived', updatedAt: Date.now() }
+              : memory,
+          ),
+        })),
+      touchAgentMemory: (ids) =>
+        set((state) => {
+          if (!ids.length) {
+            return {}
+          }
+
+          const idSet = new Set(ids)
+          const now = Date.now()
+
+          return {
+            agentMemoryRecords: state.agentMemoryRecords.map((memory) =>
+              idSet.has(memory.id)
+                ? {
+                    ...memory,
+                    lastUsedAt: now,
+                    useCount: memory.useCount + 1,
+                  }
+                : memory,
+            ),
+          }
+        }),
       setPendingDocumentPatch: (patch) =>
         set({
           pendingDocumentPatch: patch
@@ -1825,6 +2015,8 @@ export const useAppStore = create<AppState>()(
         agentTodos: state.agentTodos,
         flowTraces: state.flowTraces,
         agentSteps: state.agentSteps,
+        agentMemoryRecords: state.agentMemoryRecords,
+        agentRuns: state.agentRuns,
         resources: state.resources,
         pendingDocumentPatch: state.pendingDocumentPatch,
         scallionUser: state.scallionUser,
@@ -1906,6 +2098,9 @@ export const useAppStore = create<AppState>()(
           llmStatusMessage: 'LLM 待命',
           companionRunState: 'idle' as const,
           agentSteps: persistedState.agentSteps ?? [],
+          agentMemoryRecords: persistedState.agentMemoryRecords ?? current.agentMemoryRecords,
+          agentRuns: persistedState.agentRuns ?? current.agentRuns,
+          activeAgentRunId: undefined,
           updateStatus: 'idle' as const,
           updateMessage: '自动更新待命',
           updateProgress: 0,

@@ -111,6 +111,7 @@ export function useRemoteRelay() {
 async function handleRemoteJob(job: RemoteRelayJob, channelId?: string, accessKey?: string) {
   const state = useAppStore.getState()
   const mode = pickMode(job.mode, state.remoteRelayDefaultMode)
+  const allowedPlatforms = new Set(state.remoteRelayAllowedPlatforms)
   const clientConfig = {
     endpoint: state.remoteRelayEndpoint,
     token: state.scallionToken ?? '',
@@ -121,18 +122,28 @@ async function handleRemoteJob(job: RemoteRelayJob, channelId?: string, accessKe
   await ackRemoteRelayJob(clientConfig, job.id)
 
   try {
+    if (!allowedPlatforms.has(job.platform)) {
+      throw new Error(`Remote platform is not allowed: ${job.platform}`)
+    }
+
     const prompt = createRemotePrompt(job, mode)
     let reply = ''
+    const harnessInput = {
+      source: 'remote' as const,
+      remoteJobId: job.id,
+      remotePlatform: job.platform,
+      remoteSenderId: job.senderId,
+    }
 
     if (mode === 'flow') {
       const before = useAppStore.getState().flowMessages.length
-      await sendFlowMessage(prompt)
+      await sendFlowMessage(prompt, harnessInput)
       const messages = useAppStore.getState().flowMessages.slice(before)
       reply =
         [...messages].reverse().find((message) => message.role === 'assistant')?.content ||
         'Flow 已处理该远程任务，请回到 Papyrus 查看工作流结果。'
     } else {
-      const result = await sendCompanionMessage(prompt)
+      const result = await sendCompanionMessage(prompt, harnessInput)
       reply = result.reply || '文学秘书已处理该远程任务。'
     }
 

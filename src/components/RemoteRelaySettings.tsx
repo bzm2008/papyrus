@@ -9,6 +9,8 @@ import {
 } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import {
+  createAdapterCurlExample,
+  createAdapterWebhookPayloadExample,
   registerRemoteRelayChannel,
   normalizeRelayEndpoint,
 } from '../services/remoteRelayService'
@@ -37,6 +39,7 @@ const statusLabels: Record<RemoteRelayStatus, string> = {
 
 export function RemoteRelaySettings() {
   const [busy, setBusy] = useState(false)
+  const [samplePlatform, setSamplePlatform] = useState<RemoteRelayPlatform>('clawbot')
   const scallionToken = useAppStore((state) => state.scallionToken)
   const enabled = useAppStore((state) => state.remoteRelayEnabled)
   const endpoint = useAppStore((state) => state.remoteRelayEndpoint)
@@ -58,6 +61,14 @@ export function RemoteRelaySettings() {
 
     return `${normalizeRelayEndpoint(endpoint)}/webhook/${channelId}`
   }, [channelId, endpoint])
+  const adapterPayload = useMemo(
+    () => JSON.stringify(createAdapterWebhookPayloadExample(samplePlatform), null, 2),
+    [samplePlatform],
+  )
+  const curlExample = useMemo(
+    () => createAdapterCurlExample(webhookUrl, accessKey, samplePlatform),
+    [accessKey, samplePlatform, webhookUrl],
+  )
 
   const connect = async () => {
     if (!scallionToken) {
@@ -112,6 +123,16 @@ export function RemoteRelaySettings() {
 
     await navigator.clipboard?.writeText(webhookUrl)
     setRemoteRelayState({ message: 'Webhook 地址已复制' })
+  }
+
+  const copyAdapterPayload = async () => {
+    await navigator.clipboard?.writeText(adapterPayload)
+    setRemoteRelayState({ message: 'Adapter payload example copied' })
+  }
+
+  const copyCurlExample = async () => {
+    await navigator.clipboard?.writeText(curlExample)
+    setRemoteRelayState({ message: 'Webhook curl example copied' })
   }
 
   return (
@@ -256,6 +277,59 @@ export function RemoteRelaySettings() {
             className="h-10 w-full rounded-lg border border-[#d4e4d6] bg-white px-3 text-sm text-[#1f3d2a] outline-none transition focus:border-[#31a96b]"
           />
         </label>
+
+        <div className="rounded-lg border border-[#d4e4d6] bg-white p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-medium text-[#1f3d2a]">
+              <Clipboard size={14} />
+              Adapter contract
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {(Object.keys(platformLabels) as RemoteRelayPlatform[]).map((platform) => (
+                <button
+                  key={platform}
+                  type="button"
+                  onClick={() => setSamplePlatform(platform)}
+                  className={`h-7 rounded-full px-2 text-[11px] transition ${
+                    samplePlatform === platform
+                      ? 'bg-[#1f3d2a] text-white'
+                      : 'border border-[#d4e4d6] bg-[#fbfffb] text-[#667268]'
+                  }`}
+                >
+                  {platformLabels[platform]}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="mb-2 text-xs leading-5 text-[#667268]">
+            WeChat/QQ should come through Clawbot or a user-owned adapter. Feishu and WeCom
+            should post official bot callbacks to the same Scallion webhook.
+          </div>
+          <pre className="max-h-40 overflow-auto rounded-lg bg-[#f5fbf6] p-3 text-[11px] leading-5 text-[#1f3d2a]">
+            {adapterPayload}
+          </pre>
+          <pre className="mt-2 max-h-32 overflow-auto rounded-lg bg-[#f9f6ee] p-3 text-[11px] leading-5 text-[#4f6253]">
+            {curlExample}
+          </pre>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void copyAdapterPayload()}
+              className="inline-flex h-8 items-center gap-2 rounded-lg border border-[#d4e4d6] bg-[#fbfffb] px-3 text-xs font-medium text-[#667268] transition hover:text-[#1f3d2a]"
+            >
+              <Clipboard size={13} />
+              Copy payload
+            </button>
+            <button
+              type="button"
+              onClick={() => void copyCurlExample()}
+              className="inline-flex h-8 items-center gap-2 rounded-lg border border-[#d4e4d6] bg-[#fbfffb] px-3 text-xs font-medium text-[#667268] transition hover:text-[#1f3d2a]"
+            >
+              <Clipboard size={13} />
+              Copy curl
+            </button>
+          </div>
+        </div>
 
         <div className="rounded-lg bg-[#eef8f0] p-3 text-xs leading-5 text-[#4f6253]">
           Webhook: <span className="break-all font-medium text-[#1f3d2a]">{webhookUrl}</span>
