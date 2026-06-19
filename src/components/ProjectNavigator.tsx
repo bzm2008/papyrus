@@ -39,6 +39,8 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
   const updateResource = useAppStore((state) => state.updateResource)
   const deleteResource = useAppStore((state) => state.deleteResource)
   const sortedChats = sortPinned(chatSessions)
+  const includedResources = resources.filter((resource) => resource.includedInContext)
+  const includedResourceTokens = includedResources.reduce((sum, resource) => sum + resource.tokenCount, 0)
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -98,7 +100,15 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
           )}
         </NavigatorSection>
 
-        <NavigatorSection collapsed={collapsed} title="文件">
+        <NavigatorSection
+          collapsed={collapsed}
+          title="文件"
+          meta={
+            resources.length
+              ? `${includedResources.length}/${resources.length} · ${includedResourceTokens.toLocaleString()} tokens`
+              : undefined
+          }
+        >
           {resources.length ? (
             <AnimatedList>
               {resources.map((resource) => (
@@ -208,10 +218,25 @@ function SmallAction({
   )
 }
 
-function NavigatorSection({ title, collapsed, children }: { title: string; collapsed: boolean; children: ReactNode }) {
+function NavigatorSection({
+  title,
+  meta,
+  collapsed,
+  children,
+}: {
+  title: string
+  meta?: string
+  collapsed: boolean
+  children: ReactNode
+}) {
   return (
     <section>
-      {!collapsed ? <div className="mb-2 text-xs font-medium uppercase text-[#9d988a]">{title}</div> : null}
+      {!collapsed ? (
+        <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium uppercase text-[#9d988a]">
+          <span>{title}</span>
+          {meta ? <span className="truncate normal-case text-[#8f897a]">{meta}</span> : null}
+        </div>
+      ) : null}
       {children}
     </section>
   )
