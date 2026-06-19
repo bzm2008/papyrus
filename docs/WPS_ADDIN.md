@@ -40,6 +40,15 @@ dist-wps-addin/
 
 其中 `main.js` 和 `ribbon.xml` 供 WPS 加载项读取，`taskpane.html` 和 `assets/` 是侧边栏 Web 应用。
 
+为兼容部分 WPS 版本，构建产物会同时保留：
+
+```text
+main.js
+js/main.js
+```
+
+两者内容一致。部分 WPS 本地 JS 加载项示例默认寻找 `js/main.js`。
+
 ## 开发
 
 ```bash
@@ -67,6 +76,26 @@ npm run lint
 npm run build
 ```
 
+构建后可将插件同步到当前 Windows 用户的 WPS 加载项目录：
+
+```bash
+npm run wps:install
+```
+
+该命令会复制 `dist-wps-addin/` 到：
+
+```text
+C:\Users\<User>\AppData\Roaming\kingsoft\wps\jsaddons\PapyrusWpsAddin_\
+```
+
+并创建或更新同级 `publish.xml`。如果 WPS 已打开，需要重启 WPS 文字后重新加载插件。
+
+如果按钮显示但侧栏未打开，可查看插件回调调试记录：
+
+```bash
+npm run wps:debug
+```
+
 ## WPS 本地加载
 
 本地调试时，可把构建产物同步到 WPS JS 加载项目录，例如：
@@ -92,7 +121,8 @@ C:\Users\<User>\AppData\Roaming\kingsoft\wps\jsaddons\PapyrusWpsAddin_\
 - 已确认功能区能注入 `Open Sidebar` 按钮。
 - 已修正构建结构：不再把 Vite 的 `index.html` 作为加载入口，避免覆盖 WPS 自动加载机制。
 - 已把 `main.js` 保持为 ES5 安全写法，降低旧 WebView/IE 内核语法失败风险。
-- 当前测试机上的 WPS 版本仍存在按钮回调未触发的问题，需要后续继续对照该版本的官方示例或日志定位。
+- 已将 `ribbon.xml` 统一改为 `OnAction` 分发，并在 `main.js` 中增加多全局对象注册、任务窗格 API 大小写兼容和本地调试日志。
+- 当前测试机上的 WPS 版本需要重启后继续手测按钮回调。如果仍无法打开侧栏，可先检查浏览器本地存储中的 `papyrus.wps.addin.debug` 日志。
 
 ## 安全规则
 

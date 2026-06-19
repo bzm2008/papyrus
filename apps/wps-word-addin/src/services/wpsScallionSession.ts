@@ -41,29 +41,93 @@ export function clearSession() {
 }
 
 export async function createLoginDevice() {
-  const response = await fetch(`${AUTH_API}/device`, { method: 'POST' })
-  const device = (await response.json().catch(() => ({}))) as Partial<DeviceResponse>
+  const payload = await requestJson<Partial<DeviceResponse>>(`${AUTH_API}/device`, {
+    method: 'POST',
+  })
 
-  if (!response.ok || !device.deviceCode || !device.verificationUrl) {
+  if (!payload.deviceCode || !payload.verificationUrl) {
     throw new Error('无法创建 Scallion 登录设备码。')
   }
 
   return {
-    deviceCode: device.deviceCode,
-    userCode: device.userCode ?? '',
-    verificationUrl: device.verificationUrl,
-    expiresIn: device.expiresIn ?? 600,
-    interval: device.interval ?? 2,
+    deviceCode: payload.deviceCode,
+    userCode: payload.userCode ?? '',
+    verificationUrl: payload.verificationUrl,
+    expiresIn: payload.expiresIn ?? 600,
+    interval: payload.interval ?? 2,
   }
 }
 
 export async function pollLoginDevice(deviceCode: string) {
-  const response = await fetch(`${AUTH_API}/device/${encodeURIComponent(deviceCode)}`)
-  const payload = (await response.json().catch(() => ({}))) as PollResponse
+  return requestJson<PollResponse>(`${AUTH_API}/device/${encodeURIComponent(deviceCode)}`)
+}
 
-  if (!response.ok) {
-    throw new Error('Scallion 授权轮询失败。')
+async function requestJson<T>(url: string, options: { method?: string } = {}): Promise<T> {
+  if (typeof fetch === 'function') {
+    try {
+      const response = await fetch(url, {
+        method: options.method ?? 'GET',
+        mode: 'cors',
+        credentials: 'omit',
+        headers: {
+          Accept: 'application/json',
+        },
+      })
+      const payload = (await response.json().catch(() => ({}))) as T
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`)
+      }
+
+      return payload
+    } catch (error) {
+      if (typeof XMLHttpRequest !== 'function') {
+        throw networkError(error)
+      }
+    }
   }
 
-  return payload
+  try {
+    return await requestJsonWithXhr<T>(url, options.method ?? 'GET')
+  } catch (error) {
+    throw networkError(error)
+  }
+}
+
+function requestJsonWithXhr<T>(url: string, method: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open(method, url, true)
+    xhr.timeout = 12000
+    xhr.setRequestHeader('Accept', 'application/json')
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== 4) {
+        return
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(`HTTP ${xhr.status || 'network error'}`))
+        return
+      }
+
+      try {
+        resolve(JSON.parse(xhr.responseText || '{}') as T)
+      } catch {
+        reject(new Error('Scallion 返回了不可解析的授权响应。'))
+      }
+    }
+    xhr.onerror = () => reject(new Error('HTTP network error'))
+    xhr.ontimeout = () => reject(new Error('HTTP request timeout'))
+    xhr.send()
+  })
+}
+
+function networkError(error: unknown) {
+  const message = error instanceof Error ? error.message : ''
+
+  if (/network|failed to fetch|timeout/i.test(message)) {
+    return new Error('无法连接 Scallion。WPS 当前可能被跨域策略拦截，我会改用服务器放行后再试。')
+  }
+
+  return error instanceof Error ? error : new Error('Scallion 授权请求失败。')
 }

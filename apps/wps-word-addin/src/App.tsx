@@ -1,6 +1,5 @@
 import {
   Check,
-  ChevronDown,
   Clipboard,
   FileText,
   Loader2,
@@ -32,18 +31,6 @@ import type {
   WpsPatchOperation,
 } from './types'
 
-const actionShortcuts = [
-  '解释',
-  '润色',
-  '扩写',
-  '缩写',
-  '改成议论文',
-  '改成说明文',
-  '提纲',
-  '审阅',
-  '续写',
-]
-
 const emptySnapshot: WpsDocumentSnapshot = {
   selectionText: '',
   documentExcerpt: '',
@@ -58,7 +45,7 @@ export default function App() {
   const [loginStatus, setLoginStatus] = useState<'idle' | 'creating' | 'polling' | 'error'>('idle')
   const [snapshot, setSnapshot] = useState<WpsDocumentSnapshot>(emptySnapshot)
   const [snapshotMessage, setSnapshotMessage] = useState('正在连接 WPS 文档')
-  const [bridgeMode, setBridgeMode] = useState('WPS 文字')
+  const [bridgeMode, setBridgeMode] = useState('WPS')
   const [prompt, setPrompt] = useState('')
   const [selectedSkill, setSelectedSkill] = useState<AgentSkill | undefined>()
   const [skillOpen, setSkillOpen] = useState(false)
@@ -66,8 +53,7 @@ export default function App() {
     {
       id: createId(),
       role: 'assistant',
-      content:
-        '我是 Papyrus 文学秘书。选中文档片段后可以润色、缩写、扩写，也可以直接问文学常识、写作结构和作业思路。',
+      content: '选中文档片段后直接告诉我想怎么改，或把写作问题发给我。',
       createdAt: Date.now(),
     },
   ])
@@ -76,28 +62,27 @@ export default function App() {
   const [lastError, setLastError] = useState('')
   const [writeNotice, setWriteNotice] = useState('')
 
-  const selectionLabel = snapshot.selectionText
+  const skillQuery = getSkillQuery(prompt)
+  const visibleSkills = useMemo(() => searchSkills(skillQuery ?? ''), [skillQuery])
+  const contextLabel = snapshot.selectionText
     ? `已选 ${snapshot.selectionText.length} 字`
     : snapshot.cursorAvailable
       ? '未选中文本'
       : '等待文档'
-  const skillQuery = getSkillQuery(prompt)
-  const visibleSkills = useMemo(() => searchSkills(skillQuery ?? ''), [skillQuery])
+  const runtimeNotice =
+    writeNotice ||
+    lastError ||
+    (!session ? '登录后可使用内置模型' : '') ||
+    (runState === 'running' ? '正在处理' : `${contextLabel} · ${snapshot.wordCount} 字上下文`)
 
   const refreshSnapshot = useCallback(async () => {
     try {
       const bridge = bridgeRef.current ?? createWpsDocumentBridge()
       bridgeRef.current = bridge
-      setBridgeMode(bridge.isMock ? '浏览器预览' : 'WPS 文字')
+      setBridgeMode(bridge.isMock ? '预览' : 'WPS')
       const next = await bridge.getSnapshot()
       setSnapshot(next)
-      setSnapshotMessage(
-        bridge.isMock
-          ? '当前是浏览器预览，写入会进入模拟文档'
-          : next.selectionText
-            ? '已读取当前选区'
-            : '已读取文档摘要',
-      )
+      setSnapshotMessage(next.selectionText ? '正在使用当前选区' : '正在使用文档上下文')
     } catch (error) {
       setSnapshot(emptySnapshot)
       setSnapshotMessage(error instanceof Error ? error.message : '无法读取 WPS 文档')
@@ -134,10 +119,12 @@ export default function App() {
           setSession(nextSession)
           setLoginStatus('idle')
           setLoginDevice(undefined)
+          setLastError('')
           return
         }
 
         setLoginStatus('error')
+        setLastError('授权未完成，请重新登录。')
       } catch (error) {
         window.clearInterval(timer)
         setLoginStatus('error')
@@ -156,10 +143,26 @@ export default function App() {
       const device = await createLoginDevice()
       setLoginDevice(device)
       setLoginStatus('polling')
-      window.open(device.verificationUrl, '_blank', 'noopener,noreferrer')
+      setLastError('已打开浏览器，请在 Scallion 主站同意授权。')
+      openLoginPage(device.verificationUrl)
     } catch (error) {
       setLoginStatus('error')
-      setLastError(error instanceof Error ? error.message : '无法打开 Scallion 授权')
+      setLastError(error instanceof Error ? error.message : '无法创建 Scallion 授权')
+    }
+  }
+
+  const openLoginPage = (url = loginDevice?.verificationUrl) => {
+    if (!url) {
+      return
+    }
+
+    try {
+      const popup = window.open(url, '_blank', 'noopener,noreferrer')
+      if (!popup) {
+        window.location.href = url
+      }
+    } catch {
+      setLastError('WPS 未能打开浏览器，请复制授权链接后手动打开。')
     }
   }
 
@@ -174,6 +177,23 @@ export default function App() {
     const value = prompt.trim()
 
     if (!value || runState === 'running') {
+      return
+    }
+
+    if (!session?.token) {
+      setLastError('登录后可使用内置模型，我已为你打开 Scallion 授权页。')
+      setMessages((items) => [
+        ...items,
+        {
+          id: createId(),
+          role: 'assistant',
+          content: '内置模型需要登录后使用。你的输入已保留，完成授权后再发送即可。',
+          createdAt: Date.now(),
+        },
+      ])
+      if (loginStatus !== 'creating' && loginStatus !== 'polling') {
+        void startLogin()
+      }
       return
     }
 
@@ -196,7 +216,7 @@ export default function App() {
       {
         id: assistantId,
         role: 'assistant',
-        content: '正在阅读选区和文档摘要...',
+        content: '正在阅读选区和文档上下文...',
         createdAt: Date.now(),
       },
     ])
@@ -209,6 +229,14 @@ export default function App() {
         snapshot: latestSnapshot,
         selectedSkill,
         token: session?.token,
+        onStatus: (status) => {
+          setMessages((items) =>
+            items.map((item) =>
+              item.id === assistantId ? { ...item, content: `正在${status}...` } : item,
+            ),
+          )
+          setLastError(status)
+        },
       })
       const patch = result.patch
         ? {
@@ -244,10 +272,9 @@ export default function App() {
   }
 
   const runShortcut = (label: string) => {
-    const prefix = label.startsWith('改成') ? label : `@${label}`
-    const target = snapshot.selectionText ? '处理当前选区' : '结合当前文档'
-    setSelectedSkill(agentSkills.find((skill) => label.includes(skill.shortName)))
-    setPrompt(`${prefix} ${target}`)
+    const skill = agentSkills.find((item) => item.shortName === label)
+    setSelectedSkill(skill)
+    setPrompt(`@${label} ${snapshot.selectionText ? '处理当前选区' : '结合当前文档'}`)
   }
 
   const pickSkill = (skill: AgentSkill) => {
@@ -279,65 +306,37 @@ export default function App() {
     <main className="wps-shell">
       <header className="wps-header">
         <div className="brand-lockup">
-          <div className="brand-mark">
+          <span className="brand-mark">
             <PenLine size={16} />
-          </div>
+          </span>
           <div className="brand-copy">
             <strong>Papyrus</strong>
-            <span>WPS 文学秘书</span>
+            <span>
+              {bridgeMode} · {snapshotMessage}
+            </span>
           </div>
         </div>
-        <button className="icon-button" type="button" title="刷新文档状态" onClick={() => void refreshSnapshot()}>
-          <RefreshCw size={15} />
-        </button>
-      </header>
-
-      <section className="status-strip">
-        <div>
-          <span className="status-label">{bridgeMode}</span>
-          <strong>{selectionLabel}</strong>
-          <small>{snapshotMessage}</small>
-        </div>
-        <div>
-          <span className="status-label">模型</span>
-          <strong>mimo2.5pro</strong>
-          <small>qwen3.6 兜底</small>
-        </div>
-      </section>
-
-      <section className="account-bar">
-        {session ? (
-          <>
-            <div className="account-text">
-              <span>Scallion</span>
-              <strong>{session.user.username}</strong>
-            </div>
-            <button className="text-button" type="button" onClick={logout}>
-              <LogOut size={13} />
-              退出
-            </button>
-          </>
-        ) : (
-          <>
-            <div className="account-text">
-              <span>{loginStatus === 'polling' ? '等待授权' : '未登录'}</span>
-              <strong>{loginDevice?.userCode || '登录后使用云端模型'}</strong>
-            </div>
-            <button className="primary-mini" type="button" disabled={loginStatus === 'creating'} onClick={() => void startLogin()}>
-              {loginStatus === 'creating' ? <Loader2 size={13} className="spin" /> : <LogIn size={13} />}
-              登录
-            </button>
-          </>
-        )}
-      </section>
-
-      <section className="shortcut-row" aria-label="常用动作">
-        {actionShortcuts.map((label) => (
-          <button key={label} type="button" onClick={() => runShortcut(label)}>
-            {label}
+        <div className="header-actions">
+          <button className="icon-button" type="button" title="刷新文档" onClick={() => void refreshSnapshot()}>
+            <RefreshCw size={15} />
           </button>
-        ))}
-      </section>
+          {session ? (
+            <button className="icon-button" type="button" title={`退出 ${session.user.username}`} onClick={logout}>
+              <LogOut size={15} />
+            </button>
+          ) : (
+            <button
+              className={`icon-button ${loginStatus === 'polling' ? 'is-listening' : ''}`}
+              type="button"
+              title="登录 Scallion"
+              disabled={loginStatus === 'creating'}
+              onClick={() => void startLogin()}
+            >
+              {loginStatus === 'creating' ? <Loader2 size={15} className="spin" /> : <LogIn size={15} />}
+            </button>
+          )}
+        </div>
+      </header>
 
       <section className="conversation">
         {messages.map((message) => (
@@ -365,10 +364,10 @@ export default function App() {
               替换选区
             </button>
             <button type="button" onClick={() => void applyPatch('insert_at_cursor')}>
-              插入光标
+              插入
             </button>
             <button type="button" onClick={() => void applyPatch('append_document')}>
-              追加文末
+              追加
             </button>
           </div>
         </aside>
@@ -377,7 +376,7 @@ export default function App() {
       <form className="composer" onSubmit={(event) => void submitPrompt(event)}>
         {skillOpen || skillQuery !== undefined ? (
           <div className="skill-menu">
-            {visibleSkills.slice(0, 7).map((skill) => (
+            {visibleSkills.slice(0, 6).map((skill) => (
               <button key={skill.id} type="button" onClick={() => pickSkill(skill)}>
                 <Sparkles size={14} />
                 <span>
@@ -389,18 +388,24 @@ export default function App() {
           </div>
         ) : null}
 
+        {messages.length <= 1 ? (
+          <div className="quick-actions" aria-label="常用动作">
+            {['润色', '缩写', '扩写'].map((label) => (
+              <button key={label} type="button" onClick={() => runShortcut(label)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
         {selectedSkill ? (
           <button className="selected-skill" type="button" onClick={() => setSelectedSkill(undefined)}>
             <Sparkles size={13} />
             {selectedSkill.name}
-            <span>清除</span>
           </button>
         ) : null}
 
         <div className="composer-box">
-          <button className="icon-button" type="button" title="@skill" onClick={() => setSkillOpen((open) => !open)}>
-            <ChevronDown size={14} />
-          </button>
           <textarea
             value={prompt}
             rows={2}
@@ -416,16 +421,24 @@ export default function App() {
                 void submitPrompt()
               }
             }}
-            placeholder="问写作问题，或输入 @技能 后处理选区..."
+            placeholder={session ? '向 Papyrus 发送消息...' : '登录后使用内置模型...'}
           />
+          <button className="skill-button" type="button" title="选择技能" onClick={() => setSkillOpen((open) => !open)}>
+            <Sparkles size={15} />
+          </button>
           <button className="send-button" type="submit" disabled={runState === 'running' || !prompt.trim()}>
-            {runState === 'running' ? <Loader2 size={15} className="spin" /> : <Send size={15} />}
+            {!session ? (
+              <LogIn size={15} />
+            ) : runState === 'running' ? (
+              <Loader2 size={15} className="spin" />
+            ) : (
+              <Send size={15} />
+            )}
           </button>
         </div>
 
-        <footer className="runtime-line">
-          <span>{runState === 'running' ? '处理中' : runState === 'error' ? '处理失败' : '就绪'}</span>
-          <span>{writeNotice || lastError || `${snapshot.wordCount} 字上下文`}</span>
+        <footer className={`runtime-line ${loginStatus === 'error' || runState === 'error' ? 'error' : ''}`}>
+          <span>{runtimeNotice}</span>
         </footer>
       </form>
     </main>
@@ -449,7 +462,7 @@ function PatchPreview({
       <div className="patch-actions">
         <button type="button" onClick={() => void onApply(patch.recommendedOperation)}>
           <Check size={13} />
-          推荐应用
+          应用
         </button>
         <button type="button" onClick={() => void onApply('copy_only')}>
           复制

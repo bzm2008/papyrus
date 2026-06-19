@@ -58,10 +58,12 @@ export type AgentRunInput = {
   snapshot: WpsDocumentSnapshot
   selectedSkill?: AgentSkill
   token?: string
+  onStatus?: (status: string) => void
 }
 
 export type AgentRunResult = {
   reply: string
   intent: UnifiedAgentIntent
   patch?: Omit<PendingPatch, 'id'>
+  trace?: string[]
 }
