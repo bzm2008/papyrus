@@ -32,6 +32,7 @@ import {
   type FlowAgentId,
   type FlowTrace,
   type ImportedResource,
+  type SecretaryPlanDraft,
   useAppStore,
 } from '../stores/useAppStore'
 
@@ -117,6 +118,11 @@ const agentProfiles: Record<FlowAgentId, AgentProfile> = {
   },
 }
 
+type SendFlowMessageOptions = Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mode'>> & {
+  displayPrompt?: string
+  approvedPlanId?: string
+}
+
 const sharedAgentRules = [
   'Papyrus 是文学创作工作站，目标是帮助用户完成真实写作工作。',
   '你可以使用联网搜索、项目上下文和文稿补丁工具。不要因为训练截止时间而拒绝实时问题；需要实时信息时应主动规划联网搜索。',
@@ -128,9 +134,10 @@ const sharedAgentRules = [
 
 export async function sendFlowMessage(
   prompt: string,
-  harnessInput: Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mode'>> = {},
+  harnessInput: SendFlowMessageOptions = {},
 ) {
   const content = prompt.trim()
+  const displayContent = (harnessInput.displayPrompt ?? content).trim()
 
   if (!content) {
     return
@@ -149,7 +156,7 @@ export async function sendFlowMessage(
 
   store.clearFlowRun()
   store.setActiveAgentRunId(run.id)
-  store.addFlowMessage({ role: 'user', content })
+  store.addFlowMessage({ role: 'user', content: displayContent || content })
   store.setLlmRunState('running', '主笔正在判断任务路径')
 
   try {
@@ -198,6 +205,130 @@ export async function sendFlowMessage(
   }
 }
 
+export async function createSecretaryPlanDraft(
+  request: string,
+  executionPrompt = request,
+): Promise<SecretaryPlanDraft | undefined> {
+  const cleanRequest = request.trim()
+  const cleanExecutionPrompt = executionPrompt.trim()
+
+  if (!cleanRequest || !cleanExecutionPrompt) {
+    return undefined
+  }
+
+  const store = useAppStore.getState()
+  const provider = store.providerConfigs[store.activeProviderId]
+  store.clearFlowRun()
+  store.addFlowMessage({ role: 'user', content: cleanRequest })
+  store.setLlmRunState('running', '正在生成规划')
+
+  try {
+    const planText = canCallProvider(provider)
+      ? await callOpenAICompatible(provider, [
+          {
+            role: 'system',
+            content: composeSystemPrompt(
+              [
+                sharedAgentRules,
+                '你是 Papyrus 的 /plan 规划器，只输出可协商的执行规划，不要执行 Agent。',
+                '风格像 Codex 的任务规划：清晰、可执行、便于用户修改。',
+                '请用简短 Markdown 输出，包含目标、步骤和风险。',
+              ].join('\n'),
+            ),
+          },
+          {
+            role: 'user',
+            content: [
+              `用户请求：${cleanExecutionPrompt}`,
+              `当前文稿摘要：${store.editorText.slice(0, 1200)}`,
+              store.resources.length
+                ? `可用资源：${store.resources.slice(0, 10).map((resource) => resource.name).join(' / ')}`
+                : '',
+              '只产生规划，不要写入正文或修改文稿。',
+            ]
+              .filter(Boolean)
+              .join('\n\n'),
+          },
+        ])
+      : createFallbackSecretaryPlan(cleanExecutionPrompt)
+
+    const draft = useAppStore.getState().setSecretaryPlanDraft({
+      request: cleanRequest,
+      executionPrompt: cleanExecutionPrompt,
+      planText,
+      feedback: [],
+    })
+
+    useAppStore.getState().addFlowMessage({
+      role: 'assistant',
+      agentId: 'writer',
+      content: planText,
+    })
+    useAppStore.getState().setLlmRunState('idle', '规划已生成')
+    return draft
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知错误'
+    useAppStore.getState().addFlowMessage({
+      role: 'assistant',
+      agentId: 'writer',
+      content: `规划生成失败：${message}`,
+    })
+    useAppStore.getState().setLlmRunState('error', '规划生成失败')
+    return undefined
+  }
+}
+
+export async function reviseSecretaryPlanDraft(feedback: string) {
+  const current = useAppStore.getState().secretaryPlanDraft
+
+  if (!current) {
+    return undefined
+  }
+
+  const cleanFeedback = feedback.trim()
+  if (!cleanFeedback) {
+    return current
+  }
+
+  const provider = useAppStore.getState().providerConfigs[useAppStore.getState().activeProviderId]
+  useAppStore.getState().setLlmRunState('running', '正在修订规划')
+
+  try {
+    const planText = canCallProvider(provider)
+      ? await callOpenAICompatible(provider, [
+          {
+            role: 'system',
+            content: '你是 Papyrus /plan 规划器，根据用户反馈修订规划，只输出 Markdown。',
+          },
+          {
+            role: 'user',
+            content: [
+              `原始请求：${current.executionPrompt}`,
+              `当前规划：\n${current.planText}`,
+              `用户反馈：${cleanFeedback}`,
+              '请输出修订后的完整规划。',
+            ].join('\n\n'),
+          },
+        ])
+      : [current.planText, '', '反馈:', cleanFeedback].join('\n')
+
+    useAppStore.getState().reviseSecretaryPlanDraft(cleanFeedback, { planText })
+    const latestAssistant = [...useAppStore.getState().flowMessages]
+      .reverse()
+      .find((message) => message.role === 'assistant')
+
+    if (latestAssistant) {
+      useAppStore.getState().updateFlowMessage(latestAssistant.id, { content: planText })
+    }
+
+    useAppStore.getState().setLlmRunState('idle', '规划已修订')
+    return useAppStore.getState().secretaryPlanDraft
+  } catch (error) {
+    useAppStore.getState().setLlmRunState('error', error instanceof Error ? error.message : '规划修订失败')
+    return current
+  }
+}
+
 export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
   const store = useAppStore.getState()
   const provider = store.providerConfigs[store.activeProviderId]
@@ -237,7 +368,7 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
               '判断写入文稿的例子：用户说“写一段/续写/补完/模仿某种叙事写/生成中篇/写到文稿里/改写这一节”时 writeIntent=true；用户说“怎么看/有什么问题/解释一下/给建议/靠谱吗”时 writeIntent=false。',
               'writeIntent=true 时，对话里只需要一句说明，真正正文必须进入 DocumentPatch，不要把计划、来源、审查过程或工具轨迹写进正文。',
               reviewMode === 'auto'
-                ? '当前是 Auto 模式：不要把澄清问题抛给用户。请基于已有上下文做合理假设，必要时自主规划调查、大纲、初稿、审核和再稿。'
+                ? '当前是 自动执行：不要把澄清问题抛给用户。请基于已有上下文做合理假设，必要时自主规划调查、大纲、初稿、审核和再稿。'
                 : '当前是人工审阅模式：可以更谨慎，但仍应先产出可审阅结果，而不是停在确认问题上。',
             ].join('\n'),
           ),
@@ -246,7 +377,7 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
           role: 'user',
           content: [
             `用户请求：${prompt}`,
-            `执行模式：${reviewMode === 'auto' ? 'Auto 自主执行' : '人工审阅'}`,
+            `执行模式：${reviewMode === 'auto' ? '自动执行' : '人工审阅'}`,
             `当前文稿摘录：${store.editorText.slice(0, 1600)}`,
             `可用资源：${store.resources
               .slice(0, 12)
@@ -812,10 +943,10 @@ async function runWriter(
             `当前文稿：\n${store.editorText.slice(0, 7000)}`,
             `近期对话：\n${formatRecentConversation()}`,
             `用户请求：\n${prompt}`,
-            `执行模式：${reviewMode === 'auto' ? 'Auto 自主执行' : '人工审阅'}`,
+            `执行模式：${reviewMode === 'auto' ? '自动执行' : '人工审阅'}`,
             reviewMode === 'auto'
               ? [
-                  'Auto 模式硬性规则：',
+                  '自动执行硬性规则：',
                   '1. 不要以“我需要先说明/我需要你确认/在动笔之前”作为终点。',
                   '2. 不要向用户索要下一步确认；请用合理假设直接完成规划、调查、大纲、初稿、审核、再稿。',
                   '3. 复杂长文任务必须给出完整可用结果；篇幅受限时先输出一个完整章节或完整样章，并说明可继续扩展。',
@@ -961,6 +1092,26 @@ async function repairDraft(
   }
 
   return response
+}
+
+function createFallbackSecretaryPlan(prompt: string) {
+  const fallback = createFallbackPlan(prompt)
+
+  return [
+    '# 秘书执行规划',
+    '',
+    `目标：${fallback.conversationGoal}`,
+    '',
+    '步骤',
+    '1. 梳理请求和当前文稿状态',
+    fallback.needsWebSearch ? '2. 检索必要的外部资料' : '2. 核对已有上下文和约束',
+    fallback.subAgents.length
+      ? `3. 调度 ${fallback.subAgents.map((agentId) => agentProfiles[agentId].label).join(' / ')} 协作处理`
+      : '3. 由写作代理直接处理',
+    fallback.writeIntent ? '4. 生成内容并自动写入文稿' : '4. 输出结果并保留执行轨迹',
+    '',
+    '确认这份规划后，秘书模式会开始自动执行。',
+  ].join('\n')
 }
 
 function parseJsonPlan(raw: string) {

@@ -1,5 +1,7 @@
 import {
   Check,
+  CheckCircle2,
+  Circle,
   Clipboard,
   FileText,
   Loader2,
@@ -9,6 +11,7 @@ import {
   RefreshCw,
   Send,
   Sparkles,
+  X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { agentSkills, searchSkills } from './skills'
@@ -21,14 +24,16 @@ import {
   saveSession,
   type LoginDevice,
 } from './services/wpsScallionSession'
-import { runUnifiedAgent } from './services/wpsUnifiedAgent'
+import { createWpsPlanDraft, runUnifiedAgent } from './services/wpsUnifiedAgent'
 import type {
   AgentSkill,
   ChatMessage,
   PendingPatch,
   ScallionSession,
+  WpsAgentTodo,
   WpsDocumentSnapshot,
   WpsPatchOperation,
+  WpsPlanDraft,
 } from './types'
 
 const emptySnapshot: WpsDocumentSnapshot = {
@@ -63,6 +68,9 @@ export default function App() {
   const [runState, setRunState] = useState<'idle' | 'running' | 'error'>('idle')
   const [lastError, setLastError] = useState('')
   const [writeNotice, setWriteNotice] = useState('')
+  const [planDraft, setPlanDraft] = useState<WpsPlanDraft | undefined>()
+  const [agentTodos, setAgentTodos] = useState<WpsAgentTodo[]>([])
+  const [agentTrace, setAgentTrace] = useState<string[]>([])
 
   const skillQuery = getSkillQuery(prompt)
   const visibleSkills = useMemo(() => searchSkills(skillQuery ?? ''), [skillQuery])
@@ -188,6 +196,103 @@ export default function App() {
       return
     }
 
+    if (planDraft) {
+      await revisePlan(value)
+      return
+    }
+
+    const resolved = resolveWpsCommand(value)
+
+    if (resolved.isPlan) {
+      await createPlan(resolved.argumentsText || resolved.displayPrompt)
+      return
+    }
+
+    await runPrompt(resolved.executionPrompt, resolved.displayPrompt)
+  }
+
+  const createPlan = async (request: string) => {
+    if (!request.trim() || runState === 'running') {
+      return
+    }
+
+    setRunState('running')
+    setLastError('正在生成规划')
+
+    try {
+      const latestSnapshot = await (bridgeRef.current ?? createWpsDocumentBridge()).getSnapshot()
+      setSnapshot(latestSnapshot)
+      const draft = await createWpsPlanDraft({
+        request,
+        snapshot: latestSnapshot,
+        selectedSkill,
+        token: session?.token,
+      })
+      setPlanDraft(draft)
+      setMessages((items) => [
+        ...items,
+        { id: createId(), role: 'user', content: `/plan ${request}`, createdAt: Date.now() },
+        { id: createId(), role: 'assistant', content: draft.planText, createdAt: Date.now() },
+      ])
+      setPrompt('')
+      setRunState('idle')
+      setLastError('规划已生成，确认后再执行')
+    } catch (error) {
+      setRunState('error')
+      setLastError(error instanceof Error ? error.message : '规划生成失败')
+    }
+  }
+
+  const revisePlan = async (feedback: string) => {
+    if (!planDraft || !feedback.trim()) {
+      return
+    }
+
+    setRunState('running')
+    setLastError('正在修订规划')
+
+    try {
+      const latestSnapshot = await (bridgeRef.current ?? createWpsDocumentBridge()).getSnapshot()
+      const draft = await createWpsPlanDraft({
+        request: planDraft.request,
+        snapshot: latestSnapshot,
+        selectedSkill,
+        token: session?.token,
+        previousPlan: planDraft,
+        feedback,
+      })
+      setPlanDraft(draft)
+      setMessages((items) => [
+        ...items,
+        { id: createId(), role: 'user', content: feedback, createdAt: Date.now() },
+        { id: createId(), role: 'assistant', content: draft.planText, createdAt: Date.now() },
+      ])
+      setPrompt('')
+      setRunState('idle')
+      setLastError('规划已修订')
+    } catch (error) {
+      setRunState('error')
+      setLastError(error instanceof Error ? error.message : '规划修订失败')
+    }
+  }
+
+  const executePlan = async () => {
+    const draft = planDraft
+
+    if (!draft || runState === 'running') {
+      return
+    }
+
+    setPlanDraft(undefined)
+    setPrompt(draft.executionPrompt)
+    await runPrompt(draft.executionPrompt, draft.request, draft)
+  }
+
+  const runPrompt = async (executionPrompt: string, displayPrompt = executionPrompt, approvedPlan?: WpsPlanDraft) => {
+    if (!executionPrompt.trim() || runState === 'running') {
+      return
+    }
+
     if (!session?.token) {
       setLastError('登录后可使用内置模型，我已为你打开 Scallion 授权页。')
       setMessages((items) => [
@@ -210,11 +315,13 @@ export default function App() {
     setRunState('running')
     setLastError('')
     setWriteNotice('')
+    setAgentTodos([])
+    setAgentTrace([])
 
     const userMessage: ChatMessage = {
       id: createId(),
       role: 'user',
-      content: value,
+      content: displayPrompt,
       createdAt: Date.now(),
     }
     const assistantId = createId()
@@ -224,7 +331,7 @@ export default function App() {
       {
         id: assistantId,
         role: 'assistant',
-        content: '正在阅读选区和文档上下文...',
+        content: '正在读取选区和文档上下文...',
         createdAt: Date.now(),
       },
     ])
@@ -233,11 +340,13 @@ export default function App() {
       const latestSnapshot = await (bridgeRef.current ?? createWpsDocumentBridge()).getSnapshot()
       setSnapshot(latestSnapshot)
       const result = await runUnifiedAgent({
-        prompt: value,
+        prompt: executionPrompt,
         snapshot: latestSnapshot,
         selectedSkill,
         token: session?.token,
+        approvedPlan,
         onStatus: (status) => {
+          setAgentTrace((items) => [...items, status].slice(-8))
           setMessages((items) =>
             items.map((item) =>
               item.id === assistantId ? { ...item, content: `正在${status}...` } : item,
@@ -246,6 +355,8 @@ export default function App() {
           setLastError(status)
         },
       })
+      setAgentTodos(result.todos ?? [])
+      setAgentTrace(result.trace ?? [])
       const patch = result.patch
         ? {
             id: createId(),
@@ -278,7 +389,6 @@ export default function App() {
       )
     }
   }
-
   const runShortcut = (label: string) => {
     const skill = agentSkills.find((item) => item.shortName === label)
     setSelectedSkill(skill)
@@ -354,6 +464,10 @@ export default function App() {
         ))}
       </section>
 
+      {planDraft ? <PlanDraftCard draft={planDraft} running={runState === 'running'} onExecute={executePlan} onCancel={() => setPlanDraft(undefined)} /> : null}
+
+      {(agentTodos.length || agentTrace.length) ? <AgentRunPanel todos={agentTodos} trace={agentTrace} /> : null}
+
       <section className="conversation">
         {messages.map((message) => (
           <article key={message.id} className={`message ${message.role}`}>
@@ -407,7 +521,7 @@ export default function App() {
         {messages.length <= 1 ? (
           <div className="quick-actions" aria-label="常用动作">
             {['润色', '缩写', '扩写'].map((label) => (
-              <button key={label} type="button" onClick={() => runShortcut(label)}>
+              <button key={label} type="button" onClick={() => label === '/plan' ? setPrompt('/plan ') : runShortcut(label)}>
                 {label}
               </button>
             ))}
@@ -461,6 +575,94 @@ export default function App() {
   )
 }
 
+function PlanDraftCard({
+  draft,
+  running,
+  onExecute,
+  onCancel,
+}: {
+  draft: WpsPlanDraft
+  running: boolean
+  onExecute: () => void
+  onCancel: () => void
+}) {
+  return (
+    <section className="plan-card">
+      <div className="plan-card-head">
+        <div>
+          <strong>WPS 秘书规划</strong>
+          <span>{draft.request}</span>
+        </div>
+        <button type="button" title="取消规划" onClick={onCancel}>
+          <X size={14} />
+        </button>
+      </div>
+      <pre>{draft.planText}</pre>
+      <div className="plan-card-actions">
+        <span>继续输入会修订规划，确认后才会执行。</span>
+        <button type="button" disabled={running} onClick={onExecute}>
+          {running ? <Loader2 size={13} className="spin" /> : <Check size={13} />}
+          开始执行
+        </button>
+      </div>
+    </section>
+  )
+}
+
+function AgentRunPanel({ todos, trace }: { todos: WpsAgentTodo[]; trace: string[] }) {
+  return (
+    <section className="agent-run-panel">
+      {todos.length ? (
+        <div className="todo-list">
+          {todos.map((todo) => (
+            <div key={todo.id} className={`todo-item ${todo.status}`}>
+              {todo.status === 'completed' ? <CheckCircle2 size={13} /> : <Circle size={11} />}
+              <span>
+                <strong>{todo.title}</strong>
+                <small>{todo.detail}</small>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {trace.length ? (
+        <div className="trace-list">
+          <strong>执行轨迹</strong>
+          {trace.map((item, index) => (
+            <span key={`${item}-${index}`}>{item}</span>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function resolveWpsCommand(value: string) {
+  const trimmed = value.trim()
+  const match = trimmed.match(/^\/([\p{L}\p{N}_-]+)(?:\s+([\s\S]*))?$/u)
+  const command = match?.[1]
+  const argumentsText = match?.[2]?.trim() ?? ''
+
+  if (command === 'plan') {
+    return {
+      displayPrompt: trimmed,
+      executionPrompt: argumentsText || trimmed,
+      argumentsText,
+      isPlan: true,
+    }
+  }
+
+  if (command === 'solo' || command === 'secretary') {
+    return {
+      displayPrompt: trimmed,
+      executionPrompt: ['进入 WPS 秘书模式自动执行。', argumentsText].filter(Boolean).join('\n\n用户补充：'),
+      argumentsText,
+      isPlan: false,
+    }
+  }
+
+  return { displayPrompt: trimmed, executionPrompt: trimmed, argumentsText: '', isPlan: false }
+}
 function PatchPreview({
   patch,
   onApply,

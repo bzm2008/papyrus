@@ -66,7 +66,7 @@ export function createRemotePrompt(job: RemoteRelayJob, mode: RemoteRelayMode) {
     `来源平台: ${job.platform}`,
     `发送者: ${sender}`,
     `时间: ${createdAt}`,
-    `目标模式: ${mode === 'flow' ? 'Flow 工作流' : '文学秘书'}`,
+    `目标模式: ${mode === 'flow' ? '秘书模式' : '文学秘书'}`,
     '',
     '用户消息:',
     job.content,

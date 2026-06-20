@@ -39,7 +39,7 @@ export function queueDocumentPatch(input: CreatePatchInput) {
     kind: 'document',
     title: '准备写入文稿',
     detail: `${input.title}: ${content.slice(0, 160)}`,
-    status: 'pending',
+    status: 'running',
     toolName: 'document.patch',
   })
 }

@@ -5,6 +5,7 @@ import {
   Gauge,
   ListChecks,
   MessageSquareText,
+  NotebookPen,
   SearchCheck,
   Sparkles,
   Wand2,
@@ -152,10 +153,18 @@ export const slashCommands: SlashCommand[] = [
     scopes: ['companion'],
   },
   {
+    id: 'plan',
+    label: '规划',
+    description: '先生成规划书，确认后再执行。',
+    prompt: '请先生成一份可协商的执行规划书，等待用户确认后再开始执行。',
+    icon: NotebookPen,
+    scopes: ['flow'],
+  },
+  {
     id: 'solo',
     label: '自主执行',
     description: '让主笔规划、调度子 Agent 并完成结果。',
-    prompt: '进入 Auto 执行：请自主规划、调查、立大纲、初稿、审查、再稿，并给出完整可用结果。',
+    prompt: '进入秘书模式自动执行：请自主规划、调查、立大纲、初稿、审查、再稿，并给出完整可用结果。',
     icon: ListChecks,
     scopes: ['flow'],
   },
@@ -163,9 +172,10 @@ export const slashCommands: SlashCommand[] = [
 
 export function applySlashCommand(value: string, command: SlashCommand) {
   const query = getSlashQuery(value)
+  const token = `/${command.id} `
 
   if (query === null) {
-    return command.prompt
+    return token
   }
 
   const index = value.lastIndexOf('/')
@@ -173,10 +183,48 @@ export function applySlashCommand(value: string, command: SlashCommand) {
   const suffix = value.slice(index + query.length + 1)
   const glue = prefix && !prefix.endsWith('\n') ? '\n' : ''
 
-  return `${prefix}${glue}${command.prompt}${suffix ? ` ${suffix.trimStart()}` : ''}`.trimStart()
+  return `${prefix}${glue}${token}${suffix.trimStart()}`.trimStart()
 }
 
 export function getSlashQuery(value: string) {
   const match = value.match(/(?:^|\n)\/([\p{L}\p{N}_-]*)$/u)
   return match ? match[1] : null
+}
+
+export function resolveSlashCommandPrompt(value: string) {
+  const trimmed = value.trim()
+  const match = trimmed.match(/^\/([\p{L}\p{N}_-]+)(?:\s+([\s\S]*))?$/u)
+
+  if (!match) {
+    return {
+      displayPrompt: trimmed,
+      executionPrompt: trimmed,
+      command: undefined,
+      isPlanCommand: false,
+      argumentsText: '',
+    }
+  }
+
+  const command = slashCommands.find((item) => item.id === match[1])
+  const argumentsText = match[2]?.trim() ?? ''
+
+  if (!command) {
+    return {
+      displayPrompt: trimmed,
+      executionPrompt: trimmed,
+      command: undefined,
+      isPlanCommand: false,
+      argumentsText,
+    }
+  }
+
+  const executionPrompt = [command.prompt, argumentsText].filter(Boolean).join('\n\n用户补充：')
+
+  return {
+    displayPrompt: trimmed,
+    executionPrompt,
+    command,
+    isPlanCommand: command.id === 'plan',
+    argumentsText,
+  }
 }

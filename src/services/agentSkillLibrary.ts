@@ -1,4 +1,4 @@
-import type { FlowAgentId } from '../stores/useAppStore'
+import { useAppStore, type CustomAgentSkill, type FlowAgentId } from '../stores/useAppStore'
 
 export type AgentSkillId =
   | 'literary-drafting'
@@ -13,7 +13,7 @@ export type AgentSkillId =
   | 'publication-polish'
 
 export type AgentSkill = {
-  id: AgentSkillId
+  id: string
   name: string
   shortName: string
   trigger: string
@@ -21,6 +21,11 @@ export type AgentSkill = {
   keywords: RegExp
   instructions: string[]
   outputRules: string[]
+}
+
+export type ResolvedAgentSkill = AgentSkill & {
+  custom?: boolean
+  keywordTerms?: string[]
 }
 
 export const agentSkills: Record<AgentSkillId, AgentSkill> = {
@@ -225,13 +230,13 @@ export const agentSkillAssignments: Record<FlowAgentId, AgentSkillId[]> = {
 export function searchAgentSkills(query: string, limit = 8) {
   const normalized = query.trim().toLowerCase()
 
-  return Object.values(agentSkills)
+  return getAllAgentSkills()
     .filter((skill) => {
       if (!normalized) {
         return true
       }
 
-      return `${skill.name} ${skill.shortName} ${skill.trigger} ${skill.id}`
+      return `${skill.name} ${skill.shortName} ${skill.trigger} ${skill.id} ${skill.keywordTerms?.join(' ') ?? ''}`
         .toLowerCase()
         .includes(normalized)
     })
@@ -239,7 +244,7 @@ export function searchAgentSkills(query: string, limit = 8) {
 }
 
 export function findMentionedSkills(prompt: string) {
-  return Object.values(agentSkills).filter((skill) =>
+  return getAllAgentSkills().filter((skill) =>
     new RegExp(`@\\s*${escapeRegExp(skill.name)}|@\\s*${escapeRegExp(skill.shortName)}`).test(
       prompt,
     ),
@@ -249,12 +254,14 @@ export function findMentionedSkills(prompt: string) {
 export function inferSkillsForPrompt(prompt: string, agentId?: FlowAgentId) {
   const baseIds = agentId ? agentSkillAssignments[agentId] : []
   const explicitIds = findMentionedSkills(prompt).map((skill) => skill.id)
-  const matchedIds = Object.values(agentSkills)
-    .filter((skill) => skill.keywords.test(prompt))
+  const allSkills = getAllAgentSkills()
+  const matchedIds = allSkills
+    .filter((skill) => skillMatchesPrompt(skill, prompt))
     .map((skill) => skill.id)
   const ids = [...new Set([...explicitIds, ...matchedIds, ...baseIds.slice(0, 2)])]
+  const skillById = new Map(allSkills.map((skill) => [skill.id, skill]))
 
-  return ids.map((id) => agentSkills[id])
+  return ids.map((id) => skillById.get(id)).filter(Boolean) as ResolvedAgentSkill[]
 }
 
 export function composeSkillPrompt(agentId: FlowAgentId, prompt = '') {
@@ -265,14 +272,14 @@ export function composeSkillPrompt(agentId: FlowAgentId, prompt = '') {
   }
 
   return [
-    '本轮可用专业 Skill。若用户显式输入 @skill，必须优先遵守该技能；否则只在相关时使用。输出要体现技能约束，不要解释技能名称。',
+    'Use the following Skills when they match the task or an explicit @skill mention. Follow their execution and output rules.',
     ...skills.map((skill) =>
       [
         `Skill: ${skill.name}`,
-        `触发: ${skill.trigger}`,
-        '执行规则:',
+        `Trigger: ${skill.trigger}`,
+        'Execution rules:',
         ...skill.instructions.map((instruction) => `- ${instruction}`),
-        '输出规则:',
+        'Output rules:',
         ...skill.outputRules.map((rule) => `- ${rule}`),
       ].join('\n'),
     ),
@@ -286,6 +293,56 @@ export function formatSkillTrace(prompt: string, agentId?: FlowAgentId) {
     names: skills.map((skill) => skill.shortName),
     detail: skills.map((skill) => `${skill.shortName}: ${skill.trigger}`).join('\n'),
   }
+}
+
+function getAllAgentSkills(): ResolvedAgentSkill[] {
+  return [
+    ...Object.values(agentSkills),
+    ...useAppStore.getState().customAgentSkills.filter((skill) => skill.enabled).map(resolveCustomSkill),
+  ]
+}
+
+function resolveCustomSkill(skill: CustomAgentSkill): ResolvedAgentSkill {
+  const keywordTerms = splitTerms(skill.keywordsText)
+
+  return {
+    id: `custom:${skill.id}`,
+    name: skill.name,
+    shortName: skill.shortName || skill.name,
+    trigger: skill.trigger,
+    agents: skill.agents.length ? skill.agents : ['writer'],
+    keywords: /$a/,
+    keywordTerms,
+    instructions: splitLines(skill.instructionsText),
+    outputRules: splitLines(skill.outputRulesText),
+    custom: true,
+  }
+}
+
+function skillMatchesPrompt(skill: ResolvedAgentSkill, prompt: string) {
+  if (skill.custom) {
+    const normalized = prompt.toLowerCase()
+    return Boolean(skill.keywordTerms?.some((term) => normalized.includes(term.toLowerCase())))
+  }
+
+  skill.keywords.lastIndex = 0
+  return skill.keywords.test(prompt)
+}
+
+function splitTerms(value: string) {
+  return value
+    .split(/[\n,;\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .slice(0, 40)
+}
+
+function splitLines(value: string) {
+  return value
+    .split(/\n+/)
+    .map((item) => item.trim().replace(/^-\s*/, ''))
+    .filter(Boolean)
+    .slice(0, 20)
 }
 
 function escapeRegExp(value: string) {

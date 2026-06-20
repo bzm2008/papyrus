@@ -646,3 +646,32 @@ button {
     transition-duration: 1ms !important;
   }
 }
+
+.plan-card,
+.agent-run-panel {
+  flex: 0 0 auto;
+  margin: 8px 10px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 8px 22px rgba(0, 69, 62, 0.05);
+}
+
+.plan-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; border-bottom: 1px solid #edf1e8; padding: 9px 10px; }
+.plan-card-head strong, .trace-list strong { display: block; color: var(--ink); font-size: 12px; }
+.plan-card-head span { display: block; margin-top: 2px; color: var(--subtle); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plan-card-head button { display: grid; width: 24px; height: 24px; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
+.plan-card-head button:hover { background: rgba(0, 69, 62, 0.08); color: var(--brand); }
+.plan-card pre { max-height: 180px; margin: 0; overflow: auto; padding: 10px; color: #263027; font-family: inherit; font-size: 12px; line-height: 1.65; white-space: pre-wrap; }
+.plan-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid #edf1e8; background: #fbfdf8; padding: 8px 10px; }
+.plan-card-actions span { min-width: 0; color: var(--subtle); font-size: 11px; }
+.plan-card-actions button { display: inline-flex; min-height: 30px; flex: 0 0 auto; align-items: center; gap: 5px; border: 1px solid var(--brand); border-radius: 8px; background: var(--brand); color: white; padding: 0 9px; font-size: 12px; }
+.agent-run-panel { display: grid; gap: 8px; padding: 8px; }
+.todo-list, .trace-list { display: grid; gap: 5px; }
+.todo-item { display: flex; align-items: flex-start; gap: 7px; border-radius: 7px; padding: 6px 7px; color: var(--muted); font-size: 12px; }
+.todo-item.running { background: #f0fbf4; color: var(--brand); }
+.todo-item.completed svg { color: var(--accent); }
+.todo-item span, .todo-item strong, .todo-item small { min-width: 0; }
+.todo-item strong, .todo-item small, .trace-list span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.todo-item small, .trace-list span { color: var(--subtle); font-size: 11px; }
+.trace-list { border-top: 1px solid #edf1e8; padding-top: 7px; }

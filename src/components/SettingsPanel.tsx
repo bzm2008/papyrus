@@ -7,16 +7,20 @@ import {
   Link,
   Lock,
   LogOut,
+  Plus,
   RotateCcw,
   Server,
   SlidersHorizontal,
   TestTube2,
+  Trash2,
   UserRound,
   X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useState } from 'react'
+import { agentSkills } from '../services/agentSkillLibrary'
 import { callOpenAICompatible, canCallProvider } from '../services/llmClient'
+import { testMcpServer } from '../services/mcpClient'
 import {
   customContextTiers,
   isProviderValidated,
@@ -24,7 +28,15 @@ import {
 } from '../services/modelCatalog'
 import { checkAndDownloadUpdate, relaunchToInstallUpdate } from '../services/updater'
 import { logoutScallion, startScallionLogin } from '../services/scallionAuth'
-import { providerOrder, useAppStore, type ProviderId } from '../stores/useAppStore'
+import {
+  providerOrder,
+  useAppStore,
+  type CustomAgentSkill,
+  type FlowAgentId,
+  type McpServerConfig,
+  type McpServerTransport,
+  type ProviderId,
+} from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { RemoteRelaySettings } from './RemoteRelaySettings'
 
@@ -134,6 +146,7 @@ export function SettingsPanel() {
 
             <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto p-4">
               <div className="space-y-4">
+                <SettingsQuickNav />
                 <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
                   <div className="mb-3 flex items-start justify-between gap-3">
                     <div>
@@ -188,7 +201,7 @@ export function SettingsPanel() {
                   )}
                 </section>
 
-                <section className="rounded-xl border border-[#d7aa4f]/45 bg-[#fff7e3] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.05)]">
+                <section id="settings-models" className="rounded-xl border border-[#d7aa4f]/45 bg-[#fff7e3] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.05)]">
                   <div className="mb-3 flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">内置云模型</div>
@@ -279,7 +292,9 @@ export function SettingsPanel() {
                   </div>
                 </section>
 
-                <RemoteRelaySettings />
+                <div id="settings-remote">
+                  <RemoteRelaySettings />
+                </div>
 
                 <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
                   <div className="mb-3">
@@ -349,12 +364,43 @@ export function SettingsPanel() {
                     />
                   </div>
                 </section>
+
+                <div id="settings-skills">
+                  <SkillSettingsSection />
+                </div>
+                <div id="settings-mcp">
+                  <McpSettingsSection />
+                </div>
               </div>
             </div>
           </motion.aside>
         </>
       ) : null}
     </AnimatePresence>
+  )
+}
+
+
+function SettingsQuickNav() {
+  const links = [
+    { id: 'settings-models', label: '模型' },
+    { id: 'settings-remote', label: '远程连接' },
+    { id: 'settings-skills', label: 'Skills' },
+    { id: 'settings-mcp', label: 'MCP' },
+  ]
+
+  return (
+    <nav className="sticky top-0 z-10 -mx-1 flex gap-1 rounded-lg border border-[#e8ddc7] bg-[#fffefa]/95 p-1 shadow-[0_8px_20px_rgba(43,34,19,0.05)] backdrop-blur">
+      {links.map((link) => (
+        <a
+          key={link.id}
+          href={'#' + link.id}
+          className="flex-1 rounded-md px-2 py-1.5 text-center text-xs font-medium text-[#6f7168] transition hover:bg-[#fff7e3] hover:text-[#171714]"
+        >
+          {link.label}
+        </a>
+      ))}
+    </nav>
   )
 }
 
@@ -648,6 +694,447 @@ function InfoRow({ label, value }: { label: string; value: string }) {
       <span className="shrink-0 text-[#8f897a]">{label}</span>
       <span className="min-w-0 truncate text-right text-[#2f2b22]">{value}</span>
     </div>
+  )
+}
+
+
+function SectionShell({
+  title,
+  description,
+  action,
+  children,
+}: {
+  title: string
+  description: string
+  action?: React.ReactNode
+  children: React.ReactNode
+}) {
+  return (
+    <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-[#2f2b22]">{title}</div>
+          <div className="mt-1 text-xs leading-5 text-[#8f897a]">{description}</div>
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
+  )
+}
+
+const defaultSkillDraft = {
+  name: '',
+  shortName: '',
+  trigger: '',
+  agents: ['writer'] as FlowAgentId[],
+  keywordsText: '',
+  instructionsText: '',
+  outputRulesText: '',
+  enabled: true,
+}
+
+function SkillSettingsSection() {
+  const customAgentSkills = useAppStore((state) => state.customAgentSkills)
+  const upsertCustomAgentSkill = useAppStore((state) => state.upsertCustomAgentSkill)
+  const deleteCustomAgentSkill = useAppStore((state) => state.deleteCustomAgentSkill)
+  const toggleCustomAgentSkill = useAppStore((state) => state.toggleCustomAgentSkill)
+  const [draft, setDraft] = useState(defaultSkillDraft)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const builtinSkills = Object.values(agentSkills)
+
+  const editSkill = (skill: CustomAgentSkill) => {
+    setEditingId(skill.id)
+    setDraft({
+      name: skill.name,
+      shortName: skill.shortName,
+      trigger: skill.trigger,
+      agents: skill.agents,
+      keywordsText: skill.keywordsText,
+      instructionsText: skill.instructionsText,
+      outputRulesText: skill.outputRulesText,
+      enabled: skill.enabled,
+    })
+  }
+
+  const resetDraft = () => {
+    setEditingId(null)
+    setDraft(defaultSkillDraft)
+  }
+
+  const saveSkill = () => {
+    if (!draft.name.trim()) {
+      return
+    }
+
+    upsertCustomAgentSkill({ ...draft, id: editingId ?? undefined })
+    resetDraft()
+  }
+
+  return (
+    <SectionShell
+      title="Skills"
+      description="Built-in skills are read-only. Custom skills use plain keyword matching and are merged into agent prompts."
+      action={
+        <button
+          type="button"
+          onClick={saveSkill}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#171714] px-2.5 text-xs font-medium text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={!draft.name.trim()}
+        >
+          <Plus size={13} />
+          {editingId ? 'Save' : 'Add skill'}
+        </button>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="grid grid-cols-2 gap-2">
+            <PlainField
+              label="Name"
+              value={draft.name}
+              placeholder="Scene continuity"
+              onChange={(value) => setDraft((item) => ({ ...item, name: value }))}
+            />
+            <PlainField
+              label="Short name"
+              value={draft.shortName}
+              placeholder="Continuity"
+              onChange={(value) => setDraft((item) => ({ ...item, shortName: value }))}
+            />
+          </div>
+          <PlainField
+            label="Trigger"
+            value={draft.trigger}
+            placeholder="When the user asks for continuity checks."
+            onChange={(value) => setDraft((item) => ({ ...item, trigger: value }))}
+          />
+          <PlainField
+            label="Keywords"
+            value={draft.keywordsText}
+            placeholder="continuity, timeline, foreshadowing"
+            onChange={(value) => setDraft((item) => ({ ...item, keywordsText: value }))}
+          />
+          <TextAreaField
+            label="Execution rules"
+            value={draft.instructionsText}
+            placeholder="One rule per line."
+            onChange={(value) => setDraft((item) => ({ ...item, instructionsText: value }))}
+          />
+          <TextAreaField
+            label="Output rules"
+            value={draft.outputRulesText}
+            placeholder="One output rule per line."
+            onChange={(value) => setDraft((item) => ({ ...item, outputRulesText: value }))}
+          />
+          <label className="inline-flex items-center gap-2 text-xs text-[#6f7168]">
+            <input
+              type="checkbox"
+              checked={draft.enabled}
+              onChange={(event) => setDraft((item) => ({ ...item, enabled: event.target.checked }))}
+            />
+            Enabled
+          </label>
+        </div>
+
+        <div className="grid gap-2">
+          <div className="text-xs font-medium text-[#6f7168]">Custom skills</div>
+          {customAgentSkills.length ? (
+            customAgentSkills.map((skill) => (
+              <div
+                key={skill.id}
+                className="flex items-center justify-between gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] px-3 py-2"
+              >
+                <button type="button" onClick={() => editSkill(skill)} className="min-w-0 text-left">
+                  <div className="truncate text-sm font-medium text-[#2f2b22]">{skill.name}</div>
+                  <div className="truncate text-xs text-[#8f897a]">{skill.trigger || skill.keywordsText}</div>
+                </button>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => toggleCustomAgentSkill(skill.id, !skill.enabled)}
+                    className="h-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
+                  >
+                    {skill.enabled ? 'On' : 'Off'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => deleteCustomAgentSkill(skill.id)}
+                    className="papyrus-icon-button size-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa]"
+                    title="Delete skill"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-lg border border-dashed border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs text-[#8f897a]">
+              No custom skills yet.
+            </div>
+          )}
+        </div>
+
+        <details className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <summary className="cursor-pointer text-xs font-medium text-[#6f7168]">Built-in skills</summary>
+          <div className="mt-2 grid gap-2">
+            {builtinSkills.map((skill) => (
+              <div key={skill.id} className="rounded-md bg-[#fffefa] px-2 py-1.5">
+                <div className="text-xs font-medium text-[#2f2b22]">{skill.name}</div>
+                <div className="mt-0.5 line-clamp-2 text-xs text-[#8f897a]">{skill.trigger}</div>
+              </div>
+            ))}
+          </div>
+        </details>
+      </div>
+    </SectionShell>
+  )
+}
+
+type McpDraft = Omit<McpServerConfig, 'id' | 'createdAt' | 'updatedAt'>
+
+const defaultMcpDraft: McpDraft = {
+  name: '',
+  transport: 'http' as McpServerTransport,
+  endpoint: '',
+  command: '',
+  headersText: '',
+  envText: '',
+  enabled: true,
+  status: 'idle' as const,
+  lastError: undefined,
+}
+
+function McpSettingsSection() {
+  const mcpServers = useAppStore((state) => state.mcpServers)
+  const upsertMcpServer = useAppStore((state) => state.upsertMcpServer)
+  const deleteMcpServer = useAppStore((state) => state.deleteMcpServer)
+  const updateMcpServerStatus = useAppStore((state) => state.updateMcpServerStatus)
+  const [draft, setDraft] = useState(defaultMcpDraft)
+  const [editingId, setEditingId] = useState<string | null>(null)
+
+  const editServer = (server: McpServerConfig) => {
+    setEditingId(server.id)
+    setDraft({
+      name: server.name,
+      transport: server.transport,
+      endpoint: server.endpoint,
+      command: server.command,
+      headersText: server.headersText,
+      envText: server.envText,
+      enabled: server.enabled,
+      status: server.status,
+      lastError: server.lastError,
+    })
+  }
+
+  const resetDraft = () => {
+    setEditingId(null)
+    setDraft(defaultMcpDraft)
+  }
+
+  const saveServer = () => {
+    if (!draft.name.trim()) {
+      return
+    }
+
+    upsertMcpServer({ ...draft, id: editingId ?? undefined, status: 'idle' })
+    resetDraft()
+  }
+
+  const testServer = async (server: McpServerConfig) => {
+    updateMcpServerStatus(server.id, { status: 'testing', lastError: undefined })
+    const result = await testMcpServer(server)
+    updateMcpServerStatus(server.id, {
+      status: result.status,
+      lastError: result.ok ? undefined : result.message,
+    })
+  }
+
+  return (
+    <SectionShell
+      title="MCP"
+      description="Save HTTP MCP endpoints for retrieval. Stdio servers can be stored now and will show as pending adapter support."
+      action={
+        <button
+          type="button"
+          onClick={saveServer}
+          disabled={!draft.name.trim()}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#171714] px-2.5 text-xs font-medium text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <Plus size={13} />
+          {editingId ? 'Save' : 'Add server'}
+        </button>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="grid grid-cols-[1fr_120px] gap-2">
+            <PlainField
+              label="Name"
+              value={draft.name}
+              placeholder="Knowledge base"
+              onChange={(value) => setDraft((item) => ({ ...item, name: value }))}
+            />
+            <label className="block">
+              <span className="mb-1 block text-xs font-medium text-[#6f7168]">Transport</span>
+              <select
+                value={draft.transport}
+                onChange={(event) =>
+                  setDraft((item) => ({ ...item, transport: event.target.value as McpServerTransport }))
+                }
+                className="h-10 w-full rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 text-sm text-[#2f2b22] outline-none transition focus:border-[#d7aa4f]"
+              >
+                <option value="http">http</option>
+                <option value="stdio">stdio</option>
+              </select>
+            </label>
+          </div>
+          {draft.transport === 'http' ? (
+            <PlainField
+              label="Endpoint"
+              value={draft.endpoint}
+              placeholder="https://example.com/mcp"
+              onChange={(value) => setDraft((item) => ({ ...item, endpoint: value }))}
+            />
+          ) : (
+            <PlainField
+              label="Command"
+              value={draft.command}
+              placeholder="node ./server.js"
+              onChange={(value) => setDraft((item) => ({ ...item, command: value }))}
+            />
+          )}
+          <TextAreaField
+            label={draft.transport === 'http' ? 'Headers' : 'Env'}
+            value={draft.transport === 'http' ? draft.headersText : draft.envText}
+            placeholder="KEY=value"
+            onChange={(value) =>
+              setDraft((item) =>
+                draft.transport === 'http' ? { ...item, headersText: value } : { ...item, envText: value },
+              )
+            }
+          />
+          <label className="inline-flex items-center gap-2 text-xs text-[#6f7168]">
+            <input
+              type="checkbox"
+              checked={draft.enabled}
+              onChange={(event) => setDraft((item) => ({ ...item, enabled: event.target.checked }))}
+            />
+            Enabled
+          </label>
+        </div>
+
+        <div className="grid gap-2">
+          {mcpServers.length ? (
+            mcpServers.map((server) => (
+              <div key={server.id} className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <button type="button" onClick={() => editServer(server)} className="min-w-0 text-left">
+                    <div className="flex items-center gap-2 text-sm font-medium text-[#2f2b22]">
+                      <span>{server.name}</span>
+                      <span className="rounded-md bg-[#f0e6d2] px-1.5 py-0.5 text-[10px] text-[#6f7168]">
+                        {server.transport}
+                      </span>
+                    </div>
+                    <div className="mt-1 truncate text-xs text-[#8f897a]">
+                      {server.transport === 'http' ? server.endpoint : server.command || 'stdio command pending'}
+                    </div>
+                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        upsertMcpServer({ ...server, enabled: !server.enabled, status: server.status })
+                      }
+                      className="h-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
+                    >
+                      {server.enabled ? 'On' : 'Off'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void testServer(server)}
+                      disabled={server.status === 'testing'}
+                      className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714] disabled:cursor-wait disabled:opacity-50"
+                    >
+                      <TestTube2 size={12} />
+                      {server.status === 'testing' ? 'Testing' : 'Test'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => deleteMcpServer(server.id)}
+                      className="papyrus-icon-button size-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa]"
+                      title="Delete MCP server"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-2 text-xs text-[#8f897a]">
+                  Status: {server.status}
+                  {server.lastError ? <span className="ml-2 text-[#9b3d30]">{server.lastError}</span> : null}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-lg border border-dashed border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs text-[#8f897a]">
+              No MCP servers configured.
+            </div>
+          )}
+        </div>
+      </div>
+    </SectionShell>
+  )
+}
+
+function PlainField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-[#6f7168]">{label}</span>
+      <input
+        value={value}
+        type="text"
+        autoComplete="off"
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-10 w-full rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 text-sm text-[#2f2b22] outline-none transition placeholder:text-[#9d988a] focus:border-[#d7aa4f]"
+      />
+    </label>
+  )
+}
+
+function TextAreaField({
+  label,
+  value,
+  onChange,
+  placeholder,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs font-medium text-[#6f7168]">{label}</span>
+      <textarea
+        value={value}
+        rows={3}
+        placeholder={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        className="min-h-20 w-full resize-y rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 py-2 text-sm leading-5 text-[#2f2b22] outline-none transition placeholder:text-[#9d988a] focus:border-[#d7aa4f]"
+      />
+    </label>
   )
 }
 

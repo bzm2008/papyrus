@@ -235,7 +235,7 @@ export function RemoteRelaySettings() {
                     : 'border border-[#d4e4d6] bg-[#fbfffb] text-[#667268] hover:text-[#1f3d2a]'
                 }`}
               >
-                {mode === 'companion' ? '文学秘书' : 'Flow 工作流'}
+                {mode === 'companion' ? '文学秘书' : '秘书模式'}
               </button>
             ))}
           </div>

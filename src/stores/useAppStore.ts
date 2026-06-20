@@ -434,6 +434,59 @@ export type ProjectGuidance = {
   loadedAt?: number
 }
 
+export type SecretaryPlanStatus = 'draft' | 'approved' | 'executing' | 'rejected'
+
+export type SecretaryPlanDraft = {
+  id: string
+  request: string
+  executionPrompt: string
+  planText: string
+  status: SecretaryPlanStatus
+  feedback: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+export type CustomAgentSkill = {
+  id: string
+  name: string
+  shortName: string
+  trigger: string
+  agents: FlowAgentId[]
+  keywordsText: string
+  instructionsText: string
+  outputRulesText: string
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type McpServerTransport = 'http' | 'stdio'
+export type McpServerStatus = 'idle' | 'testing' | 'ok' | 'error' | 'unsupported'
+
+export type McpServerConfig = {
+  id: string
+  name: string
+  transport: McpServerTransport
+  endpoint: string
+  command: string
+  headersText: string
+  envText: string
+  enabled: boolean
+  status: McpServerStatus
+  lastError?: string
+  createdAt: number
+  updatedAt: number
+}
+
+type CustomAgentSkillInput = Omit<CustomAgentSkill, 'id' | 'createdAt' | 'updatedAt'> & {
+  id?: string
+}
+
+type McpServerConfigInput = Omit<McpServerConfig, 'id' | 'createdAt' | 'updatedAt'> & {
+  id?: string
+}
+
 type TokenSnapshot = {
   editorTokens: number
   conversationTokens: number
@@ -496,6 +549,7 @@ type AppState = TokenSnapshot & {
   activeAgentRunId?: string
   resources: ImportedResource[]
   pendingDocumentPatch?: DocumentPatch
+  secretaryPlanDraft?: SecretaryPlanDraft
   llmRunState: LlmRunState
   llmStatusMessage: string
   updateStatus: UpdateStatus
@@ -518,6 +572,8 @@ type AppState = TokenSnapshot & {
   remoteRelayMessage: string
   remoteRelayLastJobAt?: number
   providerConfigs: Record<ProviderId, LlmProviderConfig>
+  customAgentSkills: CustomAgentSkill[]
+  mcpServers: McpServerConfig[]
   storyProjects: StoryProject[]
   activeStoryProjectId?: string
   storyContracts: StoryContract[]
@@ -599,6 +655,29 @@ type AppState = TokenSnapshot & {
   clearAgentMemory: () => void
   setPendingDocumentPatch: (patch?: Omit<DocumentPatch, 'id' | 'createdAt' | 'status'>) => void
   markDocumentPatch: (status: DocumentPatchStatus) => void
+  setSecretaryPlanDraft: (
+    draft?: Omit<SecretaryPlanDraft, 'id' | 'createdAt' | 'updatedAt' | 'status'> & {
+      id?: string
+      status?: SecretaryPlanStatus
+      createdAt?: number
+      updatedAt?: number
+    },
+  ) => SecretaryPlanDraft | undefined
+  reviseSecretaryPlanDraft: (
+    feedback: string,
+    patch?: Partial<Pick<SecretaryPlanDraft, 'planText' | 'executionPrompt'>>,
+  ) => void
+  approveSecretaryPlanDraft: () => void
+  clearSecretaryPlanDraft: () => void
+  upsertCustomAgentSkill: (skill: CustomAgentSkillInput) => CustomAgentSkill
+  deleteCustomAgentSkill: (id: string) => void
+  toggleCustomAgentSkill: (id: string, enabled: boolean) => void
+  upsertMcpServer: (server: McpServerConfigInput) => McpServerConfig
+  deleteMcpServer: (id: string) => void
+  updateMcpServerStatus: (
+    id: string,
+    patch: Pick<McpServerConfig, 'status'> & { lastError?: string },
+  ) => void
   addResources: (resources: ImportedResource[]) => void
   updateResource: (id: string, patch: Partial<ImportedResource>) => void
   deleteResource: (id: string) => void
@@ -666,10 +745,10 @@ type AppState = TokenSnapshot & {
 }
 
 const initialEditorText =
-  '论记忆、材料与判断\n\n这里是 Papyrus 的主编辑区。\n\n你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。\n\n在 Flow 模式中，主笔会根据任务拆解待办、调用子 Agent，并在需要时把正文写回文稿。'
+  '论记忆、材料与判断\n\n这里是 Papyrus 的主编辑区。\n\n你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。\n\n在秘书模式中，主笔会根据任务拆解待办、调用子 Agent，并在需要时把正文写回文稿。'
 
 const initialEditorHtml =
-  '<h1>论记忆、材料与判断</h1><p>这里是 Papyrus 的主编辑区。</p><p>你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。</p><p>在 Flow 模式中，主笔会根据任务拆解待办、调用子 Agent，并在需要时把正文写回文稿。</p>'
+  '<h1>论记忆、材料与判断</h1><p>这里是 Papyrus 的主编辑区。</p><p>你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。</p><p>在秘书模式中，主笔会根据任务拆解待办、调用子 Agent，并在需要时把正文写回文稿。</p>'
 
 const initialFlowMessages: FlowMessage[] = [
   {
@@ -677,7 +756,7 @@ const initialFlowMessages: FlowMessage[] = [
     role: 'assistant',
     agentId: 'writer',
     content:
-      'Flow 编队已就绪。给我一个主题、材料清单或章节目标，我会协调主笔、寻根、刺客和其他专业 Agent 推进。',
+      '秘书编队已就绪。给我一个主题、材料清单或章节目标，我会协调主笔、寻根、刺客和其他专业 Agent 推进。',
     createdAt: Date.now(),
   },
 ]
@@ -782,6 +861,7 @@ export const useAppStore = create<AppState>()(
       activeAgentRunId: undefined,
       resources: [],
       pendingDocumentPatch: undefined,
+      secretaryPlanDraft: undefined,
       llmRunState: 'idle',
       llmStatusMessage: 'LLM 待命',
       updateStatus: 'idle',
@@ -804,6 +884,8 @@ export const useAppStore = create<AppState>()(
       remoteRelayMessage: '远程中继未启用',
       remoteRelayLastJobAt: undefined,
       providerConfigs: defaultProviderConfigs,
+      customAgentSkills: [],
+      mcpServers: [],
       storyProjects: [],
       activeStoryProjectId: undefined,
       storyContracts: [],
@@ -833,7 +915,7 @@ export const useAppStore = create<AppState>()(
           }
         }),
       setActiveAgentId: (activeAgentId) => set({ activeAgentId }),
-      setFlowReviewMode: (flowReviewMode) => set({ flowReviewMode }),
+      setFlowReviewMode: () => set({ flowReviewMode: 'auto' }),
       setActiveVibeId: (activeVibeId) => set({ activeVibeId }),
       setVibeIntensity: (vibeIntensity) =>
         set({ vibeIntensity: Math.max(0, Math.min(100, Math.round(vibeIntensity))) }),
@@ -1460,6 +1542,132 @@ export const useAppStore = create<AppState>()(
             ? { ...state.pendingDocumentPatch, status }
             : undefined,
         })),
+      setSecretaryPlanDraft: (input) => {
+        if (!input) {
+          set({ secretaryPlanDraft: undefined })
+          return undefined
+        }
+
+        const now = Date.now()
+        const draft: SecretaryPlanDraft = {
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `secretary-plan-${now}`,
+          request: input.request.trim(),
+          executionPrompt: input.executionPrompt.trim(),
+          planText: input.planText.trim(),
+          status: input.status ?? 'draft',
+          feedback: input.feedback ?? [],
+          createdAt: input.createdAt ?? now,
+          updatedAt: input.updatedAt ?? now,
+        }
+
+        set({ secretaryPlanDraft: draft })
+        return draft
+      },
+      reviseSecretaryPlanDraft: (feedback, patch) =>
+        set((state) => {
+          if (!state.secretaryPlanDraft) {
+            return {}
+          }
+
+          const trimmed = feedback.trim()
+
+          return {
+            secretaryPlanDraft: {
+              ...state.secretaryPlanDraft,
+              ...patch,
+              feedback: trimmed
+                ? [...state.secretaryPlanDraft.feedback, trimmed].slice(-8)
+                : state.secretaryPlanDraft.feedback,
+              status: 'draft',
+              updatedAt: Date.now(),
+            },
+          }
+        }),
+      approveSecretaryPlanDraft: () =>
+        set((state) => ({
+          secretaryPlanDraft: state.secretaryPlanDraft
+            ? { ...state.secretaryPlanDraft, status: 'executing', updatedAt: Date.now() }
+            : undefined,
+        })),
+      clearSecretaryPlanDraft: () => set({ secretaryPlanDraft: undefined }),
+      upsertCustomAgentSkill: (input) => {
+        const now = Date.now()
+        const existing = input.id
+          ? get().customAgentSkills.find((skill) => skill.id === input.id)
+          : undefined
+        const skill: CustomAgentSkill = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `custom-skill-${now}`,
+          name: input.name.trim(),
+          shortName: input.shortName.trim() || input.name.trim(),
+          trigger: input.trigger.trim(),
+          agents: normalizeFlowAgents(input.agents),
+          keywordsText: input.keywordsText.trim(),
+          instructionsText: input.instructionsText.trim(),
+          outputRulesText: input.outputRulesText.trim(),
+          enabled: input.enabled,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        }
+
+        set((state) => ({
+          customAgentSkills: [
+            skill,
+            ...state.customAgentSkills.filter((item) => item.id !== skill.id),
+          ].slice(0, 60),
+        }))
+
+        return skill
+      },
+      deleteCustomAgentSkill: (id) =>
+        set((state) => ({
+          customAgentSkills: state.customAgentSkills.filter((skill) => skill.id !== id),
+        })),
+      toggleCustomAgentSkill: (id, enabled) =>
+        set((state) => ({
+          customAgentSkills: state.customAgentSkills.map((skill) =>
+            skill.id === id ? { ...skill, enabled, updatedAt: Date.now() } : skill,
+          ),
+        })),
+      upsertMcpServer: (input) => {
+        const now = Date.now()
+        const existing = input.id
+          ? get().mcpServers.find((server) => server.id === input.id)
+          : undefined
+        const server: McpServerConfig = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `mcp-server-${now}`,
+          name: input.name.trim(),
+          transport: input.transport === 'stdio' ? 'stdio' : 'http',
+          endpoint: input.endpoint.trim(),
+          command: input.command.trim(),
+          headersText: input.headersText.trim(),
+          envText: input.envText.trim(),
+          enabled: input.enabled,
+          status: input.status ?? 'idle',
+          lastError: input.lastError,
+          createdAt: existing?.createdAt ?? now,
+          updatedAt: now,
+        }
+
+        set((state) => ({
+          mcpServers: [server, ...state.mcpServers.filter((item) => item.id !== server.id)].slice(0, 40),
+        }))
+
+        return server
+      },
+      deleteMcpServer: (id) =>
+        set((state) => ({
+          mcpServers: state.mcpServers.filter((server) => server.id !== id),
+        })),
+      updateMcpServerStatus: (id, patch) =>
+        set((state) => ({
+          mcpServers: state.mcpServers.map((server) =>
+            server.id === id
+              ? { ...server, ...patch, updatedAt: Date.now() }
+              : server,
+          ),
+        })),
       addResources: (resources) =>
         set((state) => {
           const merged = [
@@ -1998,7 +2206,7 @@ export const useAppStore = create<AppState>()(
         isLeftCollapsed: state.isLeftCollapsed,
         activeProviderId: state.activeProviderId,
         activeAgentId: state.activeAgentId,
-        flowReviewMode: state.flowReviewMode,
+        flowReviewMode: 'auto' as const,
         activeVibeId: state.activeVibeId,
         vibeIntensity: state.vibeIntensity,
         compressionCount: state.compressionCount,
@@ -2089,6 +2297,7 @@ export const useAppStore = create<AppState>()(
           activeProviderId,
           activeArticleId,
           activeChatId,
+          flowReviewMode: 'auto' as const,
           articles,
           chatSessions,
           articleTitle: persistedState.articleTitle ?? current.articleTitle,
@@ -2128,6 +2337,9 @@ export const useAppStore = create<AppState>()(
             : '远程中继未启用',
           remoteRelayLastJobAt: persistedState.remoteRelayLastJobAt,
           providerConfigs,
+          customAgentSkills: sanitizeCustomAgentSkills(persistedState.customAgentSkills),
+          mcpServers: sanitizeMcpServers(persistedState.mcpServers),
+          secretaryPlanDraft: undefined,
           storyProjects: persistedState.storyProjects ?? current.storyProjects,
           activeStoryProjectId: persistedState.activeStoryProjectId ?? current.activeStoryProjectId,
           storyContracts: persistedState.storyContracts ?? current.storyContracts,
@@ -2157,6 +2369,98 @@ export const useAppStore = create<AppState>()(
     },
   ),
 )
+
+const validFlowAgentIds: FlowAgentId[] = [
+  'writer',
+  'researcher',
+  'critic',
+  'dramatist',
+  'stylist',
+  'proofreader',
+  'archivist',
+]
+
+function normalizeFlowAgents(agents: FlowAgentId[] = []): FlowAgentId[] {
+  const valid = agents.filter((agentId) => validFlowAgentIds.includes(agentId))
+  return valid.length ? Array.from(new Set(valid)) : (['writer'] as FlowAgentId[])
+}
+
+function sanitizeCustomAgentSkills(value: unknown): CustomAgentSkill[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<CustomAgentSkill> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const name = typeof item.name === 'string' ? item.name.trim() : ''
+
+      if (!name) {
+        return undefined
+      }
+
+      return {
+        id: typeof item.id === 'string' && item.id.trim() ? item.id : `custom-skill-${now}-${index}`,
+        name,
+        shortName:
+          typeof item.shortName === 'string' && item.shortName.trim()
+            ? item.shortName.trim()
+            : name,
+        trigger: typeof item.trigger === 'string' ? item.trigger.trim() : '',
+        agents: normalizeFlowAgents(item.agents as FlowAgentId[]),
+        keywordsText: typeof item.keywordsText === 'string' ? item.keywordsText.trim() : '',
+        instructionsText: typeof item.instructionsText === 'string' ? item.instructionsText.trim() : '',
+        outputRulesText: typeof item.outputRulesText === 'string' ? item.outputRulesText.trim() : '',
+        enabled: item.enabled !== false,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      } satisfies CustomAgentSkill
+    })
+    .filter(Boolean)
+    .slice(0, 60) as CustomAgentSkill[]
+}
+
+function sanitizeMcpServers(value: unknown): McpServerConfig[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<McpServerConfig> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const name = typeof item.name === 'string' ? item.name.trim() : ''
+
+      if (!name) {
+        return undefined
+      }
+
+      const transport: McpServerTransport = item.transport === 'stdio' ? 'stdio' : 'http'
+      const status: McpServerStatus = ['idle', 'testing', 'ok', 'error', 'unsupported'].includes(
+        item.status ?? '',
+      )
+        ? (item.status as McpServerStatus)
+        : 'idle'
+
+      return {
+        id: typeof item.id === 'string' && item.id.trim() ? item.id : `mcp-server-${now}-${index}`,
+        name,
+        transport,
+        endpoint: typeof item.endpoint === 'string' ? item.endpoint.trim() : '',
+        command: typeof item.command === 'string' ? item.command.trim() : '',
+        headersText: typeof item.headersText === 'string' ? item.headersText.trim() : '',
+        envText: typeof item.envText === 'string' ? item.envText.trim() : '',
+        enabled: item.enabled !== false,
+        status,
+        lastError: typeof item.lastError === 'string' ? item.lastError : undefined,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      } satisfies McpServerConfig
+    })
+    .filter(Boolean)
+    .slice(0, 40) as McpServerConfig[]
+}
 
 function pickActiveProviderId(
   providerId: ProviderId,

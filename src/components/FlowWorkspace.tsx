@@ -1,6 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import {
-  CheckCircle2,
   Clipboard,
   FileText,
   MessageSquare,
@@ -10,23 +9,21 @@ import {
   RotateCcw,
   Send,
   Sparkles,
-  ToggleLeft,
-  ToggleRight,
   Undo2,
 } from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useAgentStream } from '../hooks/useAgentStream'
-import { approveDocumentPatch, rejectDocumentPatch } from '../services/documentPatchService'
+import { createSecretaryPlanDraft, reviseSecretaryPlanDraft } from '../services/agentOrchestrator'
 import { sendFlowMessage } from '../services/flowOrchestrator'
-import { type AgentStep, type FlowMessage, type FlowReviewMode, useAppStore } from '../stores/useAppStore'
-import { AgentTraceRenderer } from './AgentTraceRenderer'
+import { type AgentStep, type AgentTodo, type FlowMessage, useAppStore } from '../stores/useAppStore'
+import { AgentTodoList, AgentTraceRenderer } from './AgentTraceRenderer'
 import { EditorPane } from './EditorPane'
 import { ModelSelector } from './ModelSelector'
 import { PromptAssistMenu } from './PromptAssistMenu'
 import { SlashCommandMenu } from './SlashCommandMenu'
-import { applySlashCommand, type SlashCommand } from './slashCommands'
+import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
 
-type AgentTodos = ReturnType<typeof useAppStore.getState>['agentTodos']
+type AgentTodos = AgentTodo[]
 
 export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
@@ -37,6 +34,9 @@ export function FlowWorkspace() {
   const agentSteps = useAppStore((state) => state.agentSteps)
   const llmRunState = useAppStore((state) => state.llmRunState)
   const pendingDocumentPatch = useAppStore((state) => state.pendingDocumentPatch)
+  const secretaryPlanDraft = useAppStore((state) => state.secretaryPlanDraft)
+  const approveSecretaryPlanDraft = useAppStore((state) => state.approveSecretaryPlanDraft)
+  const clearSecretaryPlanDraft = useAppStore((state) => state.clearSecretaryPlanDraft)
   useAgentStream()
   const visibleMessages = flowMessages.filter(
     (message) => message.role === 'user' || !message.agentId || message.agentId === 'writer',
@@ -53,8 +53,21 @@ export function FlowWorkspace() {
     }
 
     const value = prompt
+    const resolved = resolveSlashCommandPrompt(value)
     setPrompt('')
-    void sendFlowMessage(value)
+
+    if (secretaryPlanDraft && secretaryPlanDraft.status === 'draft') {
+      void reviseSecretaryPlanDraft(resolved.displayPrompt)
+      return
+    }
+
+    if (resolved.isPlanCommand) {
+      const request = resolved.argumentsText || '请先写出要规划的任务'
+      void createSecretaryPlanDraft(resolved.displayPrompt || '/plan', request)
+      return
+    }
+
+    void sendFlowMessage(resolved.executionPrompt, { displayPrompt: resolved.displayPrompt })
   }
 
   const pickCommand = (command: SlashCommand) => {
@@ -93,6 +106,22 @@ export function FlowWorkspace() {
     }
   }
 
+  const executePlan = () => {
+    const draft = useAppStore.getState().secretaryPlanDraft
+
+    if (!draft || llmRunState === 'running') {
+      return
+    }
+
+    approveSecretaryPlanDraft()
+    void sendFlowMessage(draft.executionPrompt, {
+      displayPrompt: draft.request,
+      approvedPlanId: draft.id,
+    }).finally(() => {
+      useAppStore.getState().clearSecretaryPlanDraft()
+    })
+  }
+
   return (
     <section className="flex h-full min-h-0 bg-[#fbfaf6]">
       <div className="flex min-w-0 flex-1 flex-col">
@@ -102,7 +131,7 @@ export function FlowWorkspace() {
               <PenLine size={16} />
             </div>
             <div className="min-w-0 leading-tight">
-              <div className="truncate text-sm font-semibold text-[#20201d]">Flow 工作流</div>
+              <div className="truncate text-sm font-semibold text-[#20201d]">秘书模式</div>
               <div className="truncate text-xs text-[#6f7168]">
                 小说、作文、论证、资料和文学常识都可以交给主笔分流
               </div>
@@ -122,6 +151,9 @@ export function FlowWorkspace() {
 
         <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-5">
           <div className="mx-auto flex min-h-full w-full max-w-[900px] flex-col">
+            {secretaryPlanDraft ? (
+              <SecretaryPlanCard draft={secretaryPlanDraft} onExecute={executePlan} onCancel={clearSecretaryPlanDraft} />
+            ) : null}
             {pendingDocumentPatch ? <PendingPatchReview /> : null}
 
             <div className="flex-1 space-y-4">
@@ -149,7 +181,6 @@ export function FlowWorkspace() {
           >
             <div className="mb-2 flex flex-wrap items-center gap-2 px-1">
               <ModelSelector compact />
-              <ReviewModeInline />
               <button
                 type="button"
                 title="重新生成上一轮"
@@ -177,7 +208,7 @@ export function FlowWorkspace() {
               <SlashCommandMenu scope="flow" value={prompt} onPick={pickCommand} />
               <PromptAssistMenu value={prompt} onChange={setPrompt} />
               <textarea
-                aria-label="Flow 指令"
+                aria-label="秘书模式指令"
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder="交给主笔：写章节、改作文、查资料、做论证。输入 / 命令，@ 技能，# 文件..."
@@ -229,7 +260,6 @@ export function FlowWorkspace() {
 
 function PendingPatchReview() {
   const patch = useAppStore((state) => state.pendingDocumentPatch)
-  const flowReviewMode = useAppStore((state) => state.flowReviewMode)
 
   if (!patch || patch.status === 'rejected') {
     return null
@@ -241,11 +271,7 @@ function PendingPatchReview() {
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold">
             <PenLine size={15} />
-            {patch.status === 'applied'
-              ? '正文已写入文稿'
-              : flowReviewMode === 'auto'
-                ? 'Auto 正在写入文稿'
-                : '待写入文稿'}
+            {patch.status === 'applied' ? '已写入文稿' : '正在写入文稿'}
           </div>
           <p className="mt-1 text-sm leading-6 text-[#4f5c49]">
             {patch.title} · {patch.operation}
@@ -254,24 +280,55 @@ function PendingPatchReview() {
             {patch.content}
           </p>
         </div>
-        {patch.status === 'pending' && flowReviewMode === 'review' ? (
-          <div className="flex shrink-0 gap-2">
-            <button
-              type="button"
-              onClick={approveDocumentPatch}
-              className="h-8 rounded-lg bg-[#20201d] px-3 text-xs font-medium text-[#fffefa] transition hover:bg-[#315d39]"
-            >
-              写入文稿
-            </button>
-            <button
-              type="button"
-              onClick={rejectDocumentPatch}
-              className="h-8 rounded-lg border border-[#cfd8c7] px-3 text-xs font-medium text-[#6f7168] transition hover:bg-[#fffefa]"
-            >
-              拒绝
-            </button>
+      </div>
+    </section>
+  )
+}
+
+function SecretaryPlanCard({
+  draft,
+  onExecute,
+  onCancel,
+}: {
+  draft: NonNullable<ReturnType<typeof useAppStore.getState>['secretaryPlanDraft']>
+  onExecute: () => void
+  onCancel: () => void
+}) {
+  const llmRunState = useAppStore((state) => state.llmRunState)
+
+  return (
+    <section className="mb-4 overflow-hidden rounded-lg border border-[#d8cfbd] bg-[#fffefa] shadow-[0_10px_28px_rgba(43,34,19,0.06)]">
+      <div className="border-b border-[#eee4d3] px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-[#20201d]">秘书规划</div>
+            <div className="mt-1 truncate text-xs text-[#8f897a]">{draft.request}</div>
           </div>
-        ) : null}
+          <span className="shrink-0 rounded-md bg-[#edf6eb] px-2 py-1 text-[11px] text-[#315d39]">
+            /plan
+          </span>
+        </div>
+      </div>
+      <div className="max-h-[320px] overflow-y-auto px-4 py-3 text-sm leading-7 text-[#2f2b22]">
+        <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{draft.planText}</p>
+      </div>
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#eee4d3] bg-[#fffdf7] px-4 py-3">
+        <span className="mr-auto text-xs text-[#8f897a]">确认后才会开始自动执行</span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="h-8 rounded-lg border border-[#e1dccf] bg-[#fffefa] px-3 text-xs text-[#6f7168] transition hover:text-[#171714]"
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          onClick={onExecute}
+          disabled={llmRunState === 'running'}
+          className="h-8 rounded-lg bg-[#20201d] px-3 text-xs font-medium text-[#fffefa] transition hover:bg-[#315d39] disabled:cursor-wait disabled:opacity-50"
+        >
+          开始执行
+        </button>
       </div>
     </section>
   )
@@ -400,6 +457,7 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
             ) : null}
           </div>
         </div>
+        <AgentTodoList todos={todos} />
         {steps.length ? <AgentTraceRenderer steps={steps} /> : null}
       </div>
     </motion.div>
@@ -426,39 +484,6 @@ function formatElapsed(seconds: number) {
   const rest = seconds % 60
 
   return `${minutes}:${rest.toString().padStart(2, '0')}`
-}
-
-function ReviewModeInline() {
-  const flowReviewMode = useAppStore((state) => state.flowReviewMode)
-  const setFlowReviewMode = useAppStore((state) => state.setFlowReviewMode)
-  const modes: Array<{ value: FlowReviewMode; label: string; icon: typeof ToggleLeft }> = [
-    { value: 'auto', label: 'Auto', icon: ToggleLeft },
-    { value: 'review', label: '审阅', icon: ToggleRight },
-  ]
-
-  return (
-    <div className="flex h-8 items-center rounded-lg border border-[#dfe4d6] bg-[#fffefa] p-0.5">
-      {modes.map((mode) => {
-        const Icon = mode.icon
-        const active = flowReviewMode === mode.value
-
-        return (
-          <button
-            key={mode.value}
-            type="button"
-            aria-pressed={active}
-            onClick={() => setFlowReviewMode(mode.value)}
-            className={`inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs transition ${
-              active ? 'bg-[#20201d] text-[#fffefa]' : 'text-[#6f7168] hover:text-[#171714]'
-            }`}
-          >
-            {active ? <CheckCircle2 size={13} /> : <Icon size={13} />}
-            {mode.label}
-          </button>
-        )
-      })}
-    </div>
-  )
 }
 
 function findLastVisibleAssistantIndex(messages: FlowMessage[]) {

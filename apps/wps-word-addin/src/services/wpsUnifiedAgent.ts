@@ -2,6 +2,8 @@ import type {
   AgentRunInput,
   AgentRunResult,
   UnifiedAgentIntent,
+  WpsAgentTodo,
+  WpsPlanDraft,
   WpsDocumentSnapshot,
   WpsPatchOperation,
 } from '../types'
@@ -48,14 +50,66 @@ type ValidationResult = {
   issues: string[]
 }
 
+export async function createWpsPlanDraft(input: {
+  request: string
+  snapshot: WpsDocumentSnapshot
+  selectedSkill?: AgentRunInput['selectedSkill']
+  token?: string
+  previousPlan?: WpsPlanDraft
+  feedback?: string
+}): Promise<WpsPlanDraft> {
+  const request = input.request.trim()
+
+  if (!request) {
+    throw new Error('请输入要规划的任务。')
+  }
+
+  const executionPrompt = input.previousPlan?.executionPrompt ?? request
+  const now = Date.now()
+  const local = localPlan(executionPrompt, input.snapshot)
+  let planText = createLocalPlanText(executionPrompt, input.snapshot, local)
+
+  if (input.token) {
+    const system = [
+      '你是 Papyrus WPS 插件的 /plan 规划器。',
+      '只输出可协商的执行规划，不要执行写入，不要生成正文。',
+      '风格接近 Codex：目标、步骤、风险、预期写入方式要清楚。',
+      '输出简短 Markdown。',
+    ].join('\n')
+    const user = [
+      '用户请求：' + executionPrompt,
+      input.previousPlan ? '当前规划：\n' + input.previousPlan.planText : '',
+      input.feedback ? '用户反馈：' + input.feedback : '',
+      input.selectedSkill ? '选中技能：' + input.selectedSkill.name + '\n' + input.selectedSkill.systemHint : '',
+      buildContext(input.snapshot),
+    ].filter(Boolean).join('\n\n')
+
+    planText = await callScallion(input.token, PRIMARY_MODEL, [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ], 0.2, 1600).catch(() => planText)
+  }
+
+  return {
+    id: input.previousPlan?.id ?? createLocalId(),
+    request,
+    executionPrompt,
+    planText,
+    feedback: input.feedback ? [...(input.previousPlan?.feedback ?? []), input.feedback].slice(-6) : (input.previousPlan?.feedback ?? []),
+    createdAt: input.previousPlan?.createdAt ?? now,
+    updatedAt: now,
+  }
+}
 export async function runUnifiedAgent(input: AgentRunInput): Promise<AgentRunResult> {
   if (!input.token) {
     throw new Error('请先登录 Scallion 后使用内置模型。')
   }
 
   const trace: string[] = []
+  const todos = createTodos(input.prompt, input.snapshot, input.approvedPlan)
   const report = (status: string) => {
     trace.push(status)
+    advanceTodos(todos, status)
     input.onStatus?.(status)
   }
 
@@ -68,6 +122,7 @@ export async function runUnifiedAgent(input: AgentRunInput): Promise<AgentRunRes
       reply: '请先在 WPS 文档中选中要处理的文字，然后再发给我。',
       intent: sanitizedPlan.intent,
       trace,
+      todos,
     }
   }
 
@@ -96,8 +151,10 @@ export async function runUnifiedAgent(input: AgentRunInput): Promise<AgentRunRes
   }
 
   report(validation.ok ? '完成' : '完成但已降级处理')
-  return toRunResult(parsed, sanitizedPlan, trace)
+  const result = toRunResult(parsed, sanitizedPlan, trace)
+  return { ...result, todos }
 }
+
 
 export function inferIntent(prompt: string, selectionText: string): UnifiedAgentIntent {
   const normalized = prompt.toLowerCase()
@@ -314,6 +371,80 @@ function buildContext(snapshot: WpsDocumentSnapshot) {
   ].filter(Boolean).join('\n\n')
 }
 
+function createTodos(prompt: string, snapshot: WpsDocumentSnapshot, approvedPlan?: WpsPlanDraft): WpsAgentTodo[] {
+  const hasSelection = Boolean(snapshot.selectionText.trim())
+  return [
+    {
+      id: 'plan',
+      title: approvedPlan ? '执行已批准规划' : '判断任务路径',
+      detail: approvedPlan?.planText.split('\n').find(Boolean) ?? prompt.slice(0, 72),
+      status: 'pending',
+    },
+    {
+      id: 'context',
+      title: hasSelection ? '读取选区' : '读取文档上下文',
+      detail: hasSelection ? `${snapshot.selectionText.length} 字选区` : `${snapshot.wordCount} 字上下文`,
+      status: 'pending',
+    },
+    {
+      id: 'generate',
+      title: '生成结果',
+      detail: '调用 Papyrus WPS agent 并按技能规则整理输出',
+      status: 'pending',
+    },
+    {
+      id: 'validate',
+      title: '校验可写入内容',
+      detail: '分离回复和 WPS 文稿补丁，必要时修复 JSON 输出',
+      status: 'pending',
+    },
+  ]
+}
+
+function advanceTodos(todos: WpsAgentTodo[], status: string) {
+  const current = status.includes('规划') ? 'plan'
+    : status.includes('读取') ? 'context'
+      : status.includes('生成') ? 'generate'
+        : status.includes('校验') || status.includes('修复') ? 'validate'
+          : status.includes('完成') ? 'done'
+            : undefined
+
+  if (!current) {
+    return
+  }
+
+  for (const todo of todos) {
+    if (current === 'done') {
+      todo.status = todo.status === 'blocked' ? 'blocked' : 'completed'
+    } else if (todo.id === current) {
+      todo.status = 'running'
+    } else if (todo.status === 'running') {
+      todo.status = 'completed'
+    }
+  }
+}
+
+function createLocalPlanText(prompt: string, snapshot: WpsDocumentSnapshot, plan: WpsAgentPlan) {
+  const agents = plan.agents.join(' / ')
+  return [
+    '# WPS 秘书规划',
+    '',
+    `目标：${plan.goal || prompt}`,
+    '',
+    '步骤',
+    `1. 读取${snapshot.selectionText.trim() ? '当前选区' : '文档上下文'}并确认写入边界。`,
+    `2. 调度 ${agents || 'writer'} 处理任务。`,
+    plan.writeIntent ? `3. 生成可写入 WPS 的正文补丁，建议操作：${plan.operation}。` : '3. 只生成答复，不修改 WPS 文档。',
+    '4. 校验输出，确保回复和文稿内容分离。',
+    '',
+    '风险',
+    plan.cautions.length ? plan.cautions.map((item) => `- ${item}`).join('\n') : '- 没有外部资料时，不编造实时事实或来源。',
+  ].join('\n')
+}
+
+function createLocalId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
 function parseAgentJson(raw: string, plan: WpsAgentPlan): AgentJson {
   const parsed = parseJsonObject(raw)
 

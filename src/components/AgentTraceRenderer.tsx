@@ -11,7 +11,7 @@ import {
   Wand2,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
-import { type AgentStep, useAppStore } from '../stores/useAppStore'
+import { type AgentStep, type AgentTodo, useAppStore } from '../stores/useAppStore'
 
 export function AgentTraceRenderer({ steps }: { steps: AgentStep[] }) {
   const bottomRef = useRef<HTMLDivElement | null>(null)
@@ -34,16 +34,19 @@ export function AgentTraceRenderer({ steps }: { steps: AgentStep[] }) {
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -6 }}
-      className="mt-3 max-h-[360px] overflow-y-auto rounded-xl border border-[#e8ddc7] bg-[#fffdf7] p-3 shadow-[0_10px_26px_rgba(43,34,19,0.04)]"
+      className="mt-3 max-h-[360px] overflow-y-auto rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-3"
     >
-      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#2f2b22]">
-        <Sparkles size={15} className="text-[#d7aa4f]" />
-        Solo execution
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs font-semibold text-[#2f2b22]">
+          <Sparkles size={14} className="text-[#d7aa4f]" />
+          执行轨迹
+        </div>
+        <span className="text-[11px] text-[#8f897a]">{steps.length} steps</span>
       </div>
-      <div className="space-y-2">
+      <div className="relative space-y-1 before:absolute before:left-[10px] before:top-2 before:h-[calc(100%-12px)] before:w-px before:bg-[#eadfcb]">
         <AnimatePresence initial={false}>
           {steps.map((step) => (
-            <AgentStepCard key={step.id} step={step} />
+            <AgentStepRow key={step.id} step={step} />
           ))}
         </AnimatePresence>
         <div ref={bottomRef} />
@@ -52,7 +55,35 @@ export function AgentTraceRenderer({ steps }: { steps: AgentStep[] }) {
   )
 }
 
-function AgentStepCard({ step }: { step: AgentStep }) {
+export function AgentTodoList({ todos }: { todos: AgentTodo[] }) {
+  if (!todos.length) {
+    return null
+  }
+
+  return (
+    <div className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-2">
+      <div className="mb-1 px-1 text-[11px] font-semibold text-[#6f7168]">To do</div>
+      <div className="space-y-1">
+        {todos.map((todo) => (
+          <div
+            key={todo.id}
+            className={`flex items-start gap-2 rounded-md px-2 py-1.5 text-xs transition ${
+              todo.status === 'running' ? 'bg-[#edf6eb] text-[#20201d]' : 'text-[#6f7168]'
+            }`}
+          >
+            <TodoStatusIcon status={todo.status} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-medium">{todo.title}</div>
+              <div className="line-clamp-1 text-[11px] text-[#8f897a]">{todo.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function AgentStepRow({ step }: { step: AgentStep }) {
   const toggleAgentStepExpanded = useAppStore((state) => state.toggleAgentStepExpanded)
   const expanded = step.status === 'running' || step.isExpanded
   const content = [step.details, step.content].filter(Boolean).join('\n\n')
@@ -60,91 +91,113 @@ function AgentStepCard({ step }: { step: AgentStep }) {
   return (
     <motion.article
       layout
-      initial={{ opacity: 0, y: -10 }}
+      initial={{ opacity: 0, y: -6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -8 }}
-      transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-      className={`rounded-lg border bg-[#fffefa] ${
-        step.status === 'running'
-          ? 'border-[#d7aa4f]/70 shadow-[0_10px_24px_rgba(215,170,79,0.12)]'
-          : step.status === 'error'
-            ? 'border-[#d37b6d]/60'
-            : 'border-[#efe5d1]'
-      }`}
+      exit={{ opacity: 0, y: -6 }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+      className="relative pl-7"
     >
-      <button
-        type="button"
-        onClick={() => step.status !== 'running' && toggleAgentStepExpanded(step.id)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left"
-      >
+      <span className="absolute left-0 top-2 z-10 grid size-5 place-items-center rounded-full bg-[#fffefa]">
         <StepStatusIcon step={step} />
-        <StepTypeIcon step={step} />
-        <span
-          className={`min-w-0 flex-1 truncate text-xs font-medium ${
-            step.status === 'pending' ? 'text-[#9d988a]' : 'text-[#2f2b22]'
-          }`}
+      </span>
+      <div
+        className={`rounded-lg border px-3 py-2 ${
+          step.status === 'running'
+            ? 'border-[#d7aa4f]/70 bg-[#fff8e8]'
+            : step.status === 'error'
+              ? 'border-[#d37b6d]/60 bg-[#fff7f4]'
+              : 'border-transparent bg-transparent hover:border-[#eee4d3] hover:bg-[#fffdf7]'
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => step.status !== 'running' && toggleAgentStepExpanded(step.id)}
+          className="flex w-full items-center gap-2 text-left"
         >
-          {step.title}
-        </span>
-        <span className="shrink-0 text-[11px] text-[#8f897a]">{statusLabel(step.status)}</span>
-        <motion.span
-          animate={{ rotate: expanded ? 180 : 0 }}
-          transition={{ duration: 0.18 }}
-          className={step.status === 'running' ? 'opacity-40' : ''}
-        >
-          <ChevronDown size={14} />
-        </motion.span>
-      </button>
-
-      <AnimatePresence initial={false}>
-        {expanded && content ? (
-          <motion.div
-            key="content"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            className="overflow-hidden"
+          <StepTypeIcon step={step} />
+          <span
+            className={`min-w-0 flex-1 truncate text-xs font-medium ${
+              step.status === 'pending' ? 'text-[#9d988a]' : 'text-[#2f2b22]'
+            }`}
           >
-            <div className="max-h-[240px] overflow-y-auto border-t border-[#efe5d1] px-3 py-2 text-xs leading-5 text-[#6f7168]">
-              <MarkdownLite text={content} isStreaming={step.status === 'running'} />
-              {step.sources?.length ? (
-                <div className="mt-2 space-y-1 text-[11px] text-[#3f5845]">
-                  {step.sources.slice(0, 5).map((source) => (
-                    <div key={source.url ?? source.title} className="truncate">
-                      {source.url ? (
-                        <a href={source.url} target="_blank" rel="noreferrer" className="hover:underline">
-                          {source.title}
-                        </a>
-                      ) : (
-                        source.title
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
+            {step.title}
+          </span>
+          <span className="shrink-0 text-[11px] text-[#8f897a]">{statusLabel(step.status)}</span>
+          <motion.span
+            animate={{ rotate: expanded ? 180 : 0 }}
+            transition={{ duration: 0.18 }}
+            className={step.status === 'running' ? 'opacity-40' : ''}
+          >
+            <ChevronDown size={14} />
+          </motion.span>
+        </button>
+
+        <AnimatePresence initial={false}>
+          {expanded && content ? (
+            <motion.div
+              key="content"
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="mt-2 max-h-[220px] overflow-y-auto rounded-md bg-[#fffefa] px-2 py-2 text-xs leading-5 text-[#6f7168]">
+                <MarkdownLite text={content} isStreaming={step.status === 'running'} />
+                {step.sources?.length ? (
+                  <div className="mt-2 space-y-1 text-[11px] text-[#3f5845]">
+                    {step.sources.slice(0, 5).map((source) => (
+                      <div key={source.url ?? source.title} className="truncate">
+                        {source.url ? (
+                          <a href={source.url} target="_blank" rel="noreferrer" className="hover:underline">
+                            {source.title}
+                          </a>
+                        ) : (
+                          source.title
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      </div>
     </motion.article>
   )
 }
 
 function StepStatusIcon({ step }: { step: AgentStep }) {
   if (step.status === 'running') {
-    return <Loader2 size={14} className="shrink-0 animate-spin text-[#d7aa4f]" />
+    return <Loader2 size={13} className="animate-spin text-[#d7aa4f]" />
   }
 
   if (step.status === 'completed') {
-    return <CheckCircle2 size={14} className="shrink-0 text-[#4f7a54]" />
+    return <CheckCircle2 size={13} className="text-[#4f7a54]" />
   }
 
   if (step.status === 'error') {
-    return <AlertCircle size={14} className="shrink-0 text-[#b85c4d]" />
+    return <AlertCircle size={13} className="text-[#b85c4d]" />
   }
 
-  return <Circle size={12} className="shrink-0 text-[#b9b09e]" />
+  return <Circle size={11} className="text-[#b9b09e]" />
+}
+
+function TodoStatusIcon({ status }: { status: AgentTodo['status'] }) {
+  if (status === 'running') {
+    return <Loader2 size={13} className="mt-0.5 shrink-0 animate-spin text-[#d7aa4f]" />
+  }
+
+  if (status === 'completed') {
+    return <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-[#4f7a54]" />
+  }
+
+  if (status === 'blocked') {
+    return <AlertCircle size={13} className="mt-0.5 shrink-0 text-[#b85c4d]" />
+  }
+
+  return <Circle size={11} className="mt-1 shrink-0 text-[#b9b09e]" />
 }
 
 function StepTypeIcon({ step }: { step: AgentStep }) {

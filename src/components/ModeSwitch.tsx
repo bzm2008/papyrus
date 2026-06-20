@@ -7,8 +7,8 @@ const modes: Array<{
   label: string
   icon: typeof Feather
 }> = [
-  { value: 'companion', label: '秘书模式', icon: Feather },
-  { value: 'flow', label: 'Flow 模式', icon: BrainCircuit },
+  { value: 'companion', label: '写作模式', icon: Feather },
+  { value: 'flow', label: '秘书模式', icon: BrainCircuit },
 ]
 
 export function ModeSwitch() {
@@ -25,7 +25,7 @@ export function ModeSwitch() {
           <button
             key={item.value}
             type="button"
-            title={`切换到${item.label}`}
+            title={'切换到' + item.label}
             onClick={() => setMode(item.value)}
             className="relative z-10 flex h-8 w-32 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition"
           >

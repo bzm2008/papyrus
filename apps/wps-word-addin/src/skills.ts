@@ -1,69 +1,14 @@
 import type { AgentSkill } from './types'
 
 export const agentSkills: AgentSkill[] = [
-  {
-    id: 'explain',
-    name: '解释与知识',
-    shortName: '解释',
-    description: '解释文学常识、写作术语、修辞和文本背景。',
-    systemHint: '优先直接解释概念，再给可迁移到写作中的例子。',
-  },
-  {
-    id: 'polish',
-    name: '润色改写',
-    shortName: '润色',
-    description: '改善句法、节奏、准确度和表达质感。',
-    systemHint: '保留作者原意和语气，只修正表达、结构和细节。',
-  },
-  {
-    id: 'expand',
-    name: '扩写成段',
-    shortName: '扩写',
-    description: '把提纲、短句或片段扩写为可放入文档的正文。',
-    systemHint: '输出完整可用正文，减少解释，保持段落自然。',
-  },
-  {
-    id: 'condense',
-    name: '缩写提炼',
-    shortName: '缩写',
-    description: '压缩冗余内容，保留论点、信息和语气。',
-    systemHint: '删去重复和松散铺陈，保留必要逻辑关系。',
-  },
-  {
-    id: 'argument',
-    name: '议论文',
-    shortName: '议论文',
-    description: '形成论点、论据、反驳和递进结构。',
-    systemHint: '明确中心论点、分论点、证据链和反方回应。',
-  },
-  {
-    id: 'expository',
-    name: '说明文',
-    shortName: '说明文',
-    description: '按定义、分类、流程、因果或对比组织说明。',
-    systemHint: '强调清楚、准确、层次和读者可理解性。',
-  },
-  {
-    id: 'outline',
-    name: '提纲结构',
-    shortName: '提纲',
-    description: '为文章、作业或章节生成结构骨架。',
-    systemHint: '输出层级清晰的提纲，并说明每段承担的功能。',
-  },
-  {
-    id: 'review',
-    name: '审阅诊断',
-    shortName: '审阅',
-    description: '检查逻辑、材料、表达、错别字和完成度。',
-    systemHint: '先列关键问题，再给可执行修改建议，必要时给示例。',
-  },
-  {
-    id: 'continue',
-    name: '续写正文',
-    shortName: '续写',
-    description: '根据上下文继续写作，适合文章、故事和作业。',
-    systemHint: '承接当前文档语气和内容，不突然改变文体。',
-  },
+  { id: 'literary-drafting', name: '文学正文起草', shortName: '正文', description: '续写、扩写、生成可直接写入 WPS 的正文段落。', systemHint: '先判断写作意图，输出具体、有动作和细节的正文；不要把解释、计划或来源写进正文补丁。', keywords: ['正文', '续写', '扩写', '写入', '段落', '章节', 'draft', 'write'] },
+  { id: 'style-continuity', name: '文风连续性', shortName: '润色', description: '改善句法、节奏、语气和表达质感，同时保留作者原意。', systemHint: '保留作者原声和判断结构，只修正表达、结构和细节；避免模板化文学腔。', keywords: ['润色', '风格', '语气', '降噪', 'polish', 'style'] },
+  { id: 'copyediting-final-pass', name: '终校清稿', shortName: '校对', description: '检查错别字、病句、标点、重复表达和术语一致性。', systemHint: '先做低风险修正，再指出可能改变含义的高风险改动；不擅自改变专名和人物语气。', keywords: ['校对', '纠错', '错别字', '病句', '标点', 'proof'] },
+  { id: 'structure-room', name: '结构诊断', shortName: '结构', description: '处理大纲、段落顺序、论证推进、叙事节奏和承接问题。', systemHint: '把文本拆成目标、阻力、转折、后果或论点、证据、解释、回扣，给出可执行调整。', keywords: ['结构', '大纲', '节奏', '承接', '论证', 'outline'] },
+  { id: 'research-and-critique', name: '检索与反证', shortName: '核查', description: '处理事实、来源、引用、反例、逻辑漏洞和风险提示。', systemHint: '区分事实、推断和创作设定；没有可靠材料时明确标注待核实，不编造来源。', keywords: ['资料', '来源', '事实', '引用', '核实', '风险', 'research'] },
+  { id: 'humanities-argument', name: '文科论证锻造', shortName: '论证', description: '形成论点、证据链、反驳预案和段落推进。', systemHint: '把核心判断压缩成可争辩命题，展示推理过程，不只罗列观点。', keywords: ['论证', '观点', '材料分析', '反驳', 'argument'] },
+  { id: 'scene-cinematography', name: '场景镜头调度', shortName: '场景', description: '写场景、动作、空间、氛围、镜头感和戏剧推进。', systemHint: '用空间位置、动作顺序和感官焦点组织段落；每个镜头服务人物选择或信息释放。', keywords: ['场景', '动作', '镜头', '氛围', '冲突', 'scene'] },
+  { id: 'publication-polish', name: '发表前编辑', shortName: '发布', description: '处理标题、摘要、开头、结尾、投稿和发布前润色。', systemHint: '判断发布场景，优化开头压力、结尾余波和标题准确性，不做标题党。', keywords: ['标题', '摘要', '发布', '投稿', '结尾', 'publish'] },
 ]
 
 export function findSkillFromPrompt(prompt: string) {
@@ -74,13 +19,12 @@ export function findSkillFromPrompt(prompt: string) {
   }
 
   const query = match[1].toLowerCase()
-  return agentSkills.find((skill) => {
-    return (
-      skill.shortName.toLowerCase().includes(query) ||
-      skill.name.toLowerCase().includes(query) ||
-      skill.id.includes(query)
-    )
-  })
+  return agentSkills.find((skill) => skillMatches(skill, query))
+}
+
+export function inferSkillForPrompt(prompt: string) {
+  const normalized = prompt.toLowerCase()
+  return agentSkills.find((skill) => skill.keywords?.some((keyword) => normalized.includes(keyword.toLowerCase())))
 }
 
 export function searchSkills(query: string) {
@@ -90,8 +34,10 @@ export function searchSkills(query: string) {
     return agentSkills
   }
 
-  return agentSkills.filter((skill) => {
-    const haystack = `${skill.name} ${skill.shortName} ${skill.description} ${skill.id}`.toLowerCase()
-    return haystack.includes(normalized)
-  })
+  return agentSkills.filter((skill) => skillMatches(skill, normalized))
+}
+
+function skillMatches(skill: AgentSkill, query: string) {
+  const haystack = (skill.name + ' ' + skill.shortName + ' ' + skill.description + ' ' + skill.id + ' ' + (skill.keywords ?? []).join(' ')).toLowerCase()
+  return haystack.includes(query)
 }

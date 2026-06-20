@@ -24,6 +24,26 @@ export type AgentSkill = {
   shortName: string
   description: string
   systemHint: string
+  keywords?: string[]
+}
+
+export type WpsAgentTodoStatus = 'pending' | 'running' | 'completed' | 'blocked'
+
+export type WpsAgentTodo = {
+  id: string
+  title: string
+  detail: string
+  status: WpsAgentTodoStatus
+}
+
+export type WpsPlanDraft = {
+  id: string
+  request: string
+  executionPrompt: string
+  planText: string
+  feedback: string[]
+  createdAt: number
+  updatedAt: number
 }
 
 export type ChatMessage = {
@@ -59,6 +79,7 @@ export type AgentRunInput = {
   snapshot: WpsDocumentSnapshot
   selectedSkill?: AgentSkill
   token?: string
+  approvedPlan?: WpsPlanDraft
   onStatus?: (status: string) => void
 }
 
@@ -67,4 +88,5 @@ export type AgentRunResult = {
   intent: UnifiedAgentIntent
   patch?: Omit<PendingPatch, 'id'>
   trace?: string[]
+  todos?: WpsAgentTodo[]
 }
