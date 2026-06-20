@@ -1,6 +1,6 @@
 [package]
 name = "papyrus"
-version = "0.1.1"
+version = "0.1.2"
 description = "Papyrus AI writing workstation"
 authors = ["Scallion"]
 license = ""
