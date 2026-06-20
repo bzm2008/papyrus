@@ -17,44 +17,43 @@
 - 退出码：0
 - 备注：Vite 仍提示主 bundle 超过 500 kB。这是体积警告，不是构建失败。
 
+### `npm run tauri:dev`
+
+- 结果：通过
+- 运行入口：`http://127.0.0.1:1420/`
+- 桌面进程：`src-tauri\target\debug\papyrus.exe`
+- 说明：已修复 Vite 监听 `src-tauri/target` 导致的 Windows `EBUSY` 问题。
+
+### `npm run tauri:build`
+
+- 结果：未通过
+- 失败点：Windows MSVC 链接阶段 `LNK1105`，无法关闭临时 `.exe/.dll`，错误代码 `1224`。
+- 判断：这是本机链接器/文件锁问题。前端构建、TypeScript、Rust dev 编译和 Tauri dev 启动均已通过。
+
 ## DeepSeek 冒烟测试
 
-### 当前状态
+测试模型：`deepseek-v4-flash`
 
-- 结果：未执行
-- 原因：当前 shell 环境没有配置 `DEEPSEEK_API_KEY`。
-- 安全说明：测试脚本只读取环境变量，不会把 API key 写入报告、日志或仓库文件。
+测试入口：`https://api.deepseek.com`
 
-### 已准备的脚本
+原始结果文件：`artifacts/deepseek-smoke-0.1.2.json`（本地忽略，不提交仓库）
 
-脚本路径：`scripts/deepseek-smoke-test.mjs`
+安全说明：API key 只作为当前 PowerShell 环境变量使用，报告、脚本和仓库文件均不保存 key。
 
-覆盖场景：
+| 场景 | 思考强度 | 温度 | 结果 | 耗时 | 估算输入 token | 估算输出 token | 输出字数 |
+| --- | --- | ---: | --- | ---: | ---: | ---: | ---: |
+| 中文写作 | `medium` | 0.72 | 通过 | 11733 ms | 89 | 572 | 699 |
+| 降噪改写 | `high` | 0.34 | 通过 | 2485 ms | 114 | 19 | 24 |
+| 蜂巢结构化规划 | `ultra_hive` | 0.48 | 通过 | 3435 ms | 103 | 116 | 215 |
+| 低强度摘要 | `low` | 0.22 | 通过 | 2028 ms | 84 | 61 | 72 |
 
-- `writing`：中等思考强度下的中文散文生成能力。
-- `denoise`：高思考强度下的中文降噪能力。
-- `hive_structured`：`ultra_hive` 下的结构化秘书长/蜂巢规划能力。
-- `low_effort`：低思考强度下的短摘要能力。
+### 结果摘要
 
-脚本会输出 JSON 报告，包含：
-
-- 模型名
-- baseUrl
-- 场景结果
-- 耗时
-- 估算 prompt tokens
-- 估算 output tokens
-- 预览文本
-
-### 复现命令
-
-PowerShell：
-
-```powershell
-$env:DEEPSEEK_API_KEY = "<your key>"
-$env:DEEPSEEK_MODEL = "deepseek-v4-flash"
-node scripts/deepseek-smoke-test.mjs > artifacts/deepseek-smoke-0.1.2.json
-```
+- 写作能力：可输出有细节和节制的中文散文开头，约 699 字。
+- 降噪能力：可将模板化表达压缩为短句，但这次结果偏保守；后续产品层可继续优化“保留信息量”的降噪提示。
+- 蜂巢能力：`ultra_hive` 场景返回了合法结构化 JSON，包含 summary、agents、risks、nextStep、confidence。
+- 动态温度：创作场景温度较高，调度/降噪/摘要场景温度较低，输出形态和长度有明显差异。
+- token 消耗：四档测试均给出估算输入/输出 token，可作为后续成本控制基线。
 
 ## 手动验收建议
 
@@ -66,4 +65,4 @@ node scripts/deepseek-smoke-test.mjs > artifacts/deepseek-smoke-0.1.2.json
 
 ## 结论
 
-0.1.2 的代码级验证已通过；DeepSeek 外部 API 冒烟测试需要在提供 `DEEPSEEK_API_KEY` 的环境中执行。
+0.1.2 的代码级验证和 DeepSeek API 冒烟测试已完成。安装包构建仍受本机 Windows 链接器文件锁影响，需要在清理锁定/杀软干扰后重试 `npm run tauri:build`。
