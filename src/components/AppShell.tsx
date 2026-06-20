@@ -1,10 +1,11 @@
-import { AnimatePresence, motion } from 'framer-motion'
+﻿import { AnimatePresence, motion } from 'framer-motion'
 import { Settings, Sparkles } from 'lucide-react'
 import { useEffect } from 'react'
 import { useContextAutomation } from '../hooks/useContextAutomation'
 import { useProjectGuidance } from '../hooks/useProjectGuidance'
 import { useRemoteRelay } from '../hooks/useRemoteRelay'
-import { fetchScallionProxyModels } from '../services/llmClient'
+import { refreshHardwareCapabilityProfile } from '../services/hardwareCapabilityService'
+import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { useAppStore } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { EditorPane } from './EditorPane'
@@ -17,7 +18,6 @@ import { RightPanel } from './RightPanel'
 import { SettingsPanel } from './SettingsPanel'
 import { StatusBar } from './StatusBar'
 import { StoryDashboard } from './StoryDashboard'
-import { UsageBubble } from './UsageBubble'
 
 export function AppShell() {
   const isFirstLaunch = useAppStore((state) => state.isFirstLaunch)
@@ -68,6 +68,7 @@ function MainWorkbench() {
   useProjectGuidance()
   useRemoteRelay()
 
+  const scallionToken = useAppStore((state) => state.scallionToken)
   const columnMode = useAppStore((state) => state.columnMode)
   const isLeftCollapsed = useAppStore((state) => state.isLeftCollapsed)
   const mode = useAppStore((state) => state.mode)
@@ -75,26 +76,11 @@ function MainWorkbench() {
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
 
   useEffect(() => {
-    const store = useAppStore.getState()
-    const provider = store.providerConfigs.qwen36
+    void refreshScallionRuntimeMetadata()
+  }, [scallionToken])
 
-    void fetchScallionProxyModels(provider)
-      .then((models) => {
-        const qwen36 =
-          models.find((model) => model.id === 'qwen3.6') ||
-          models.find((model) => model.modelName === provider.modelName) ||
-          models[0]
-
-        if (qwen36?.contextWindowTokens || qwen36?.modelName) {
-          useAppStore.getState().updateProviderModelMetadata('qwen36', {
-            contextWindowTokens: qwen36.contextWindowTokens,
-            modelName: qwen36.modelName || provider.modelName,
-          })
-        }
-      })
-      .catch(() => {
-        // The app keeps the preset context window when the proxy metadata endpoint is unavailable.
-      })
+  useEffect(() => {
+    refreshHardwareCapabilityProfile()
   }, [])
 
   const isFlowMode = mode === 'flow'
@@ -178,9 +164,9 @@ function MainWorkbench() {
       </div>
 
       <StatusBar />
-      <UsageBubble />
       <SettingsPanel />
       <StoryDashboard />
     </div>
   )
 }
+

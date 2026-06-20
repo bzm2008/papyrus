@@ -1,9 +1,8 @@
-import { AnimatePresence, motion } from 'framer-motion'
+﻿import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
   Clipboard,
   Copy,
   FileText,
-  Flag,
   MessageSquare,
   PanelRightClose,
   PanelRightOpen,
@@ -20,6 +19,7 @@ import { useAgentStream } from '../hooks/useAgentStream'
 import { createSecretaryPlanDraft, reviseSecretaryPlanDraft } from '../services/agentOrchestrator'
 import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
+import { getModelCacheStats } from '../services/modelCallCacheService'
 import { createSecretaryGoalFromRequest } from '../services/secretaryGoalService'
 import {
   type AgentStep,
@@ -57,6 +57,9 @@ export function FlowWorkspace() {
   const clearSecretaryPlanDraft = useAppStore((state) => state.clearSecretaryPlanDraft)
   const flowThinkingEffort = useAppStore((state) => state.flowThinkingEffort)
   const setFlowThinkingEffort = useAppStore((state) => state.setFlowThinkingEffort)
+  const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
+  const isUsageCollapsed = useAppStore((state) => state.isUsageCollapsed)
+  const setUsageCollapsed = useAppStore((state) => state.setUsageCollapsed)
   const queuedUserInputs = useAppStore((state) => state.queuedUserInputs)
   const enqueueUserInput = useAppStore((state) => state.enqueueUserInput)
   const updateQueuedUserInput = useAppStore((state) => state.updateQueuedUserInput)
@@ -91,7 +94,7 @@ export function FlowWorkspace() {
     }
 
     if (resolved.isPlanCommand) {
-      const request = resolved.argumentsText || '请先写出要规划的任务'
+      const request = resolved.argumentsText || '请先写出需要规划的任务'
       await createSecretaryPlanDraft(resolved.displayPrompt || '/plan', request)
       return
     }
@@ -277,6 +280,10 @@ export function FlowWorkspace() {
               />
             ) : null}
             {pendingDocumentPatch ? <PendingPatchReview /> : null}
+            <SecretaryUsageOverview
+              collapsed={isUsageCollapsed}
+              onToggle={() => setUsageCollapsed(!isUsageCollapsed)}
+            />
 
             <div className="flex-1 space-y-3">
               <AnimatePresence initial={false}>
@@ -317,7 +324,7 @@ export function FlowWorkspace() {
           <form onSubmit={submitFlowPrompt} className="papyrus-command-bar mx-auto max-w-[920px] rounded-xl p-2">
             <div className="mb-1.5 flex flex-wrap items-center gap-1.5 px-1">
               <ModelSelector compact />
-              <ThinkingEffortControl value={flowThinkingEffort} onChange={setFlowThinkingEffort} />
+              <ThinkingEffortControl value={flowThinkingEffort} onChange={setFlowThinkingEffort} hiveTelemetry={hiveTelemetry} />
               <span className="ml-auto text-[11px] text-[#8f897a]">/ 命令 · @ 技能 · # 文件</span>
             </div>
             <div className="relative flex items-end gap-2">
@@ -461,62 +468,62 @@ function SecretaryGoalCard({
   onPause: () => void
   onCancel: () => void
 }) {
-  const latestJudge = checkpoints[0]?.judge
+  const latestJudge = checkpoints.at(-1)?.judge
 
   return (
     <section className="papyrus-panel mb-4 overflow-hidden rounded-xl">
       <div className="flex items-start justify-between gap-3 border-b border-[#eee4d3] px-4 py-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-[#20201d]">
-            <Flag size={14} className="text-[#315d39]" />
-            {goal.title}
+            <Sparkles size={14} className="text-[#d7aa4f]" />
+            {goal.title || '长程目标'}
           </div>
           <div className="mt-1 line-clamp-2 text-xs leading-5 text-[#8f897a]">{goal.request}</div>
         </div>
-        <span className="shrink-0 rounded-md bg-[#edf6eb] px-2 py-1 text-[11px] text-[#315d39]">
-          {goal.status === 'completed' ? '已完成' : goal.status === 'blocked' ? '受阻' : goal.status === 'paused' ? '已暂停' : '/goal'}
+        <span className="shrink-0 rounded-md bg-[#fff6df] px-2 py-1 text-[11px] text-[#5b4a24]">
+          /goal · {goal.status}
         </span>
       </div>
-      <div className="grid gap-3 px-4 py-3 text-xs leading-5 text-[#6f7168] md:grid-cols-2">
+      <div className="grid gap-3 px-4 py-3 text-xs text-[#6f7168]">
         <div>
           <div className="mb-1 font-medium text-[#2f2b22]">验收标准</div>
-          <ul className="space-y-1">
-            {goal.acceptanceCriteria.map((item) => (
-              <li key={item} className="flex gap-2">
-                <span className="mt-2 size-1 rounded-full bg-[#315d39]" />
+          <div className="space-y-1">
+            {(goal.acceptanceCriteria.length ? goal.acceptanceCriteria : ['等待秘书长补全验收标准']).map((item) => (
+              <div key={item} className="flex gap-2">
+                <span className="mt-2 size-1 rounded-full bg-[#d7aa4f]" />
                 <span>{item}</span>
-              </li>
+              </div>
             ))}
-          </ul>
+          </div>
         </div>
         <div>
           <div className="mb-1 font-medium text-[#2f2b22]">阶段计划</div>
-          <ol className="space-y-1">
-            {goal.phasePlan.slice(0, 5).map((item, index) => (
-              <li key={item} className="flex gap-2">
-                <span className="text-[#8f897a]">{index + 1}.</span>
+          <div className="space-y-1">
+            {(goal.phasePlan.length ? goal.phasePlan : ['等待秘书长生成下一阶段计划']).map((item, index) => (
+              <div key={`${item}-${index}`} className="flex gap-2">
+                <span className="tabular-nums text-[#9d988a]">{index + 1}.</span>
                 <span>{item}</span>
-              </li>
+              </div>
             ))}
-          </ol>
+          </div>
+        </div>
+        <div className="rounded-lg bg-[#fffdf7] p-2">
+          <div className="font-medium text-[#2f2b22]">当前进度</div>
+          <div className="mt-1 leading-5">{goal.currentProgress}</div>
+          {latestJudge ? (
+            <div className="mt-2 rounded-md border border-[#e8ddc7] bg-[#fffefa] p-2">
+              <div className="font-medium text-[#2f2b22]">裁判检查：{latestJudge.verdict}</div>
+              <div className="mt-1 leading-5">{latestJudge.summary}</div>
+            </div>
+          ) : null}
         </div>
       </div>
-      <div className="border-t border-[#eee4d3] px-4 py-3 text-xs leading-5">
-        <div className="font-medium text-[#2f2b22]">当前进度</div>
-        <div className="mt-1 text-[#6f7168]">{goal.currentProgress}</div>
-        {latestJudge ? (
-          <div className="mt-2 rounded-lg bg-[#f7f8f3] p-2 text-[#6f7168]">
-            裁判：{latestJudge.summary}
-            {latestJudge.nextStep ? <span className="ml-1 text-[#315d39]">下一步：{latestJudge.nextStep}</span> : null}
-          </div>
-        ) : null}
-      </div>
-      <div className="flex flex-wrap justify-end gap-2 border-t border-[#eee4d3] bg-[#fffdf7]/76 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#eee4d3] bg-[#fffdf7]/76 px-4 py-3">
         <button type="button" onClick={onCancel} className="papyrus-control h-8 rounded-md px-3 text-xs">
-          取消
+          取消目标
         </button>
         <button type="button" onClick={onPause} className="papyrus-control h-8 rounded-md px-3 text-xs">
-          {goal.status === 'paused' ? '继续目标' : '暂停'}
+          {goal.status === 'paused' ? '继续' : '暂停'}
         </button>
         <button
           type="button"
@@ -524,7 +531,7 @@ function SecretaryGoalCard({
           disabled={running || goal.status === 'completed' || goal.status === 'cancelled'}
           className="papyrus-primary-button h-8 rounded-md px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
         >
-          继续推进
+          推进下一步
         </button>
       </div>
     </section>
@@ -591,42 +598,215 @@ function QueuedInputBar({
     </div>
   )
 }
-
-function ThinkingEffortControl({
-  value,
-  onChange,
+function SecretaryUsageOverview({
+  collapsed,
+  onToggle,
 }: {
-  value: FlowThinkingEffort
-  onChange: (value: FlowThinkingEffort) => void
+  collapsed: boolean
+  onToggle: () => void
 }) {
-  const options: Array<{ value: FlowThinkingEffort; label: string }> = [
-    { value: 'low', label: '低' },
-    { value: 'medium', label: '中' },
-    { value: 'high', label: '高' },
-    { value: 'max', label: '最高' },
-  ]
+  const chatSessions = useAppStore((state) => state.chatSessions)
+  const flowMessages = useAppStore((state) => state.flowMessages)
+  const contextUsedTokens = useAppStore((state) => state.contextUsedTokens)
+  const effectiveContextLimitTokens = useAppStore((state) => state.effectiveContextLimitTokens)
+  const activeProviderId = useAppStore((state) => state.activeProviderId)
+  const providerConfigs = useAppStore((state) => state.providerConfigs)
+  const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
+  const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionUser = useAppStore((state) => state.scallionUser)
+  const documentChangeStats = useAppStore((state) => state.documentChangeStats)
+  const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
+  const cacheStats = getModelCacheStats()
+  const contextPercent = Math.min(
+    100,
+    Math.round((contextUsedTokens / Math.max(1, effectiveContextLimitTokens)) * 100),
+  )
+  const totalChanged = documentChangeStats.reduce((sum, stat) => sum + stat.changedChars, 0)
+  const modelLabel =
+    modelRoutingMode === 'auto'
+      ? 'Auto 调度'
+      : providerConfigs[activeProviderId]?.label ?? '未选择'
+  const quotaValue =
+    scallionQuota?.remaining ?? scallionUser?.points ?? scallionUser?.balance ?? 0
+  const quotaUnit = scallionQuota?.unit ?? '积分'
 
   return (
-    <div className="inline-flex h-7 items-center rounded-md border border-[#e8ddc7] bg-[#fffefa] p-0.5">
-      {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          title={`思考强度：${option.label}`}
-          onClick={() => onChange(option.value)}
-          className={`h-6 rounded px-2 text-[11px] transition ${
-            value === option.value
-              ? 'bg-[#20201d] text-[#fffefa]'
-              : 'text-[#6f7168] hover:bg-[#f5f2ea] hover:text-[#20201d]'
-          }`}
-        >
-          {option.label}
-        </button>
-      ))}
+    <section className="mb-4 overflow-hidden rounded-xl border border-[#e8ddc7] bg-[#fffdf7]/88 shadow-[0_10px_26px_rgba(43,34,19,0.04)]">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex h-10 w-full items-center justify-between gap-3 border-b border-[#eee4d3] px-4 text-left"
+      >
+        <span className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-[#20201d]">
+          <Sparkles size={14} className="text-[#d7aa4f]" />
+          会话概览
+          {hiveTelemetry.enabled ? (
+            <span className="rounded-md border border-[#d7aa4f]/45 bg-[#fff6df] px-1.5 py-0.5 text-[10px] font-medium text-[#5b4a24]">
+              Hive {hiveTelemetry.activeAgents}/{hiveTelemetry.plannedAgents}
+            </span>
+          ) : null}
+        </span>
+        <span className="shrink-0 text-[11px] text-[#8f897a]">
+          {collapsed ? '展开' : '收起'}
+        </span>
+      </button>
+      <AnimatePresence initial={false}>
+        {!collapsed ? (
+          <motion.div
+            key="secretary-usage-overview"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <div className="grid grid-cols-2 gap-1.5 p-3 sm:grid-cols-4">
+              <UsageMetric label="会话" value={String(chatSessions.length)} />
+              <UsageMetric label="消息" value={String(flowMessages.length)} />
+              <UsageMetric label="本轮 Token" value={formatCompactNumber(contextUsedTokens)} />
+              <UsageMetric label="上下文" value={`${contextPercent}%`} />
+              <UsageMetric label="当前模型" value={modelLabel} />
+              <UsageMetric label="内置额度" value={`${quotaValue} ${quotaUnit}`} />
+              <UsageMetric label="缓存命中" value={`${cacheStats.hitRate}%`} />
+              <UsageMetric label="累计修改" value={formatCompactNumber(totalChanged)} />
+            </div>
+            <div className="mx-3 mb-3 overflow-hidden rounded-lg border border-[#eee4d3] bg-[#fffefa] p-2">
+              <div className="mb-1 flex items-center justify-between text-[11px] text-[#8f897a]">
+                <span>上下文窗口</span>
+                <span>{formatCompactNumber(contextUsedTokens)} / {formatCompactNumber(effectiveContextLimitTokens)}</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-[#f0e6d2]">
+                <motion.div
+                  className="h-full rounded-full bg-[#315d39]"
+                  initial={false}
+                  animate={{ width: `${contextPercent}%` }}
+                  transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                />
+              </div>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+    </section>
+  )
+}
+
+function UsageMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-lg bg-[#f0eee7] px-2.5 py-2">
+      <div className="truncate text-[11px] text-[#8f897a]">{label}</div>
+      <div className="mt-1 truncate text-[15px] font-semibold tabular-nums text-[#20201d]">{value}</div>
     </div>
   )
 }
 
+function formatCompactNumber(value: number) {
+  if (!Number.isFinite(value)) {
+    return '0'
+  }
+
+  if (value >= 1000000) {
+    return `${(value / 1000000).toFixed(value >= 10000000 ? 0 : 1)}M`
+  }
+
+  if (value >= 1000) {
+    return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`
+  }
+
+  return String(Math.round(value))
+}
+
+function ThinkingEffortControl({
+  value,
+  onChange,
+  hiveTelemetry,
+}: {
+  value: FlowThinkingEffort
+  onChange: (value: FlowThinkingEffort) => void
+  hiveTelemetry: ReturnType<typeof useAppStore.getState>['hiveTelemetry']
+}) {
+  const shouldReduceMotion = useReducedMotion()
+  const options: Array<{ value: FlowThinkingEffort; label: string }> = [
+    { value: 'low', label: 'low' },
+    { value: 'medium', label: 'medium' },
+    { value: 'high', label: 'high' },
+    { value: 'ultra_hive', label: 'ultra+hive' },
+  ]
+  const hiveActive = value === 'ultra_hive'
+  const hiveTitle =
+    'ultra+hive 蜂巢模式：最大思考强度，会调度多个专长 Agent 小队，适合长文、研究、合规、跨文档、复杂运营和 /goal；优先完成质量，并用缓存和摘要减少重复消耗。'
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <div
+        className={`relative grid h-8 w-[326px] grid-cols-4 items-center overflow-hidden rounded-xl border p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(43,34,19,0.05)] ${
+          hiveActive ? 'border-[#d7aa4f]/75 bg-[#fff6df]' : 'border-[#dccfb9] bg-[#f8f4ea]'
+        }`}
+        title={hiveActive ? hiveTitle : undefined}
+      >
+      {hiveActive ? (
+        <motion.span
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 rounded-xl opacity-60"
+          style={{
+            backgroundImage:
+              'radial-gradient(circle at 1px 1px, rgba(215,170,79,0.32) 1px, transparent 0)',
+            backgroundSize: '8px 8px',
+          }}
+          animate={shouldReduceMotion ? { opacity: 0.5 } : { opacity: [0.38, 0.72, 0.38] }}
+          transition={{ duration: 2.4, repeat: shouldReduceMotion ? 0 : Infinity, ease: 'easeInOut' }}
+        />
+      ) : null}
+      {options.map((option) => {
+        const active = value === option.value
+        const isHive = option.value === 'ultra_hive'
+
+        return (
+          <motion.button
+            key={option.value}
+            type="button"
+            title={isHive ? hiveTitle : `思考强度：${option.label}`}
+            onClick={() => onChange(option.value)}
+            whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
+            className={`relative z-10 h-6 min-w-0 rounded-lg px-1.5 text-[11px] font-semibold tracking-normal transition-colors ${
+              active ? 'text-[#fffefa]' : 'text-[#6f7168] hover:text-[#20201d]'
+            }`}
+          >
+            {active ? (
+              <motion.span
+                layoutId="thinking-effort-active"
+                className={`absolute inset-0 rounded-lg shadow-[0_4px_12px_rgba(32,32,29,0.18)] ${
+                  isHive ? 'bg-[#2f2a1a] ring-1 ring-[#d7aa4f]/70' : 'bg-[#20201d]'
+                }`}
+                transition={{ type: 'spring', stiffness: 540, damping: 36, mass: 0.62 }}
+              />
+            ) : (
+              <motion.span
+                className="absolute inset-0 rounded-lg bg-[#fffefa]"
+                initial={false}
+                animate={{ opacity: 0 }}
+                whileHover={{ opacity: 0.86 }}
+                transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+              />
+            )}
+            <motion.span
+              className="relative z-10 block truncate"
+              animate={shouldReduceMotion ? undefined : { y: active ? -0.5 : 0 }}
+              transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+            >
+              {option.label}
+            </motion.span>
+          </motion.button>
+        )
+      })}
+      </div>
+      {hiveActive && hiveTelemetry.enabled ? (
+        <span className="shrink-0 rounded-lg border border-[#d7aa4f]/45 bg-[#fffefa]/82 px-2 py-1 text-[10px] font-medium text-[#5b4a24]">
+          Hive 运行中 {hiveTelemetry.activeAgents} / {hiveTelemetry.plannedAgents}
+        </span>
+      ) : null}
+    </div>
+  )
+}
 function ChatBubble({
   message,
   showTrace,
@@ -726,7 +906,7 @@ function MessageActionBar({
         className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 disabled:cursor-not-allowed disabled:opacity-45"
       >
         <RotateCcw size={13} />
-        重生成
+        重新生成
       </button>
       <button
         type="button"
@@ -749,7 +929,6 @@ function MessageActionBar({
     </div>
   )
 }
-
 function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[] }) {
   const [elapsed, setElapsed] = useState(0)
   const [stageIndex, setStageIndex] = useState(0)
@@ -824,7 +1003,6 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
     </motion.div>
   )
 }
-
 function TypingDots() {
   return (
     <span className="inline-flex w-5 items-center gap-0.5" aria-hidden="true">
@@ -868,3 +1046,6 @@ function findUserBeforeIndex(messages: FlowMessage[], beforeIndex: number) {
 
   return -1
 }
+
+
+

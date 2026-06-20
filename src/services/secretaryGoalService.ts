@@ -13,7 +13,7 @@ const effortLabels: Record<FlowThinkingEffort, string> = {
   low: '低',
   medium: '中',
   high: '高',
-  max: '最高',
+  ultra_hive: 'ultra+hive',
 }
 
 export function createSecretaryGoalFromRequest(request: string): SecretaryGoal {
@@ -95,8 +95,8 @@ export async function judgeSecretaryGoal(
             'JSON 字段：verdict, summary, evidence, nextStep。',
             'verdict 只能是 continue、complete、blocked、early_stop。',
             'early_stop 用于阶段结果已高置信满足当前阶段且继续协作没有新增价值，但整个目标未必完全结束。',
-            effort === 'max'
-              ? '当前是最高思考强度：只有验收标准全部被证据覆盖时才能 verdict=complete。'
+            effort === 'ultra_hive'
+              ? '当前是 ultra+hive：最大思考强度和蜂巢模式，只要任务质量需要，就提高审查标准并要求充分证据。'
               : '如果主要验收标准缺乏充分证据，请 verdict=continue；如果继续协作会重复，请 verdict=early_stop。',
             describeModelRouting(routing),
           ].join('\n'),
@@ -138,8 +138,8 @@ function effortInstruction(effort: FlowThinkingEffort) {
     return '更完整地规划、核查上下文、调度必要工作室 Agent，并在输出前自检。'
   }
 
-  if (effort === 'max') {
-    return '适合长篇目标：更严格拆解阶段、复核一致性，并让裁判用更高标准检查完成度。'
+  if (effort === 'ultra_hive') {
+    return '最大思考强度 + 蜂巢集群：适合长篇、研究、合规和跨文档任务，优先完成质量，再用缓存和摘要减少重复消耗。'
   }
 
   return '平衡速度与可靠性，按默认秘书模式推进。'

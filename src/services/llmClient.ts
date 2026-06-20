@@ -24,14 +24,29 @@ type ChatCompletionResponse = {
 type StreamOptions = {
   signal?: AbortSignal
   onToken: (token: string) => void
+  sampling?: LlmSamplingOptions
+}
+
+export type LlmSamplingOptions = {
+  temperature?: number
+  maxTokens?: number
+  frequencyPenalty?: number
+  presencePenalty?: number
 }
 
 type ScallionModel = {
   id?: string
   name?: string
   displayName?: string
+  label?: string
+  modelName?: string
+  model_name?: string
+  available?: boolean
+  enabled?: boolean
   contextWindowTokens?: number
   context_window_tokens?: number
+  contextWindow?: number
+  context_window?: number
 }
 
 type ScallionModelResponse = {
@@ -57,6 +72,7 @@ export async function callOpenAICompatible(
   provider: LlmProviderConfig,
   messages: ChatMessage[],
   signal?: AbortSignal,
+  sampling?: LlmSamplingOptions,
 ) {
   const modelName = resolveProviderModelName(provider)
 
@@ -79,8 +95,10 @@ export async function callOpenAICompatible(
   const requestBody = {
     model: modelName,
     messages,
-    temperature: 0.45,
-    max_tokens: 8192,
+    temperature: sampling?.temperature ?? 0.45,
+    max_tokens: sampling?.maxTokens ?? 8192,
+    frequency_penalty: sampling?.frequencyPenalty,
+    presence_penalty: sampling?.presencePenalty,
     stream: false,
   }
   let response: Response
@@ -121,7 +139,7 @@ export async function callOpenAICompatible(
 export async function callOpenAICompatibleStream(
   provider: LlmProviderConfig,
   messages: ChatMessage[],
-  { signal, onToken }: StreamOptions,
+  { signal, onToken, sampling }: StreamOptions,
 ) {
   const modelName = resolveProviderModelName(provider)
 
@@ -151,8 +169,10 @@ export async function callOpenAICompatibleStream(
       body: JSON.stringify({
         model: modelName,
         messages,
-        temperature: 0.45,
-        max_tokens: 8192,
+        temperature: sampling?.temperature ?? 0.45,
+        max_tokens: sampling?.maxTokens ?? 8192,
+        frequency_penalty: sampling?.frequencyPenalty,
+        presence_penalty: sampling?.presencePenalty,
         stream: true,
       }),
     })
@@ -162,8 +182,10 @@ export async function callOpenAICompatibleStream(
     }
 
     const fallback = await callViaTauri(provider, messages, {
-      temperature: 0.45,
-      maxTokens: 8192,
+      temperature: sampling?.temperature ?? 0.45,
+      maxTokens: sampling?.maxTokens ?? 8192,
+      frequencyPenalty: sampling?.frequencyPenalty,
+      presencePenalty: sampling?.presencePenalty,
     })
     onToken(fallback)
     return fallback
@@ -250,8 +272,14 @@ export async function fetchScallionProxyModels(provider: LlmProviderConfig) {
   return (
     models.map((model) => ({
       id: model.id || model.name || model.displayName || '',
-      modelName: model.name || model.id || '',
-      contextWindowTokens: model.contextWindowTokens ?? model.context_window_tokens,
+      label: model.label || model.displayName || model.name || model.id || '',
+      modelName: model.modelName || model.model_name || model.name || model.id || '',
+      available: model.available ?? model.enabled ?? true,
+      contextWindowTokens:
+        model.contextWindowTokens ??
+        model.context_window_tokens ??
+        model.contextWindow ??
+        model.context_window,
     }))
   ).filter((model) => model.id || model.modelName || model.contextWindowTokens)
 }
@@ -291,7 +319,7 @@ function resolveProviderApiKey(provider: LlmProviderConfig) {
 async function callViaTauri(
   provider: LlmProviderConfig,
   messages: ChatMessage[],
-  options: { temperature: number; maxTokens: number },
+  options: { temperature: number; maxTokens: number; frequencyPenalty?: number; presencePenalty?: number },
 ) {
   const modelName = resolveProviderModelName(provider)
   const payload: NativeLlmPayload = {

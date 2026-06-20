@@ -10,6 +10,7 @@ import {
   type StructuredAgentOutput,
 } from './agentProtocolService'
 import { composeWritingContext } from './contextComposer'
+import { buildHiveSwarmTopology, formatHiveTopology, shouldUseHiveSwarm, type HiveSwarmTopology } from './hiveSwarmService'
 import {
   extractDraftText,
   inferPatchOperation,
@@ -23,6 +24,8 @@ import {
   canCallProvider,
   type ChatMessage,
 } from './llmClient'
+import { getAgentSamplingProfile, type AgentSamplingProfile } from './agentSamplingService'
+import { callCacheableModel } from './modelCallCacheService'
 import { describeModelRouting, selectModelForRole } from './modelRouterService'
 import { retrieveMentionContext } from './projectContext'
 import {
@@ -86,6 +89,7 @@ export type AgentRunPlan = {
   earlyStopReason?: string
   semanticCacheHitId?: string
   modelRoutingSummary?: string[]
+  hiveTopology?: HiveSwarmTopology
 }
 
 export type AgentRunResult = {
@@ -175,8 +179,8 @@ export async function sendFlowMessage(
   store.setLlmRunState('running', '秘书长正在判断任务路径')
 
   try {
-    const plan = await planAgentRun(executionContent)
-    const result = await executeAgentRun(executionContent, plan)
+    const plan = await planAgentRun(executionContent, thinkingEffort)
+    const result = await executeAgentRun(executionContent, plan, thinkingEffort)
 
     if (!result.streamedMessageId) {
       useAppStore.getState().addFlowMessage({
@@ -239,6 +243,7 @@ export async function createSecretaryPlanDraft(
   const classification = classifySecretaryTask(cleanExecutionPrompt)
   const plannerRouting = selectModelForRole('planning', { complexity: classification.complexity })
   const provider = plannerRouting.provider
+  const sampling = getAgentSamplingProfile('planning', store.flowThinkingEffort)
   store.clearFlowRun()
   store.addFlowMessage({ role: 'user', content: cleanRequest })
   store.setLlmRunState('running', '正在生成规划')
@@ -272,7 +277,7 @@ export async function createSecretaryPlanDraft(
               .filter(Boolean)
               .join('\n\n'),
           },
-        ])
+        ], undefined, sampling)
       : createFallbackSecretaryPlan(cleanExecutionPrompt)
 
     const draft = useAppStore.getState().setSecretaryPlanDraft({
@@ -315,6 +320,7 @@ export async function reviseSecretaryPlanDraft(feedback: string) {
 
   const plannerRouting = selectModelForRole('planning', { complexity: 'standard' })
   const provider = plannerRouting.provider
+  const sampling = getAgentSamplingProfile('planning', useAppStore.getState().flowThinkingEffort)
   useAppStore.getState().setLlmRunState('running', '正在修订规划')
 
   try {
@@ -336,7 +342,7 @@ export async function reviseSecretaryPlanDraft(feedback: string) {
               '请输出修订后的完整规划。',
             ].join('\n\n'),
           },
-        ])
+        ], undefined, sampling)
       : [current.planText, '', '反馈:', cleanFeedback].join('\n')
 
     useAppStore.getState().reviseSecretaryPlanDraft(cleanFeedback, { planText })
@@ -415,13 +421,13 @@ function composeExecutionControlPrompt(
     .join('\n')
 }
 
-export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
+export async function planAgentRun(prompt: string, thinkingEffort = useAppStore.getState().flowThinkingEffort): Promise<AgentRunPlan> {
   const store = useAppStore.getState()
   const classification = classifySecretaryTask(prompt, {
     activeGoal: Boolean(store.activeSecretaryGoal),
     writeIntent: shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt),
   })
-  const plannerModel = selectModelForRole('planning', { complexity: classification.complexity })
+  const plannerModel = selectModelForRole('planning', { complexity: classification.complexity, thinkingEffort })
   const provider = plannerModel.provider
   const reviewMode = store.flowReviewMode
   const agentCatalog = getStudioAgentCatalogForPrompt(
@@ -455,7 +461,7 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
     })
 
     try {
-      const rawPlan = await callOpenAICompatible(provider, [
+      const rawPlan = await callCacheableModel(provider, [
         {
           role: 'system',
           content: composeSystemPrompt(
@@ -498,8 +504,16 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
             '请给出执行计划 JSON。',
           ].join('\n\n'),
         },
-      ])
-      const plan = sanitizePlan(parseJsonPlan(rawPlan), prompt, classification, [describeModelRouting(plannerModel)])
+      ], {
+        stage: 'planning',
+        taskType: classification.taskType,
+        prompt,
+        providerRole: plannerModel.role,
+        thinkingEffort,
+        samplingPhase: 'planning',
+        contextHash: String(store.editorText.length + store.resources.length),
+      })
+      const plan = sanitizePlan(parseJsonPlan(rawPlan), prompt, classification, [describeModelRouting(plannerModel)], thinkingEffort)
 
       useAppStore.getState().updateFlowTrace(trace.id, {
         detail: formatPlanDetail(plan),
@@ -529,7 +543,7 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
     }
   }
 
-  const fallbackPlan = createFallbackPlan(prompt, classification, [describeModelRouting(plannerModel)])
+  const fallbackPlan = createFallbackPlan(prompt, classification, [describeModelRouting(plannerModel)], thinkingEffort)
   useAppStore.getState().addAgentStep({
     type: 'plan',
     title: 'Local fallback plan',
@@ -551,8 +565,22 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
   return fallbackPlan
 }
 
-export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promise<AgentRunResult> {
+export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinkingEffort = useAppStore.getState().flowThinkingEffort): Promise<AgentRunResult> {
   useAppStore.getState().setAgentTodos(createTodos(prompt, plan))
+  if (plan.hiveTopology?.enabled) {
+    useAppStore.getState().setHiveTelemetry({
+      enabled: true,
+      runId: useAppStore.getState().activeAgentRunId,
+      topologyId: plan.hiveTopology.id,
+      plannedAgents: plan.hiveTopology.plannedAgents,
+      activeAgents: 0,
+      completedAgents: 0,
+      skippedAgents: 0,
+      failedAgents: 0,
+      currentPhase: 'router',
+      stageLabel: thinkingEffort === 'ultra_hive' ? 'ultra+hive Router' : 'Hive Router',
+    })
+  }
   const subAgentStepIds = new Map<FlowAgentId, string>()
   const storyBrief = shouldUseStoryPipeline(prompt, plan.writeIntent)
     ? runStoryPreparation(prompt)
@@ -598,6 +626,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
     }
 
     useAppStore.getState().updateAgentTodo(todo.id, { status: 'running' })
+    updateHiveFromTodos(plan, todo.agentId)
     const stepId = subAgentStepIds.get(todo.agentId)
 
     if (stepId) {
@@ -627,6 +656,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
         }
       }
       useAppStore.getState().updateAgentTodo(todo.id, { status: 'completed' })
+      updateHiveFromTodos(plan, todo.agentId)
 
       if (plan.earlyStopReason) {
         useAppStore
@@ -638,6 +668,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
               detail: plan.earlyStopReason,
             })
           })
+        updateHiveFromTodos(plan)
         break
       }
     } catch (error) {
@@ -645,6 +676,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
         status: 'blocked',
         detail: error instanceof Error ? error.message : '工作室 Agent 执行失败',
       })
+      updateHiveFromTodos(plan, todo.agentId)
     }
   }
 
@@ -654,6 +686,9 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
 
   if (writerTodo) {
     useAppStore.getState().updateAgentTodo(writerTodo.id, { status: 'running' })
+    if (plan.hiveTopology?.enabled) {
+      useAppStore.getState().setHiveTelemetry({ currentPhase: 'aggregate', stageLabel: '秘书长 Aggregator' })
+    }
   }
 
   const assistantMessage = useAppStore.getState().addFlowMessage({
@@ -693,6 +728,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
 
   if (writerTodo) {
     useAppStore.getState().updateAgentTodo(writerTodo.id, { status: 'completed' })
+    updateHiveFromTodos(plan)
   }
 
   return {
@@ -759,6 +795,10 @@ async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchC
     })
     const repairRouting = selectModelForRole('repair', { complexity: 'complex', writeIntent: true })
     const provider = repairRouting.provider
+    const sampling = getAgentSamplingProfile('repair', useAppStore.getState().flowThinkingEffort, {
+      repeatRisk: 0.35,
+      creative: true,
+    })
 
     if (canCallProvider(provider)) {
       const fixed = await callOpenAICompatible(provider, [
@@ -777,7 +817,7 @@ async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchC
             `初稿:\n${patchContent}`,
           ].join('\n\n'),
         },
-      ])
+      ], undefined, sampling)
       patchContent = fixed.trim() || patchContent
       issues = reviewDraft(patchContent, brief)
       useAppStore.getState().updateAgentStep(repairStep.id, {
@@ -1037,6 +1077,7 @@ async function callAgent(
   const routing = selectModelForRole('agent', {
     complexity: plan.taskComplexity,
     writeIntent: plan.writeIntent,
+    thinkingEffort: useAppStore.getState().flowThinkingEffort,
   })
   const provider = routing.provider
   const profile = getRuntimeAgent(agentId)
@@ -1057,7 +1098,7 @@ async function callAgent(
       .join('\n\n'),
   )
 
-  return callOpenAICompatible(provider, [
+  return callCacheableModel(provider, [
     { role: 'system', content: system },
     {
       role: 'user',
@@ -1074,7 +1115,16 @@ async function callAgent(
         .filter(Boolean)
         .join('\n\n'),
     },
-  ])
+  ], {
+    stage: 'agent_output',
+    taskType: plan.taskType ?? 'agent',
+    prompt,
+    agentId,
+    providerRole: routing.role,
+    thinkingEffort: useAppStore.getState().flowThinkingEffort,
+    samplingPhase: 'agent_output',
+    contextHash: String((sources?.length ?? 0) + useAppStore.getState().editorText.length),
+  })
 }
 
 async function runWriter(
@@ -1089,9 +1139,14 @@ async function runWriter(
   const writerRouting = selectModelForRole('writer', {
     complexity: plan.taskComplexity,
     writeIntent: plan.writeIntent,
+    thinkingEffort: useAppStore.getState().flowThinkingEffort,
   })
   const provider = writerRouting.provider
   const reviewMode = store.flowReviewMode
+  const sampling = getAgentSamplingProfile('writer', useAppStore.getState().flowThinkingEffort, {
+    creative: plan.writeIntent,
+    repeatRisk: outputs.some((output) => output.structured?.newInformation === false) ? 0.45 : 0.12,
+  })
   const step = useAppStore.getState().addAgentStep({
     type: 'generation',
     title: plan.writeIntent ? 'Generate manuscript patch' : 'Generate final reply',
@@ -1181,7 +1236,7 @@ async function runWriter(
         }
 
         onText?.(text)
-      })
+      }, sampling)
     : createMockWriterResponse(prompt, plan, outputs, sources)
 
   if (!streamedText) {
@@ -1212,8 +1267,13 @@ async function repairDraft(
   const repairRouting = selectModelForRole('repair', {
     complexity: plan.taskComplexity,
     writeIntent: true,
+    thinkingEffort: useAppStore.getState().flowThinkingEffort,
   })
   const provider = repairRouting.provider
+  const sampling = getAgentSamplingProfile('repair', useAppStore.getState().flowThinkingEffort, {
+    creative: true,
+    repeatRisk: 0.7,
+  })
   const step = useAppStore.getState().addAgentStep({
     type: 'generation',
     title: 'Repair manuscript draft',
@@ -1282,7 +1342,7 @@ async function repairDraft(
       useAppStore.getState().appendAgentStepContent(step.id, delta)
     }
     onText?.(stripDraftSection(text) || '秘书长正在补写正文…')
-  })
+  }, sampling)
 
   useAppStore.getState().updateFlowTrace(trace.id, {
     detail: response.slice(0, 420),
@@ -1333,9 +1393,10 @@ async function streamOrCall(
   provider: Parameters<typeof callOpenAICompatible>[0],
   messages: ChatMessage[],
   onText?: (text: string) => void,
+  sampling?: AgentSamplingProfile,
 ) {
   if (!onText) {
-    return callOpenAICompatible(provider, messages)
+    return callOpenAICompatible(provider, messages, undefined, sampling)
   }
 
   let text = ''
@@ -1346,9 +1407,10 @@ async function streamOrCall(
         text += token
         onText(text)
       },
+      sampling,
     })
   } catch {
-    const fallback = await callOpenAICompatible(provider, messages)
+    const fallback = await callOpenAICompatible(provider, messages, undefined, sampling)
     onText(fallback)
     return fallback
   }
@@ -1375,15 +1437,19 @@ function sanitizePlan(
   prompt: string,
   classification = classifySecretaryTask(prompt),
   modelRoutingSummary: string[] = [],
+  thinkingEffort = useAppStore.getState().flowThinkingEffort,
 ): AgentRunPlan {
-  const fallback = createFallbackPlan(prompt, classification, modelRoutingSummary)
+  const fallback = createFallbackPlan(prompt, classification, modelRoutingSummary, thinkingEffort)
   const routing = routeForPrompt(prompt)
   const routedAgents = [
     ...routing.primaryAgents,
     ...routing.reviewerAgents,
     ...routing.advisorAgents,
   ]
-  const maxAgentCount = maxAgentsForClassification(classification)
+  const hiveEnabled = shouldUseHiveSwarm(thinkingEffort, classification)
+  const maxAgentCount = hiveEnabled
+    ? maxAgentsForClassification(classification, true)
+    : maxAgentsForClassification(classification)
   const subAgents = uniqueAgents(
     [...(input.subAgents ?? []), ...routedAgents, ...fallback.subAgents],
     maxAgentCount,
@@ -1443,7 +1509,7 @@ function sanitizePlan(
     })
   }
 
-  return {
+  const plan: AgentRunPlan = {
     needsWebSearch,
     subAgents,
     toolCalls,
@@ -1457,6 +1523,13 @@ function sanitizePlan(
     classificationConfidence: classification.confidence,
     maxAgentCount,
     modelRoutingSummary,
+  }
+  const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification) : undefined
+
+  return {
+    ...plan,
+    hiveTopology,
+    routingRationale: [plan.routingRationale, hiveTopology?.rationale].filter(Boolean).join('\n'),
   }
 }
 
@@ -1514,6 +1587,7 @@ function createFallbackPlan(
   prompt: string,
   classification = classifySecretaryTask(prompt),
   modelRoutingSummary: string[] = [],
+  thinkingEffort = useAppStore.getState().flowThinkingEffort,
 ): AgentRunPlan {
   const routing = routeForPrompt(prompt)
   const subAgents = new Set<FlowAgentId>([
@@ -1582,9 +1656,10 @@ function createFallbackPlan(
     })
   }
 
-  const maxAgentCount = maxAgentsForClassification(classification)
+  const hiveEnabled = shouldUseHiveSwarm(thinkingEffort, classification)
+  const maxAgentCount = maxAgentsForClassification(classification, hiveEnabled)
 
-  return {
+  const plan: AgentRunPlan = {
     needsWebSearch,
     subAgents: uniqueAgents(Array.from(subAgents), maxAgentCount),
     toolCalls,
@@ -1599,9 +1674,21 @@ function createFallbackPlan(
     maxAgentCount,
     modelRoutingSummary,
   }
+  const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification) : undefined
+
+  return {
+    ...plan,
+    hiveTopology,
+    routingRationale: [plan.routingRationale, hiveTopology?.rationale].filter(Boolean).join('\n'),
+  }
 }
 
-function maxAgentsForClassification(classification: SecretaryTaskClassification) {
+function maxAgentsForClassification(classification: SecretaryTaskClassification, hiveEnabled = false) {
+  if (hiveEnabled) {
+    const hardwareLimit = useAppStore.getState().hardwareCapabilityProfile.maxHiveAgents
+    return Math.max(4, Math.min(hardwareLimit, classification.expectedAgentCount || hardwareLimit))
+  }
+
   if (classification.complexity === 'simple') {
     return Math.min(1, classification.suggestedAgentCount)
   }
@@ -1684,6 +1771,43 @@ function firstEnabledAgent(ids: FlowAgentId[]) {
   return ids.find((id) => enabled.has(id))
 }
 
+function updateHiveFromTodos(plan: AgentRunPlan, activeAgentId?: FlowAgentId) {
+  if (!plan.hiveTopology?.enabled) {
+    return
+  }
+
+  const todos = useAppStore.getState().agentTodos.filter((todo) => todo.agentId !== 'writer')
+  const activeAgents = todos.filter((todo) => todo.status === 'running').length
+  const phase = activeAgentId
+    ? plan.hiveTopology.nodes.find((node) => node.agentId === activeAgentId)?.phase
+    : undefined
+
+  useAppStore.getState().setHiveTelemetry({
+    enabled: true,
+    topologyId: plan.hiveTopology.id,
+    plannedAgents: plan.hiveTopology.plannedAgents,
+    activeAgents,
+    completedAgents: todos.filter((todo) => todo.status === 'completed').length,
+    skippedAgents: todos.filter((todo) => todo.status === 'skipped').length,
+    failedAgents: todos.filter((todo) => todo.status === 'blocked').length,
+    currentPhase: phase ?? useAppStore.getState().hiveTelemetry.currentPhase,
+    stageLabel: phase ? hivePhaseLabel(phase) : useAppStore.getState().hiveTelemetry.stageLabel,
+  })
+}
+
+function hivePhaseLabel(phase: NonNullable<AgentRunPlan['hiveTopology']>['nodes'][number]['phase']) {
+  const labels = {
+    router: 'Hive Router',
+    research: '研究小队',
+    draft: '成稿小队',
+    review: '审查小队',
+    judge: '裁判检查',
+    aggregate: '秘书长 Aggregator',
+  }
+
+  return labels[phase]
+}
+
 function addFirstEnabled(target: Set<FlowAgentId>, ids: FlowAgentId[]) {
   const agentId = firstEnabledAgent(ids)
   if (agentId) {
@@ -1705,6 +1829,7 @@ function formatPlanDetail(plan: AgentRunPlan) {
       ? `复杂度：${plan.taskComplexity} · 置信度 ${Math.round((plan.classificationConfidence ?? 0) * 100)}% · 上限 ${plan.maxAgentCount ?? 5} 个 Agent`
       : '',
     plan.modelRoutingSummary?.length ? `模型：${plan.modelRoutingSummary.join('；')}` : '',
+    plan.hiveTopology?.enabled ? formatHiveTopology(plan.hiveTopology) : '',
     `联网：${plan.needsWebSearch ? '需要' : '不需要'}`,
     `Agent：${plan.subAgents.map((agentId) => getRuntimeAgent(agentId).shortName).join(' / ') || '无'}`,
     plan.routingRationale ? `调度理由：${plan.routingRationale}` : '',

@@ -1,4 +1,4 @@
-import { create } from 'zustand'
+﻿import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import {
   defaultProviderConfigs,
@@ -23,8 +23,9 @@ export type ColumnMode = 1 | 2 | 3
 export type StudioAgentId = string
 export type FlowAgentId = StudioAgentId
 export type FlowReviewMode = 'auto' | 'review'
-export type FlowThinkingEffort = 'low' | 'medium' | 'high' | 'max'
+export type FlowThinkingEffort = 'low' | 'medium' | 'high' | 'ultra_hive'
 export type ModelRoutingMode = 'manual' | 'auto'
+export type ModelCapabilityTier = 'T1' | 'T2' | 'T3'
 export type ChatRole = 'user' | 'assistant' | 'system'
 export type LlmRunState = 'idle' | 'running' | 'error'
 export type CompressionState = 'idle' | 'running' | 'error'
@@ -130,6 +131,53 @@ export type ScallionUser = {
   member_expires_at?: string
   level?: number
   level_name?: string
+}
+
+export type ScallionModelMetadata = {
+  id: string
+  label: string
+  modelName: string
+  contextWindowTokens?: number
+  available: boolean
+  tier?: ModelCapabilityTier
+  score?: number
+  rationale?: string
+  updatedAt: number
+}
+
+export type ModelTierAssessment = {
+  id: string
+  providerId: ProviderId
+  label: string
+  modelName: string
+  tier: ModelCapabilityTier
+  score: number
+  rationale: string
+  available: boolean
+  contextWindowTokens?: number
+  updatedAt: number
+}
+
+export type HardwareCapabilityProfile = {
+  cpuCores: number
+  memoryGb?: number
+  gpuLabel?: string
+  tier?: 'low' | 'medium' | 'high' | 'ultra'
+  maxHiveAgents: number
+  maxHiveParallelAgents: number
+  reason: string
+  updatedAt: number
+}
+
+export type ScallionQuota = {
+  remaining: number
+  total?: number
+  unit: string
+  isMember: boolean
+  memberPriceLabel: string
+  upgradeUrl: string
+  topUpUrl: string
+  updatedAt: number
 }
 
 export type FlowMessage = {
@@ -669,6 +717,32 @@ export type SemanticTaskCacheEntry = {
   updatedAt: number
 }
 
+export type HiveSwarmPhase = 'router' | 'research' | 'draft' | 'review' | 'judge' | 'aggregate'
+
+export type HiveTelemetry = {
+  enabled: boolean
+  runId?: string
+  topologyId?: string
+  plannedAgents: number
+  activeAgents: number
+  completedAgents: number
+  skippedAgents: number
+  failedAgents: number
+  currentPhase?: HiveSwarmPhase
+  stageLabel?: string
+  updatedAt?: number
+}
+
+export type ModelCallCacheMetric = {
+  id: string
+  cacheKey: string
+  stage: string
+  cacheable: boolean
+  hit: boolean
+  missReason?: string
+  createdAt: number
+}
+
 type CustomAgentSkillInput = Omit<CustomAgentSkill, 'id' | 'createdAt' | 'updatedAt'> & {
   id?: string
 }
@@ -723,6 +797,13 @@ type SemanticTaskCacheInput = Omit<SemanticTaskCacheEntry, 'id' | 'createdAt' | 
   hitCount?: number
 }
 
+type HiveTelemetryInput = Partial<HiveTelemetry>
+
+type ModelCallCacheMetricInput = Omit<ModelCallCacheMetric, 'id' | 'createdAt'> & {
+  id?: string
+  createdAt?: number
+}
+
 type SecretaryGoalInput = Omit<SecretaryGoal, 'id' | 'createdAt' | 'updatedAt' | 'status'> & {
   id?: string
   status?: SecretaryGoalStatus
@@ -761,6 +842,9 @@ type AppState = TokenSnapshot & {
   isSettingsOpen: boolean
   activeProviderId: ProviderId
   modelRoutingMode: ModelRoutingMode
+  autoModelProviderIds: ProviderId[]
+  modelTierWeights: Record<ModelCapabilityTier, number>
+  modelTierAssessments: ModelTierAssessment[]
   activeAgentId: FlowAgentId
   flowReviewMode: FlowReviewMode
   flowThinkingEffort: FlowThinkingEffort
@@ -811,6 +895,9 @@ type AppState = TokenSnapshot & {
   updateVersion?: string
   scallionUser?: ScallionUser
   scallionToken?: string
+  scallionModels: ScallionModelMetadata[]
+  scallionQuota?: ScallionQuota
+  hardwareCapabilityProfile: HardwareCapabilityProfile
   authDeviceCode?: string
   authUserCode?: string
   authStatus: ScallionAuthStatus
@@ -839,6 +926,8 @@ type AppState = TokenSnapshot & {
   documentChangeStats: DocumentChangeStat[]
   agentOutputCache: AgentOutputCacheEntry[]
   semanticTaskCache: SemanticTaskCacheEntry[]
+  modelCallCacheMetrics: ModelCallCacheMetric[]
+  hiveTelemetry: HiveTelemetry
   storyProjects: StoryProject[]
   activeStoryProjectId?: string
   storyContracts: StoryContract[]
@@ -857,6 +946,10 @@ type AppState = TokenSnapshot & {
   setSettingsOpen: (open: boolean) => void
   setActiveProviderId: (providerId: ProviderId) => void
   setModelRoutingMode: (mode: ModelRoutingMode) => void
+  setAutoModelProviderIds: (providerIds: ProviderId[]) => void
+  setModelTierWeight: (tier: ModelCapabilityTier, weight: number) => void
+  setModelTierAssessments: (assessments: ModelTierAssessment[]) => void
+  setHardwareCapabilityProfile: (profile: HardwareCapabilityProfile) => void
   setActiveAgentId: (agentId: FlowAgentId) => void
   setFlowReviewMode: (reviewMode: FlowReviewMode) => void
   setFlowThinkingEffort: (effort: FlowThinkingEffort) => void
@@ -981,6 +1074,10 @@ type AppState = TokenSnapshot & {
   clearAgentOutputCache: (agentRunId?: string) => void
   putSemanticTaskCache: (entry: SemanticTaskCacheInput) => SemanticTaskCacheEntry
   clearSemanticTaskCache: () => void
+  recordModelCallCacheMetric: (metric: ModelCallCacheMetricInput) => ModelCallCacheMetric
+  clearModelCallCacheMetrics: () => void
+  setHiveTelemetry: (telemetry: HiveTelemetryInput) => void
+  clearHiveTelemetry: () => void
   addResources: (resources: ImportedResource[]) => void
   updateResource: (id: string, patch: Partial<ImportedResource>) => void
   deleteResource: (id: string) => void
@@ -1014,6 +1111,8 @@ type AppState = TokenSnapshot & {
   setScallionAuthStatus: (status: ScallionAuthStatus) => void
   setScallionSession: (token: string, user: ScallionUser) => void
   clearScallionSession: () => void
+  setScallionModelMetadata: (models: ScallionModelMetadata[]) => void
+  setScallionQuota: (quota?: ScallionQuota) => void
   setRemoteRelayConfig: (patch: {
     enabled?: boolean
     endpoint?: string
@@ -1068,6 +1167,12 @@ const initialFlowMessages: FlowMessage[] = [
 const initialChatId = 'chat-seed-1'
 const initialArticleId = 'article-seed-1'
 const defaultActiveProviderId: ProviderId = 'qwen36'
+const defaultAutoModelProviderIds: ProviderId[] = ['qwen36']
+const defaultModelTierWeights: Record<ModelCapabilityTier, number> = {
+  T1: 1,
+  T2: 0.68,
+  T3: 0.42,
+}
 const defaultContextLimitTokens = getEffectiveContextLimit(
   defaultProviderConfigs[defaultActiveProviderId],
 )
@@ -1100,12 +1205,15 @@ export const useAppStore = create<AppState>()(
       maintenanceTab: 'connections',
       maintenanceChecks: initialMaintenanceChecks,
       memoryUsageBytes: 0,
-      mode: 'companion',
+      mode: 'flow',
       columnMode: 3,
       isLeftCollapsed: false,
       isSettingsOpen: false,
       activeProviderId: defaultActiveProviderId,
       modelRoutingMode: 'manual',
+      autoModelProviderIds: defaultAutoModelProviderIds,
+      modelTierWeights: defaultModelTierWeights,
+      modelTierAssessments: [],
       activeAgentId: 'writer',
       flowReviewMode: 'auto',
       flowThinkingEffort: 'medium',
@@ -1179,6 +1287,9 @@ export const useAppStore = create<AppState>()(
       updateVersion: undefined,
       scallionUser: undefined,
       scallionToken: undefined,
+      scallionModels: [],
+      scallionQuota: undefined,
+      hardwareCapabilityProfile: defaultHardwareProfile(),
       authDeviceCode: undefined,
       authUserCode: undefined,
       authStatus: 'idle',
@@ -1187,7 +1298,7 @@ export const useAppStore = create<AppState>()(
       remoteRelayChannelId: undefined,
       remoteRelayAccessKey: undefined,
       remoteRelayAllowedPlatforms: ['clawbot', 'feishu', 'wecom', 'qq', 'wechat', 'custom'],
-      remoteRelayDefaultMode: 'companion',
+      remoteRelayDefaultMode: 'flow',
       remoteRelayPollIntervalSeconds: 12,
       remoteRelayStatus: 'idle',
       remoteRelayMessage: '远程中继未启用',
@@ -1218,6 +1329,8 @@ export const useAppStore = create<AppState>()(
       documentChangeStats: [],
       agentOutputCache: [],
       semanticTaskCache: [],
+      modelCallCacheMetrics: [],
+      hiveTelemetry: emptyHiveTelemetry(),
       storyProjects: [],
       activeStoryProjectId: undefined,
       storyContracts: [],
@@ -1236,6 +1349,21 @@ export const useAppStore = create<AppState>()(
       toggleLeftCollapsed: () => set((state) => ({ isLeftCollapsed: !state.isLeftCollapsed })),
       setSettingsOpen: (isSettingsOpen) => set({ isSettingsOpen }),
       setModelRoutingMode: (modelRoutingMode) => set({ modelRoutingMode }),
+      setAutoModelProviderIds: (providerIds) =>
+        set({
+          autoModelProviderIds: normalizeAutoModelProviderIds(providerIds),
+        }),
+      setModelTierWeight: (tier, weight) =>
+        set((state) => ({
+          modelTierWeights: {
+            ...state.modelTierWeights,
+            [tier]: clampNumber(Number(weight), 0.1, 2),
+          },
+        })),
+      setModelTierAssessments: (modelTierAssessments) =>
+        set({ modelTierAssessments: sanitizeModelTierAssessments(modelTierAssessments) }),
+      setHardwareCapabilityProfile: (hardwareCapabilityProfile) =>
+        set({ hardwareCapabilityProfile: sanitizeHardwareCapabilityProfile(hardwareCapabilityProfile) }),
       setActiveProviderId: (activeProviderId) =>
         set((state) => {
           const provider = state.providerConfigs[activeProviderId] ?? state.providerConfigs.qwen36
@@ -1757,7 +1885,13 @@ export const useAppStore = create<AppState>()(
         })),
       clearAgentSteps: () => set({ agentSteps: [] }),
       clearFlowRun: () =>
-        set({ agentTodos: [], flowTraces: [], agentSteps: [], pendingDocumentPatch: undefined }),
+        set({
+          agentTodos: [],
+          flowTraces: [],
+          agentSteps: [],
+          pendingDocumentPatch: undefined,
+          hiveTelemetry: emptyHiveTelemetry(),
+        }),
       startAgentRunRecord: (input) => {
         const now = Date.now()
         const run: AgentRunRecord = {
@@ -2407,6 +2541,30 @@ export const useAppStore = create<AppState>()(
         return entry
       },
       clearSemanticTaskCache: () => set({ semanticTaskCache: [] }),
+      recordModelCallCacheMetric: (input) => {
+        const now = Date.now()
+        const metric: ModelCallCacheMetric = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `model-cache-metric-${now}`,
+          createdAt: input.createdAt ?? now,
+        }
+
+        set((state) => ({
+          modelCallCacheMetrics: [metric, ...state.modelCallCacheMetrics].slice(0, 400),
+        }))
+
+        return metric
+      },
+      clearModelCallCacheMetrics: () => set({ modelCallCacheMetrics: [] }),
+      setHiveTelemetry: (telemetry) =>
+        set((state) => ({
+          hiveTelemetry: {
+            ...state.hiveTelemetry,
+            ...telemetry,
+            updatedAt: Date.now(),
+          },
+        })),
+      clearHiveTelemetry: () => set({ hiveTelemetry: emptyHiveTelemetry() }),
       addResources: (resources) =>
         set((state) => {
           const merged = [
@@ -2746,10 +2904,48 @@ export const useAppStore = create<AppState>()(
         set({
           scallionToken: undefined,
           scallionUser: undefined,
+          scallionQuota: undefined,
           authDeviceCode: undefined,
           authUserCode: undefined,
           authStatus: 'idle',
         }),
+      setScallionModelMetadata: (scallionModels) =>
+        set((state) => {
+          const normalized = sanitizeScallionModels(scallionModels)
+          const primary = normalized.find((model) => model.available) ?? normalized[0]
+
+          if (!primary) {
+            return { scallionModels: normalized }
+          }
+
+          const provider = state.providerConfigs.qwen36
+          const updatedProvider = {
+            ...provider,
+            modelName: primary.modelName || provider.modelName,
+            serverContextWindowTokens: primary.contextWindowTokens ?? provider.serverContextWindowTokens,
+          }
+
+          return {
+            scallionModels: normalized,
+            providerConfigs: {
+              ...state.providerConfigs,
+              qwen36: updatedProvider,
+            },
+            contextLimitTokens:
+              state.activeProviderId === 'qwen36'
+                ? getEffectiveContextLimit(updatedProvider)
+                : state.contextLimitTokens,
+            effectiveContextLimitTokens:
+              state.activeProviderId === 'qwen36'
+                ? getEffectiveContextLimit(updatedProvider)
+                : state.effectiveContextLimitTokens,
+            modelContextSource:
+              state.activeProviderId === 'qwen36'
+                ? getModelContextSource(updatedProvider)
+                : state.modelContextSource,
+          }
+        }),
+      setScallionQuota: (scallionQuota) => set({ scallionQuota }),
       setRemoteRelayConfig: (patch) =>
         set((state) => ({
           remoteRelayEnabled: patch.enabled ?? state.remoteRelayEnabled,
@@ -2995,6 +3191,9 @@ export const useAppStore = create<AppState>()(
         isLeftCollapsed: state.isLeftCollapsed,
         activeProviderId: state.activeProviderId,
         modelRoutingMode: state.modelRoutingMode,
+        autoModelProviderIds: state.autoModelProviderIds,
+        modelTierWeights: state.modelTierWeights,
+        modelTierAssessments: state.modelTierAssessments,
         activeAgentId: state.activeAgentId,
         flowReviewMode: 'auto' as const,
         flowThinkingEffort: state.flowThinkingEffort,
@@ -3030,6 +3229,9 @@ export const useAppStore = create<AppState>()(
         goalCheckpoints: state.goalCheckpoints,
         scallionUser: state.scallionUser,
         scallionToken: state.scallionToken,
+        scallionModels: state.scallionModels,
+        scallionQuota: state.scallionQuota,
+        hardwareCapabilityProfile: state.hardwareCapabilityProfile,
         authStatus: state.authStatus,
         remoteRelayEnabled: state.remoteRelayEnabled,
         remoteRelayEndpoint: state.remoteRelayEndpoint,
@@ -3053,6 +3255,7 @@ export const useAppStore = create<AppState>()(
         documentChangeStats: state.documentChangeStats,
         agentOutputCache: state.agentOutputCache,
         semanticTaskCache: state.semanticTaskCache,
+        modelCallCacheMetrics: state.modelCallCacheMetrics,
         storyProjects: state.storyProjects,
         activeStoryProjectId: state.activeStoryProjectId,
         storyContracts: state.storyContracts,
@@ -3103,8 +3306,16 @@ export const useAppStore = create<AppState>()(
         const merged = {
           ...current,
           ...persistedState,
+          mode: 'flow' as const,
           activeProviderId,
           modelRoutingMode: normalizeModelRoutingMode(persistedState.modelRoutingMode),
+          autoModelProviderIds: normalizeAutoModelProviderIds(
+            persistedState.autoModelProviderIds,
+          ),
+          modelTierWeights: sanitizeModelTierWeights(persistedState.modelTierWeights),
+          modelTierAssessments: sanitizeModelTierAssessments(
+            persistedState.modelTierAssessments,
+          ),
           activeArticleId,
           activeChatId,
           flowReviewMode: 'auto' as const,
@@ -3135,6 +3346,11 @@ export const useAppStore = create<AppState>()(
           updateMessage: '自动更新待命',
           updateProgress: 0,
           authStatus: (persistedState.scallionToken ? 'approved' : 'idle') as ScallionAuthStatus,
+          scallionModels: sanitizeScallionModels(persistedState.scallionModels),
+          scallionQuota: sanitizeScallionQuota(persistedState.scallionQuota),
+          hardwareCapabilityProfile: sanitizeHardwareCapabilityProfile(
+            persistedState.hardwareCapabilityProfile,
+          ),
           remoteRelayEnabled: persistedState.remoteRelayEnabled ?? current.remoteRelayEnabled,
           remoteRelayEndpoint: persistedState.remoteRelayEndpoint ?? current.remoteRelayEndpoint,
           remoteRelayChannelId: persistedState.remoteRelayChannelId ?? current.remoteRelayChannelId,
@@ -3178,6 +3394,10 @@ export const useAppStore = create<AppState>()(
           documentChangeStats: sanitizeDocumentChangeStats(persistedState.documentChangeStats),
           agentOutputCache: sanitizeAgentOutputCache(persistedState.agentOutputCache),
           semanticTaskCache: sanitizeSemanticTaskCache(persistedState.semanticTaskCache),
+          modelCallCacheMetrics: sanitizeModelCallCacheMetrics(
+            persistedState.modelCallCacheMetrics,
+          ),
+          hiveTelemetry: emptyHiveTelemetry(),
           secretaryPlanDraft: undefined,
           storyProjects: persistedState.storyProjects ?? current.storyProjects,
           activeStoryProjectId: persistedState.activeStoryProjectId ?? current.activeStoryProjectId,
@@ -3584,6 +3804,241 @@ function normalizeModelRoutingMode(value: unknown): ModelRoutingMode {
   return value === 'auto' ? 'auto' : 'manual'
 }
 
+function normalizeAutoModelProviderIds(value: unknown): ProviderId[] {
+  const ids = Array.isArray(value) ? value : defaultAutoModelProviderIds
+  const normalized = ids.filter((providerId): providerId is ProviderId =>
+    providerOrder.includes(providerId as ProviderId),
+  )
+
+  return normalized.length ? Array.from(new Set(normalized)) : defaultAutoModelProviderIds
+}
+
+function sanitizeModelTierWeights(value: unknown): Record<ModelCapabilityTier, number> {
+  const input = value && typeof value === 'object' ? (value as Partial<Record<ModelCapabilityTier, number>>) : {}
+
+  return {
+    T1: clampNumber(Number(input.T1 ?? defaultModelTierWeights.T1), 0.1, 2),
+    T2: clampNumber(Number(input.T2 ?? defaultModelTierWeights.T2), 0.1, 2),
+    T3: clampNumber(Number(input.T3 ?? defaultModelTierWeights.T3), 0.1, 2),
+  }
+}
+
+function sanitizeModelTierAssessments(value: unknown): ModelTierAssessment[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<ModelTierAssessment> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const providerId = providerOrder.includes(item.providerId as ProviderId)
+        ? (item.providerId as ProviderId)
+        : 'qwen36'
+      const modelName = typeof item.modelName === 'string' ? item.modelName.trim() : ''
+      const id =
+        typeof item.id === 'string' && item.id.trim()
+          ? item.id.trim()
+          : `${providerId}:${modelName || index}`
+
+      return {
+        id,
+        providerId,
+        label:
+          typeof item.label === 'string' && item.label.trim()
+            ? item.label.trim().slice(0, 80)
+            : modelName || defaultProviderConfigs[providerId].label,
+        modelName: modelName || defaultProviderConfigs[providerId].modelName,
+        tier: normalizeModelCapabilityTier(item.tier),
+        score: clampNumber(Number(item.score ?? 50), 0, 100),
+        rationale:
+          typeof item.rationale === 'string' && item.rationale.trim()
+            ? item.rationale.trim().slice(0, 220)
+            : '按本地可解释规则评估。',
+        available: item.available !== false,
+        contextWindowTokens:
+          typeof item.contextWindowTokens === 'number' && item.contextWindowTokens > 0
+            ? Math.round(item.contextWindowTokens)
+            : undefined,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+      } satisfies ModelTierAssessment
+    })
+    .slice(0, 80)
+}
+
+function normalizeModelCapabilityTier(value: unknown): ModelCapabilityTier {
+  return value === 'T1' || value === 'T2' || value === 'T3' ? value : 'T2'
+}
+
+function defaultHardwareProfile(): HardwareCapabilityProfile {
+  return {
+    cpuCores: 4,
+    memoryGb: undefined,
+    gpuLabel: undefined,
+    tier: 'medium',
+    maxHiveAgents: 6,
+    maxHiveParallelAgents: 2,
+    reason: '未检测到完整硬件信息，采用保守蜂巢限流。',
+    updatedAt: Date.now(),
+  }
+}
+
+function sanitizeHardwareCapabilityProfile(value: unknown): HardwareCapabilityProfile {
+  if (!value || typeof value !== 'object') {
+    return defaultHardwareProfile()
+  }
+
+  const item = value as Partial<HardwareCapabilityProfile>
+  const cpuCores = Math.max(1, Math.round(Number(item.cpuCores ?? 4) || 4))
+  const memoryGb =
+    typeof item.memoryGb === 'number' && item.memoryGb > 0
+      ? Math.round(item.memoryGb * 10) / 10
+      : undefined
+  const maxHiveAgents = Math.max(2, Math.min(12, Math.round(Number(item.maxHiveAgents ?? 6) || 6)))
+  const maxHiveParallelAgents = Math.max(
+    1,
+    Math.min(maxHiveAgents, Math.round(Number(item.maxHiveParallelAgents ?? 2) || 2)),
+  )
+
+  return {
+    cpuCores,
+    memoryGb,
+    gpuLabel: typeof item.gpuLabel === 'string' && item.gpuLabel.trim() ? item.gpuLabel.trim() : undefined,
+    tier: normalizeHardwareTier(item.tier),
+    maxHiveAgents,
+    maxHiveParallelAgents,
+    reason:
+      typeof item.reason === 'string' && item.reason.trim()
+        ? item.reason.trim().slice(0, 180)
+        : '按本机配置限制 ultra+hive 的 agent 数量。',
+    updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+  }
+}
+
+function normalizeHardwareTier(value: unknown): HardwareCapabilityProfile['tier'] {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'ultra'
+    ? value
+    : 'medium'
+}
+
+function emptyHiveTelemetry(): HiveTelemetry {
+  return {
+    enabled: false,
+    plannedAgents: 0,
+    activeAgents: 0,
+    completedAgents: 0,
+    skippedAgents: 0,
+    failedAgents: 0,
+  }
+}
+
+function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<ScallionModelMetadata> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const modelName = typeof item.modelName === 'string' ? item.modelName.trim() : ''
+      const id = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : modelName
+
+      if (!id && !modelName) {
+        return undefined
+      }
+
+      return {
+        id: id || `scallion-model-${index}`,
+        label:
+          typeof item.label === 'string' && item.label.trim()
+            ? item.label.trim()
+            : modelName || `内置模型 ${index + 1}`,
+        modelName: modelName || id,
+        contextWindowTokens:
+          typeof item.contextWindowTokens === 'number' && item.contextWindowTokens > 0
+            ? Math.round(item.contextWindowTokens)
+            : undefined,
+        available: item.available !== false,
+        tier: item.tier ? normalizeModelCapabilityTier(item.tier) : undefined,
+        score:
+          typeof item.score === 'number' && Number.isFinite(item.score)
+            ? clampNumber(item.score, 0, 100)
+            : undefined,
+        rationale:
+          typeof item.rationale === 'string' && item.rationale.trim()
+            ? item.rationale.trim().slice(0, 220)
+            : undefined,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+      } satisfies ScallionModelMetadata
+    })
+    .filter(Boolean)
+    .slice(0, 24) as ScallionModelMetadata[]
+}
+
+function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const item = value as Partial<ScallionQuota>
+  return {
+    remaining: Math.max(0, Number(item.remaining ?? 0)),
+    total:
+      item.total === undefined || item.total === null
+        ? undefined
+        : Math.max(0, Number(item.total) || 0),
+    unit: typeof item.unit === 'string' && item.unit.trim() ? item.unit.trim() : '积分',
+    isMember: item.isMember === true,
+    memberPriceLabel:
+      typeof item.memberPriceLabel === 'string' && item.memberPriceLabel.trim()
+        ? item.memberPriceLabel.trim()
+        : '9.9 元/月',
+    upgradeUrl:
+      typeof item.upgradeUrl === 'string' && item.upgradeUrl.trim()
+        ? item.upgradeUrl.trim()
+        : 'https://scallion.uno/pricing',
+    topUpUrl:
+      typeof item.topUpUrl === 'string' && item.topUpUrl.trim()
+        ? item.topUpUrl.trim()
+        : 'https://scallion.uno/pricing',
+    updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+  }
+}
+
+function sanitizeModelCallCacheMetrics(value: unknown): ModelCallCacheMetric[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<ModelCallCacheMetric> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const cacheKey = typeof item.cacheKey === 'string' ? item.cacheKey.trim() : ''
+      const stage = typeof item.stage === 'string' ? item.stage.trim() : ''
+
+      if (!cacheKey || !stage) {
+        return undefined
+      }
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id.trim()
+            : `model-cache-metric-${Date.now()}-${index}`,
+        cacheKey: cacheKey.slice(0, 260),
+        stage: stage.slice(0, 64),
+        cacheable: item.cacheable !== false,
+        hit: item.hit === true,
+        missReason:
+          typeof item.missReason === 'string' && item.missReason.trim()
+            ? item.missReason.trim().slice(0, 160)
+            : undefined,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
+      } satisfies ModelCallCacheMetric
+    })
+    .filter(Boolean)
+    .slice(0, 400) as ModelCallCacheMetric[]
+}
+
 function sanitizeAgentOutputCache(value: unknown): AgentOutputCacheEntry[] {
   if (!Array.isArray(value)) {
     return []
@@ -3650,7 +4105,7 @@ function sanitizeSemanticTaskCache(value: unknown): SemanticTaskCacheEntry[] {
           typeof item.promptExcerpt === 'string'
             ? item.promptExcerpt.trim().slice(0, 260)
             : '',
-        summary: summary.slice(0, 1400),
+        summary: summary.slice(0, taskType.startsWith('model-cache:') ? 8000 : 1400),
         sources: Array.isArray(item.sources) ? item.sources.slice(0, 8) : undefined,
         hitCount: Math.max(0, Math.round(Number(item.hitCount ?? 0))),
         createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
@@ -3676,7 +4131,11 @@ function normalizeAgentOutputType(value: unknown): AgentOutputCacheEntry['output
 }
 
 function normalizeFlowThinkingEffort(value: unknown): FlowThinkingEffort {
-  const allowed: FlowThinkingEffort[] = ['low', 'medium', 'high', 'max']
+  if (value === 'max' || value === '最高' || value === 'ultra+hive') {
+    return 'ultra_hive'
+  }
+
+  const allowed: FlowThinkingEffort[] = ['low', 'medium', 'high', 'ultra_hive']
   return allowed.includes(value as FlowThinkingEffort) ? (value as FlowThinkingEffort) : 'medium'
 }
 

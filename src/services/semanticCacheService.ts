@@ -4,7 +4,37 @@ export function createSemanticFingerprint(prompt: string) {
   return Array.from(tokenize(prompt)).sort().join('|').slice(0, 220)
 }
 
+export function findExactSemanticCacheHit(prompt: string, taskType: string) {
+  if (!isCacheableTask(taskType, prompt)) {
+    return undefined
+  }
+
+  const promptFingerprint = createSemanticFingerprint(prompt)
+  const hit = useAppStore
+    .getState()
+    .semanticTaskCache.find(
+      (entry) => entry.taskType === taskType && entry.promptFingerprint === promptFingerprint,
+    )
+
+  if (!hit) {
+    return undefined
+  }
+
+  useAppStore.getState().putSemanticTaskCache({
+    ...hit,
+    hitCount: hit.hitCount + 1,
+    updatedAt: Date.now(),
+  })
+
+  return hit
+}
+
 export function findSemanticCacheHit(prompt: string, taskType: string) {
+  const exactHit = findExactSemanticCacheHit(prompt, taskType)
+  if (exactHit) {
+    return exactHit
+  }
+
   const tokens = tokenize(prompt)
   if (tokens.size < 3 || !isCacheableTask(taskType, prompt)) {
     return undefined
@@ -49,15 +79,24 @@ export function rememberSemanticResult(
     taskType,
     promptFingerprint: createSemanticFingerprint(prompt),
     promptExcerpt: prompt.trim().slice(0, 260),
-    summary: summary.trim().slice(0, 1400),
+    summary: trimCacheSummary(summary, taskType),
     sources,
   })
 }
 
 function isCacheableTask(taskType: string, prompt: string) {
+  if (taskType.startsWith('model-cache:')) {
+    return true
+  }
+
   return /research|academic|资料|核查|引用|文献|搜索|RAG|project|context|跨文档/i.test(
     `${taskType} ${prompt}`,
   )
+}
+
+function trimCacheSummary(summary: string, taskType: string) {
+  const limit = taskType.startsWith('model-cache:') ? 8000 : 1400
+  return summary.trim().slice(0, limit)
 }
 
 function tokenize(text: string) {
@@ -82,4 +121,4 @@ function jaccard(left: Set<string>, right: Set<string>) {
   return intersection / (left.size + right.size - intersection)
 }
 
-const stopwords = new Set(['the', 'and', 'for', 'with', 'this', 'that', '一个', '一下', '可以', '需要'])
+const stopwords = new Set(['the', 'and', 'for', 'with', 'this', 'that', '一个', '可以', '需要'])

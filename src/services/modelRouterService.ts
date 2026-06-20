@@ -7,6 +7,11 @@ import {
   type ProviderId,
 } from './modelCatalog'
 import { canCallProvider } from './llmClient'
+import {
+  getProviderTier,
+  getProviderTierWeight,
+  isProviderAllowedForAuto,
+} from './modelGovernanceService'
 import type { SecretaryTaskComplexity } from './secretaryTaskClassifier'
 
 export type ModelProviderRole =
@@ -29,7 +34,7 @@ export type ModelRoutingDecision = {
 
 export function selectModelForRole(
   role: ModelProviderRole,
-  options: { complexity?: SecretaryTaskComplexity; writeIntent?: boolean } = {},
+  options: { complexity?: SecretaryTaskComplexity; writeIntent?: boolean; thinkingEffort?: string } = {},
 ): ModelRoutingDecision {
   const store = useAppStore.getState()
   const fallback = store.providerConfigs[store.activeProviderId] ?? store.providerConfigs.qwen36
@@ -48,9 +53,15 @@ export function selectModelForRole(
   const usable = providerOrder
     .map((providerId) => store.providerConfigs[providerId])
     .filter((provider): provider is LlmProviderConfig => Boolean(provider))
+    .filter((provider) => isProviderAllowedForAuto(provider.id))
     .filter((provider) => provider.type === 'scallion_proxy' || (canCallProvider(provider) && isProviderValidated(provider)))
 
-  const candidates = usable.length ? usable : [fallback, store.providerConfigs.qwen36].filter(Boolean)
+  const fallbackCandidates = [fallback, store.providerConfigs.qwen36]
+    .filter(Boolean)
+    .filter((provider, index, list): provider is LlmProviderConfig =>
+      Boolean(provider && list.findIndex((item) => item?.id === provider.id) === index),
+    )
+  const candidates = usable.length ? usable : fallbackCandidates
   const selected = [...candidates].sort(
     (left, right) => scoreProvider(right, role, options) - scoreProvider(left, role, options),
   )[0] ?? fallback
@@ -76,7 +87,7 @@ export function describeModelRouting(decision: ModelRoutingDecision) {
 function scoreProvider(
   provider: LlmProviderConfig,
   role: ModelProviderRole,
-  options: { complexity?: SecretaryTaskComplexity; writeIntent?: boolean },
+  options: { complexity?: SecretaryTaskComplexity; writeIntent?: boolean; thinkingEffort?: string },
 ) {
   const context = getEffectiveContextLimit(provider)
   const id = provider.id
@@ -102,11 +113,21 @@ function scoreProvider(
     score += Math.min(context / 131072, 8) * 6
   }
 
+  if (options.thinkingEffort === 'ultra_hive') {
+    if (role === 'writer' || role === 'repair' || role === 'agent') {
+      score += qualityPreference(id) * 1.5
+      score += Math.min(context / 131072, 8) * 8
+    } else {
+      score += lightweightPreference(id) * 0.4
+    }
+  }
+
   if (options.complexity === 'simple' && (role === 'agent' || role === 'planning')) {
     score += lightweightPreference(id) * 0.5
   }
 
-  return score
+  const tierWeight = getProviderTierWeight(id)
+  return score * tierWeight
 }
 
 function lightweightPreference(id: ProviderId) {
@@ -126,18 +147,23 @@ function qualityPreference(id: ProviderId) {
 function describeRoleReason(
   role: ModelProviderRole,
   provider: LlmProviderConfig,
-  options: { complexity?: SecretaryTaskComplexity; writeIntent?: boolean },
+  options: { complexity?: SecretaryTaskComplexity; writeIntent?: boolean; thinkingEffort?: string },
 ) {
   const contextLabel = `${Math.round(getEffectiveContextLimit(provider) / 1024)}K`
+  const tier = getProviderTier(provider.id)
+  if (options.thinkingEffort === 'ultra_hive' && (role === 'writer' || role === 'repair' || role === 'agent')) {
+    return `ultra+hive 优先完成质量，选择 ${tier} 高质量或大上下文模型（${contextLabel}）。`
+  }
+
   if (role === 'writer' || role === 'repair') {
-    return `正文/修复阶段优先选择高质量或大上下文模型（${contextLabel}）。`
+    return `正文/修复阶段优先选择 ${tier} 高质量或大上下文模型（${contextLabel}）。`
   }
 
   if (options.complexity === 'simple') {
-    return `简单任务优先使用轻量模型，减少协作开销（${contextLabel}）。`
+    return `简单任务优先使用 ${tier} 轻量模型，减少协作开销（${contextLabel}）。`
   }
 
-  return `规划、分类、压缩和裁判阶段优先使用轻量可靠模型（${contextLabel}）。`
+  return `规划、分类、压缩和裁判阶段优先使用 ${tier} 轻量可靠模型（${contextLabel}）。`
 }
 
 function roleLabel(role: ModelProviderRole) {

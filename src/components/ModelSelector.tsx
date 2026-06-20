@@ -1,7 +1,7 @@
 import { Check, ChevronDown, Cpu, Route, Settings2, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { useMemo } from 'react'
 import { canCallProvider } from '../services/llmClient'
-import { isProviderValidated } from '../services/modelCatalog'
+import { getEffectiveContextLimit, isProviderValidated } from '../services/modelCatalog'
 import { providerOrder, useAppStore, type ProviderId } from '../stores/useAppStore'
 
 export function ModelSelector({ compact = false }: { compact?: boolean }) {
@@ -83,7 +83,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
         <ChevronDown size={13} />
       </summary>
 
-      <div className="fixed left-1/2 top-20 z-50 w-[min(360px,calc(100vw-24px))] -translate-x-1/2 overflow-hidden rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-2 shadow-[0_18px_60px_rgba(43,34,19,0.16)]">
+      <div className="absolute right-0 bottom-[calc(100%+10px)] z-50 w-[min(380px,calc(100vw-24px))] overflow-hidden rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-2 shadow-[0_18px_60px_rgba(43,34,19,0.16)]">
         <div className="mb-2 flex items-center justify-between px-2 py-1">
           <div className="text-xs font-semibold text-[#2f2b22]">选择写作模型</div>
           <button
@@ -99,7 +99,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
           </button>
         </div>
 
-        <div className="max-h-[min(420px,calc(100vh-120px))] space-y-3 overflow-y-auto p-1">
+        <div className="max-h-[min(360px,calc(100vh-180px))] space-y-3 overflow-y-auto p-1">
           <section>
             <button
               type="button"
@@ -115,7 +115,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                 <span className="min-w-0">
                   <span className="block truncate text-sm font-semibold">Auto 推荐</span>
                   <span className={`block truncate text-xs ${modelRoutingMode === 'auto' ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
-                    推荐开启：规划、执行、审查自动匹配可用模型
+                    推荐开启：规划、执行、审查会自动匹配可用模型
                   </span>
                 </span>
               </span>
@@ -149,7 +149,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                       <span className="min-w-0">
                         <span className="block truncate text-sm font-medium">{provider.label}</span>
                         <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
-                          {provider.modelName || '未填写模型名'} · {contextLabel(provider.customContextTier)}
+                          {provider.modelName || '未填写模型名'} · {contextLabel(getEffectiveContextLimit(provider))}
                         </span>
                       </span>
                       {active ? (
@@ -177,8 +177,9 @@ function closeOpenDetails() {
   })
 }
 
-function contextLabel(tier?: string) {
-  if (tier === '1m') return '1M'
-  if (tier === '256k') return '256K'
-  return '128K'
+function contextLabel(tokens: number) {
+  if (tokens >= 1048576) return '1M'
+  if (tokens >= 262144) return '256K'
+  if (tokens >= 131072) return '128K'
+  return `${Math.round(tokens / 1024)}K`
 }

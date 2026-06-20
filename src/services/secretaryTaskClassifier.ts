@@ -4,6 +4,9 @@ export type SecretaryTaskClassification = {
   complexity: SecretaryTaskComplexity
   confidence: number
   suggestedAgentCount: number
+  expectedAgentCount: number
+  hiveRecommended: boolean
+  cacheability: 'low' | 'medium' | 'high'
   reasons: string[]
   taskType: string
 }
@@ -65,6 +68,9 @@ export function classifySecretaryTask(
       complexity: 'goal',
       confidence: 0.94,
       suggestedAgentCount: 5,
+      expectedAgentCount: 7,
+      hiveRecommended: true,
+      cacheability: 'medium',
       reasons: ['检测到长程目标模式'],
       taskType: 'longform-goal',
     }
@@ -80,6 +86,9 @@ export function classifySecretaryTask(
       complexity: 'simple',
       confidence: 0.9,
       suggestedAgentCount: 1,
+      expectedAgentCount: 1,
+      hiveRecommended: false,
+      cacheability: 'medium',
       reasons: [`短请求命中简单任务：${simpleHit.source}`],
       taskType: 'single-step-edit',
     }
@@ -91,6 +100,9 @@ export function classifySecretaryTask(
       complexity: 'complex',
       confidence: 0.86,
       suggestedAgentCount: 5,
+      expectedAgentCount: 8,
+      hiveRecommended: true,
+      cacheability: inferCacheability(text, 'high'),
       reasons,
       taskType: inferTaskType(text, platformHit ? 'platform' : 'research-writing'),
     }
@@ -102,6 +114,9 @@ export function classifySecretaryTask(
       complexity: 'complex',
       confidence: 0.78,
       suggestedAgentCount: 4,
+      expectedAgentCount: 6,
+      hiveRecommended: true,
+      cacheability: inferCacheability(text, 'medium'),
       reasons,
       taskType: inferTaskType(text, 'complex-writing'),
     }
@@ -113,6 +128,9 @@ export function classifySecretaryTask(
       complexity: 'standard',
       confidence: 0.82,
       suggestedAgentCount: platformHit ? 2 : 2,
+      expectedAgentCount: platformHit ? 4 : 3,
+      hiveRecommended: Boolean(platformHit && normalized.length > 220),
+      cacheability: inferCacheability(text, platformHit ? 'high' : 'medium'),
       reasons,
       taskType: inferTaskType(text, platformHit ? 'platform-content' : 'writing'),
     }
@@ -122,9 +140,24 @@ export function classifySecretaryTask(
     complexity: 'simple',
     confidence: 0.72,
     suggestedAgentCount: 1,
+    expectedAgentCount: 1,
+    hiveRecommended: false,
+    cacheability: 'low',
     reasons: ['默认按单步秘书任务处理'],
     taskType: inferTaskType(text, 'general'),
   }
+}
+
+function inferCacheability(text: string, fallback: SecretaryTaskClassification['cacheability']) {
+  if (/资料|核查|引用|文献|搜索|跨文档|项目|设定|人物|术语|合同|政策|法规|SEO|平台/.test(text)) {
+    return 'high'
+  }
+
+  if (/写|续写|正文|小说|段落|创作/.test(text)) {
+    return 'medium'
+  }
+
+  return fallback
 }
 
 function inferTaskType(text: string, fallback: string) {

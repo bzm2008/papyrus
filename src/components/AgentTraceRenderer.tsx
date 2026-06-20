@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from 'framer-motion'
+﻿import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertCircle,
   CheckCircle2,
@@ -15,6 +15,7 @@ import { type AgentStep, type AgentTodo, useAppStore } from '../stores/useAppSto
 
 export function AgentTraceRenderer({ steps }: { steps: AgentStep[] }) {
   const bottomRef = useRef<HTMLDivElement | null>(null)
+  const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
   const streamSignal = useMemo(
     () => steps.map((step) => `${step.id}:${step.status}:${step.content?.length ?? 0}`).join('|'),
     [steps],
@@ -44,6 +45,7 @@ export function AgentTraceRenderer({ steps }: { steps: AgentStep[] }) {
         </div>
         <span className="text-[11px] tabular-nums text-[#8f897a]">{steps.length} steps</span>
       </div>
+      {hiveTelemetry.enabled ? <HiveTelemetryStrip /> : null}
       <div className="relative space-y-0.5 before:absolute before:left-[9px] before:top-2 before:h-[calc(100%-12px)] before:w-px before:bg-[#eadfcb]">
         <AnimatePresence initial={false}>
           {steps.map((step) => (
@@ -57,13 +59,21 @@ export function AgentTraceRenderer({ steps }: { steps: AgentStep[] }) {
 }
 
 export function AgentTodoList({ todos }: { todos: AgentTodo[] }) {
+  const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
   if (!todos.length) {
     return null
   }
 
   return (
     <div className="mt-3 rounded-lg border border-[#e8ddc7]/76 bg-[#fffefa]/72 p-2">
-      <div className="mb-1 px-1 text-[11px] font-semibold text-[#6f7168]">To do</div>
+      <div className="mb-1 flex items-center justify-between gap-2 px-1 text-[11px] font-semibold text-[#6f7168]">
+        <span>To do</span>
+        {hiveTelemetry.enabled ? (
+          <span className="rounded-md bg-[#fff6df] px-1.5 py-0.5 text-[#5b4a24]">
+            {hiveTelemetry.stageLabel ?? 'Hive'} {hiveTelemetry.activeAgents}/{hiveTelemetry.plannedAgents}
+          </span>
+        ) : null}
+      </div>
       <div className="space-y-0.5">
         {todos.map((todo) => (
           <div
@@ -84,6 +94,28 @@ export function AgentTodoList({ todos }: { todos: AgentTodo[] }) {
           </div>
         ))}
       </div>
+    </div>
+  )
+}
+
+function HiveTelemetryStrip() {
+  const telemetry = useAppStore((state) => state.hiveTelemetry)
+  const items: Array<[string, number]> = [
+    ['计划', telemetry.plannedAgents],
+    ['活跃', telemetry.activeAgents],
+    ['完成', telemetry.completedAgents],
+    ['跳过', telemetry.skippedAgents],
+    ['失败', telemetry.failedAgents],
+  ]
+
+  return (
+    <div className="mb-2 grid grid-cols-5 gap-1 rounded-lg border border-[#d7aa4f]/35 bg-[#fff6df]/82 p-1.5">
+      {items.map(([label, value]) => (
+        <div key={label} className="rounded-md bg-[#fffefa]/76 px-1.5 py-1 text-center">
+          <div className="text-[10px] text-[#8f897a]">{label}</div>
+          <div className="text-xs font-semibold tabular-nums text-[#2f2b22]">{value}</div>
+        </div>
+      ))}
     </div>
   )
 }

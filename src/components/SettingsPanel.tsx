@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from 'framer-motion'
+﻿import { AnimatePresence, motion } from 'framer-motion'
 import {
   Check,
   DownloadCloud,
@@ -22,6 +22,7 @@ import { agentSkills } from '../services/agentSkillLibrary'
 import { callOpenAICompatible, canCallProvider } from '../services/llmClient'
 import { testMcpServer } from '../services/mcpClient'
 import { acceptTowriteSuggestion, rejectTowriteSuggestion, syncTowriteToMemory } from '../services/towriteService'
+import { modelTierDescriptions, refreshLocalModelTierAssessments } from '../services/modelGovernanceService'
 import {
   customContextTiers,
   isProviderValidated,
@@ -29,11 +30,14 @@ import {
 } from '../services/modelCatalog'
 import { checkAndDownloadUpdate, relaunchToInstallUpdate } from '../services/updater'
 import { logoutScallion, startScallionLogin } from '../services/scallionAuth'
+import { refreshScallionQuota } from '../services/scallionAccountService'
+import { getModelCacheStats } from '../services/modelCallCacheService'
 import {
   providerOrder,
   useAppStore,
   type CustomAgentSkill,
   type FlowAgentId,
+  type ModelCapabilityTier,
   type McpServerConfig,
   type McpServerTransport,
   type ProviderId,
@@ -43,6 +47,7 @@ import { RemoteRelaySettings } from './RemoteRelaySettings'
 import { StudioSettingsSection } from './StudioSettingsSection'
 
 type SettingsSectionId =
+  | 'general'
   | 'account'
   | 'models'
   | 'remote'
@@ -56,7 +61,7 @@ export function SettingsPanel() {
   const [checkingProviderId, setCheckingProviderId] = useState<ProviderId | null>(null)
   const [checkMessages, setCheckMessages] = useState<Partial<Record<ProviderId, string>>>({})
   const [selectedVendorId, setSelectedVendorId] = useState<ProviderId>('openai')
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>('models')
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('general')
   const isOpen = useAppStore((state) => state.isSettingsOpen)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const resetOobe = useAppStore((state) => state.resetOobe)
@@ -68,6 +73,7 @@ export function SettingsPanel() {
   const updateProgress = useAppStore((state) => state.updateProgress)
   const updateVersion = useAppStore((state) => state.updateVersion)
   const scallionUser = useAppStore((state) => state.scallionUser)
+  const scallionQuota = useAppStore((state) => state.scallionQuota)
   const authStatus = useAppStore((state) => state.authStatus)
   const authUserCode = useAppStore((state) => state.authUserCode)
   const cloudProvider = providerConfigs.qwen36
@@ -162,6 +168,10 @@ export function SettingsPanel() {
                 <SettingsSidebar activeSection={activeSection} onSelect={setActiveSection} />
                 <div className="papyrus-scrollbar min-h-0 overflow-y-auto pr-1">
                   <div className="space-y-3">
+                <div id="settings-general" className={activeSection === 'general' ? '' : 'hidden'}>
+                  <GeneralSettingsSection />
+                </div>
+
                 <section className={`papyrus-inset rounded-xl p-4 ${activeSection === 'account' ? '' : 'hidden'}`}>
                   <div className="mb-3 flex items-start justify-between gap-3">
                     <div>
@@ -186,10 +196,56 @@ export function SettingsPanel() {
                   </div>
 
                   {scallionUser ? (
-                    <div className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3 text-sm text-[#2f2b22]">
-                      <div className="font-medium">{scallionUser.username}</div>
-                      <div className="mt-1 text-xs text-[#8f897a]">
-                        {scallionUser.is_member ? '会员账号' : '普通账号'} · 积分 {scallionUser.points ?? 0}
+                    <div className="grid gap-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3 text-sm text-[#2f2b22]">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <div className="font-medium">{scallionUser.username}</div>
+                          <div className="mt-1 text-xs text-[#8f897a]">
+                            {scallionQuota?.isMember || scallionUser.is_member ? '会员账号' : '普通账号'}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void refreshScallionQuota()}
+                          className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
+                        >
+                          <RotateCcw size={12} />
+                          刷新额度
+                        </button>
+                      </div>
+                      <div className="grid gap-2 rounded-lg bg-[#fffefa] p-3">
+                        <div className="text-xs text-[#8f897a]">剩余内置模型额度</div>
+                        <div className="text-xl font-semibold tabular-nums text-[#20201d]">
+                          {scallionQuota?.remaining ?? scallionUser.points ?? scallionUser.balance ?? 0}
+                          <span className="ml-1 text-xs font-normal text-[#8f897a]">
+                            {scallionQuota?.unit ?? '积分'}
+                          </span>
+                        </div>
+                        {scallionQuota?.total ? (
+                          <div className="text-xs text-[#8f897a]">
+                            总额度 {scallionQuota.total} {scallionQuota.unit}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <a
+                          href={scallionQuota?.topUpUrl ?? 'https://scallion.uno/pricing'}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="papyrus-control inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs"
+                        >
+                          <ExternalLink size={12} />
+                          获取更多额度
+                        </a>
+                        <a
+                          href={scallionQuota?.upgradeUrl ?? 'https://scallion.uno/pricing'}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="papyrus-primary-button inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs"
+                        >
+                          <ExternalLink size={12} />
+                          {scallionQuota?.memberPriceLabel ?? '9.9 元/月'} 成为会员
+                        </a>
                       </div>
                     </div>
                   ) : (
@@ -413,6 +469,7 @@ function SettingsSidebar({
   onSelect: (section: SettingsSectionId) => void
 }) {
   const links: Array<{ id: SettingsSectionId; label: string }> = [
+    { id: 'general', label: '常规' },
     { id: 'account', label: '账户' },
     { id: 'models', label: '模型' },
     { id: 'remote', label: '远程连接' },
@@ -736,6 +793,207 @@ function InfoRow({ label, value }: { label: string; value: string }) {
   )
 }
 
+function GeneralSettingsSection() {
+  const providerConfigs = useAppStore((state) => state.providerConfigs)
+  const autoModelProviderIds = useAppStore((state) => state.autoModelProviderIds)
+  const modelTierWeights = useAppStore((state) => state.modelTierWeights)
+  const modelTierAssessments = useAppStore((state) => state.modelTierAssessments)
+  const hardwareCapabilityProfile = useAppStore((state) => state.hardwareCapabilityProfile)
+  const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
+  const setModelRoutingMode = useAppStore((state) => state.setModelRoutingMode)
+  const setAutoModelProviderIds = useAppStore((state) => state.setAutoModelProviderIds)
+  const setModelTierWeight = useAppStore((state) => state.setModelTierWeight)
+  const setMode = useAppStore((state) => state.setMode)
+  const cacheStats = getModelCacheStats()
+
+  const toggleAutoProvider = (providerId: ProviderId, enabled: boolean) => {
+    const next = enabled
+      ? [...autoModelProviderIds, providerId]
+      : autoModelProviderIds.filter((id) => id !== providerId)
+    setAutoModelProviderIds(next)
+  }
+
+  return (
+    <SectionShell
+      title="常规设置"
+      description="控制默认入口、Auto 模型调度、蜂巢限流和本地缓存。所有评估都在本机用可解释规则完成，不额外消耗额度。"
+    >
+      <div className="space-y-3">
+        <div className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-[#2f2b22]">默认入口</div>
+              <div className="mt-1 text-xs leading-5 text-[#8f897a]">
+                启动和新对话默认进入秘书模式；写作模式仍可在顶部切换。
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMode('flow')}
+              className="papyrus-primary-button h-8 rounded-md px-3 text-xs"
+            >
+              切到秘书模式
+            </button>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-[#d7aa4f]/45 bg-[#fff7e3] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-[#2f2b22]">Auto 模型调度</div>
+              <div className="mt-1 text-xs leading-5 text-[#6f7168]">
+                推荐开启。秘书长会按任务阶段自动选择模型：T1 处理复杂任务，T2 处理常规任务，T3 处理轻量和重复任务。
+              </div>
+            </div>
+            <div className="inline-flex rounded-lg border border-[#dccfb9] bg-[#f8f4ea] p-1">
+              {(['manual', 'auto'] as const).map((mode) => {
+                const active = modelRoutingMode === mode
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setModelRoutingMode(mode)}
+                    className={`h-7 rounded-md px-3 text-xs font-medium transition ${
+                      active
+                        ? 'bg-[#171714] text-[#fffefa]'
+                        : 'text-[#6f7168] hover:bg-[#fffefa] hover:text-[#171714]'
+                    }`}
+                  >
+                    {mode === 'auto' ? 'Auto 推荐' : '手动'}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold text-[#2f2b22]">Auto 可调用模型</div>
+              <div className="mt-1 text-xs leading-5 text-[#8f897a]">
+                勾选后才会进入秘书长自动路由。未检测的用户 Key 模型可以保存配置，但不会优先选择。
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => refreshLocalModelTierAssessments()}
+              className="papyrus-control h-8 rounded-md px-3 text-xs"
+            >
+              重新评估
+            </button>
+          </div>
+          <div className="grid gap-1.5">
+            {providerOrder.map((providerId) => {
+              const provider = providerConfigs[providerId]
+              const checked = autoModelProviderIds.includes(providerId)
+              const ready =
+                provider.type === 'scallion_proxy' ||
+                (canCallProvider(provider) && isProviderValidated(provider))
+              const assessment = modelTierAssessments.find(
+                (item) => item.providerId === providerId && item.available,
+              )
+
+              return (
+                <label
+                  key={providerId}
+                  className="flex items-center gap-2 rounded-lg bg-[#fffefa] px-2.5 py-2 text-xs"
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(event) => toggleAutoProvider(providerId, event.target.checked)}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="font-medium text-[#2f2b22]">{provider.label}</span>
+                    <span className="ml-2 text-[#8f897a]">{provider.modelName || '未填写模型名'}</span>
+                  </span>
+                  <span className="rounded-md bg-[#f0e6d2] px-1.5 py-0.5 text-[10px] text-[#6f7168]">
+                    {assessment?.tier ?? 'T2'} · {assessment?.score ?? '待评估'}
+                  </span>
+                  <span className={`text-[10px] ${ready ? 'text-[#315d39]' : 'text-[#9b6b30]'}`}>
+                    {ready ? '可用' : '待检测'}
+                  </span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
+
+        <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="text-xs font-semibold text-[#2f2b22]">T1 / T2 / T3 权重</div>
+          {(['T1', 'T2', 'T3'] as ModelCapabilityTier[]).map((tier) => (
+            <div key={tier} className="rounded-lg bg-[#fffefa] p-2">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-[#2f2b22]">{tier}</div>
+                  <div className="mt-0.5 text-[11px] leading-4 text-[#8f897a]">
+                    {modelTierDescriptions[tier]}
+                  </div>
+                </div>
+                <span className="w-12 text-right text-xs tabular-nums text-[#2f2b22]">
+                  {modelTierWeights[tier].toFixed(2)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0.1}
+                max={2}
+                step={0.05}
+                value={modelTierWeights[tier]}
+                onChange={(event) => setModelTierWeight(tier, Number(event.target.value))}
+                className="mt-2 w-full accent-[#315d39]"
+              />
+            </div>
+          ))}
+          <div className="rounded-lg bg-[#f4fbf2] p-2 text-[11px] leading-5 text-[#315d39]">
+            模型分层采用本地规则：上下文窗口、可用状态、模型名称特征，以及写作/文学/agent 任务适配度。没有采用“随机 AI 在线评估所有模型”，因为那会消耗额度、结果不稳定，也难以解释。
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="mb-2 text-xs font-semibold text-[#2f2b22]">本机蜂巢限流</div>
+          <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+            <InfoTile label="档位" value={hardwareCapabilityProfile.tier ?? 'medium'} />
+            <InfoTile label="CPU" value={`${hardwareCapabilityProfile.cpuCores} 核`} />
+            <InfoTile label="最大 Agent" value={String(hardwareCapabilityProfile.maxHiveAgents)} />
+            <InfoTile label="最大并行" value={String(hardwareCapabilityProfile.maxHiveParallelAgents)} />
+          </div>
+          <div className="mt-2 text-xs leading-5 text-[#8f897a]">
+            {hardwareCapabilityProfile.reason}
+          </div>
+          {hardwareCapabilityProfile.gpuLabel ? (
+            <div className="mt-1 truncate text-[11px] text-[#8f897a]">
+              GPU：{hardwareCapabilityProfile.gpuLabel}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="mb-2 text-xs font-semibold text-[#2f2b22]">模型调用缓存</div>
+          <div className="grid grid-cols-3 gap-2 text-xs">
+            <InfoTile label="命中率" value={`${cacheStats.hitRate}%`} />
+            <InfoTile label="命中" value={String(cacheStats.hits)} />
+            <InfoTile label="可缓存调用" value={String(cacheStats.total)} />
+          </div>
+          <div className="mt-2 text-xs leading-5 text-[#8f897a]">
+            目标是可缓存调用 80%+ 命中。冷启动、全新正文创作和强实时请求不计入质量目标。
+          </div>
+        </div>
+      </div>
+    </SectionShell>
+  )
+}
+
+function InfoTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0 rounded-lg bg-[#fffefa] px-2.5 py-2">
+      <div className="truncate text-[11px] text-[#8f897a]">{label}</div>
+      <div className="mt-1 truncate text-sm font-semibold tabular-nums text-[#20201d]">{value}</div>
+    </div>
+  )
+}
+
 
 function SectionShell({
   title,
@@ -789,11 +1047,14 @@ function MemorySettingsSection() {
   const deleteProjectWritingMemory = useAppStore((state) => state.deleteProjectWritingMemory)
   const clearProjectWritingMemories = useAppStore((state) => state.clearProjectWritingMemories)
   const clearSemanticTaskCache = useAppStore((state) => state.clearSemanticTaskCache)
+  const modelCallCacheMetrics = useAppStore((state) => state.modelCallCacheMetrics)
+  const clearModelCallCacheMetrics = useAppStore((state) => state.clearModelCallCacheMetrics)
   const setGlobalTowriteMarkdown = useAppStore((state) => state.setGlobalTowriteMarkdown)
   const setProjectTowriteMarkdown = useAppStore((state) => state.setProjectTowriteMarkdown)
   const [manualMemory, setManualMemory] = useState('')
 
   const pendingSuggestions = towriteSuggestions.filter((suggestion) => suggestion.status === 'pending')
+  const cacheStats = getModelCacheStats()
 
   return (
     <SectionShell
@@ -998,10 +1259,33 @@ function MemorySettingsSection() {
             <div className="mt-1 text-xs text-[#8f897a]">
               用于复用重复资料核查和跨文档检索结果，仅保存在本机。当前 {semanticTaskCache.length} 条。
             </div>
+            <div className="mt-1 text-xs text-[#8f897a]">
+              可缓存模型调用命中率 {cacheStats.hitRate}% · 命中 {cacheStats.hits} / {cacheStats.total} · 目标 80%+
+            </div>
+            {cacheStats.hitRate < cacheStats.targetHitRate && cacheStats.total > 0 ? (
+              <div className="mt-1 text-[11px] text-[#9b6b30]">
+                未达标通常来自冷启动、上下文变化或实时请求；全新正文创作不计入命中率目标。
+              </div>
+            ) : null}
+            {modelCallCacheMetrics.length ? (
+              <div className="mt-1 text-[11px] text-[#8f897a]">
+                最近统计 {modelCallCacheMetrics.length} 条。
+              </div>
+            ) : null}
+            {cacheStats.lastMissReasons.length ? (
+              <div className="mt-1 line-clamp-2 text-[11px] text-[#8f897a]">
+                最近未命中：{Array.from(new Set(cacheStats.lastMissReasons)).join('；')}
+              </div>
+            ) : null}
           </div>
-          <button type="button" onClick={clearSemanticTaskCache} className="text-xs text-[#9b3d30]">
-            清空缓存
-          </button>
+          <div className="flex shrink-0 flex-col gap-1.5">
+            <button type="button" onClick={clearSemanticTaskCache} className="text-xs text-[#9b3d30]">
+              清空语义缓存
+            </button>
+            <button type="button" onClick={clearModelCallCacheMetrics} className="text-xs text-[#9b3d30]">
+              清空命中率统计
+            </button>
+          </div>
         </div>
       </div>
     </SectionShell>
