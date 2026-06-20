@@ -1,17 +1,49 @@
 import { Check, ChevronDown, Cpu, Route, Settings2, ShieldCheck, TriangleAlert } from 'lucide-react'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { canCallProvider } from '../services/llmClient'
 import { getEffectiveContextLimit, isProviderValidated } from '../services/modelCatalog'
-import { providerOrder, useAppStore, type ProviderId } from '../stores/useAppStore'
+import { providerOrder, useAppStore, type ProviderId, type ScallionModelMetadata } from '../stores/useAppStore'
+
+type PopoverRect = {
+  left: number
+  top: number
+  width: number
+  maxHeight: number
+  placement: 'top' | 'bottom'
+}
 
 export function ModelSelector({ compact = false }: { compact?: boolean }) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const [open, setOpen] = useState(false)
+  const [popoverRect, setPopoverRect] = useState<PopoverRect | null>(null)
   const activeProviderId = useAppStore((state) => state.activeProviderId)
   const setActiveProviderId = useAppStore((state) => state.setActiveProviderId)
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const setModelRoutingMode = useAppStore((state) => state.setModelRoutingMode)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
-  const activeProvider = providerConfigs[activeProviderId]
+  const scallionModels = useAppStore((state) => state.scallionModels)
+  const updateProviderModelMetadata = useAppStore((state) => state.updateProviderModelMetadata)
+  const activeProvider = providerConfigs[activeProviderId] ?? providerConfigs.qwen36
+  const currentScallionModel = useMemo(
+    () =>
+      scallionModels.find((model) => model.modelName === providerConfigs.qwen36.modelName) ??
+      scallionModels.find((model) => model.available),
+    [providerConfigs.qwen36.modelName, scallionModels],
+  )
+  const activeLabel =
+    modelRoutingMode === 'auto'
+      ? 'Auto 推荐'
+      : activeProvider.type === 'scallion_proxy'
+        ? currentScallionModel?.label || activeProvider.label
+        : activeProvider.label
+  const activeSubLabel =
+    modelRoutingMode === 'auto'
+      ? '秘书长自动选择模型'
+      : activeProvider.type === 'scallion_proxy'
+        ? `${activeProvider.modelName} · ${contextLabel(getEffectiveContextLimit(activeProvider))}`
+        : activeProvider.modelName
   const groups = useMemo(
     () => [
       {
@@ -36,31 +68,112 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
     [providerConfigs],
   )
 
+  const close = () => setOpen(false)
+  const openSettings = () => {
+    setSettingsOpen(true)
+    close()
+  }
+
+  const updatePopoverRect = () => {
+    const button = buttonRef.current
+
+    if (!button) {
+      return
+    }
+
+    const trigger = button.getBoundingClientRect()
+    const width = Math.min(380, window.innerWidth - 24)
+    const left = Math.min(Math.max(12, trigger.right - width), window.innerWidth - width - 12)
+    const spaceBelow = window.innerHeight - trigger.bottom - 12
+    const spaceAbove = trigger.top - 12
+    const placement = spaceBelow >= 260 || spaceBelow >= spaceAbove ? 'bottom' : 'top'
+    const availableHeight = placement === 'bottom' ? spaceBelow : spaceAbove
+    const maxHeight = Math.max(220, Math.min(390, availableHeight))
+    const top =
+      placement === 'bottom'
+        ? trigger.bottom + 8
+        : Math.max(12, trigger.top - maxHeight - 8)
+
+    setPopoverRect({ left, top, width, maxHeight, placement })
+  }
+
+  useEffect(() => {
+    if (!open) {
+      return undefined
+    }
+
+    updatePopoverRect()
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node
+      const popover = document.getElementById('papyrus-model-selector-popover')
+
+      if (buttonRef.current?.contains(target) || popover?.contains(target)) {
+        return
+      }
+
+      close()
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        close()
+      }
+    }
+    const onViewportChange = () => updatePopoverRect()
+
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    window.addEventListener('resize', onViewportChange)
+    window.addEventListener('scroll', onViewportChange, true)
+
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('resize', onViewportChange)
+      window.removeEventListener('scroll', onViewportChange, true)
+    }
+  }, [open])
+
   const selectProvider = (providerId: ProviderId) => {
     const provider = providerConfigs[providerId]
     const usable =
       provider.type === 'scallion_proxy' || (canCallProvider(provider) && isProviderValidated(provider))
 
     if (!usable) {
-      setSettingsOpen(true)
-      closeOpenDetails()
+      openSettings()
       return
     }
 
     setModelRoutingMode('manual')
     setActiveProviderId(providerId)
-    closeOpenDetails()
+    close()
+  }
+
+  const selectScallionModel = (model: ScallionModelMetadata) => {
+    updateProviderModelMetadata('qwen36', {
+      label: model.label,
+      modelName: model.modelName,
+      contextWindowTokens: model.contextWindowTokens,
+    })
+    setModelRoutingMode('manual')
+    setActiveProviderId('qwen36')
+    close()
   }
 
   const selectAuto = () => {
     setModelRoutingMode('auto')
-    closeOpenDetails()
+    close()
   }
 
   return (
-    <details className="group/model-selector relative inline-flex shrink-0">
-      <summary
-        className={`inline-flex list-none items-center gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffefa] text-left text-xs text-[#5f6159] shadow-[0_4px_14px_rgba(43,34,19,0.04)] transition hover:border-[#d7aa4f]/70 hover:text-[#171714] [&::-webkit-details-marker]:hidden ${
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className={`inline-flex shrink-0 items-center gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffefa] text-left text-xs text-[#5f6159] shadow-[0_4px_14px_rgba(43,34,19,0.04)] transition hover:border-[#d7aa4f]/70 hover:text-[#171714] ${
           compact ? 'h-8 px-2' : 'h-10 px-3'
         }`}
         title="更换模型"
@@ -68,113 +181,170 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
         <Cpu size={14} className="text-[#3f5845]" />
         <span className="min-w-0">
           <span className="block max-w-36 truncate font-medium text-[#2f2b22]">
-            {modelRoutingMode === 'auto' ? 'Auto 推荐' : activeProvider.label}
+            {activeLabel}
           </span>
           {!compact ? (
-            <span className="block max-w-40 truncate text-[11px] text-[#8f897a]">
-              {modelRoutingMode === 'auto'
-                ? '秘书长自动选择模型'
-                : activeProvider.type === 'scallion_proxy'
-                  ? '内置代理'
-                  : activeProvider.modelName}
+            <span className="block max-w-44 truncate text-[11px] text-[#8f897a]">
+              {activeSubLabel}
             </span>
           ) : null}
         </span>
-        <ChevronDown size={13} />
-      </summary>
+        <ChevronDown size={13} className={`transition ${open ? 'rotate-180' : ''}`} />
+      </button>
 
-      <div className="absolute right-0 bottom-[calc(100%+10px)] z-50 w-[min(380px,calc(100vw-24px))] overflow-hidden rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-2 shadow-[0_18px_60px_rgba(43,34,19,0.16)]">
-        <div className="mb-2 flex items-center justify-between px-2 py-1">
-          <div className="text-xs font-semibold text-[#2f2b22]">选择写作模型</div>
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsOpen(true)
-              closeOpenDetails()
-            }}
-            className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-[#6f7168] transition hover:bg-[#f4ead8] hover:text-[#171714]"
-          >
-            <Settings2 size={12} />
-            设置
-          </button>
-        </div>
-
-        <div className="max-h-[min(360px,calc(100vh-180px))] space-y-3 overflow-y-auto p-1">
-          <section>
-            <button
-              type="button"
-              onClick={selectAuto}
-              className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
-                modelRoutingMode === 'auto'
-                  ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
-                  : 'border-[#d7aa4f]/45 bg-[#fff9ed] text-[#4f4a3d] hover:border-[#d7aa4f]/80'
-              }`}
+      {open && popoverRect
+        ? createPortal(
+            <div
+              id="papyrus-model-selector-popover"
+              role="menu"
+              className="fixed z-[90] overflow-hidden rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-2 shadow-[0_18px_60px_rgba(43,34,19,0.16)] papyrus-window-enter"
+              style={{
+                left: popoverRect.left,
+                top: popoverRect.top,
+                width: popoverRect.width,
+                maxHeight: popoverRect.maxHeight,
+              }}
             >
-              <span className="flex min-w-0 items-start gap-2">
-                <Route size={15} className="mt-0.5 shrink-0" />
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-semibold">Auto 推荐</span>
-                  <span className={`block truncate text-xs ${modelRoutingMode === 'auto' ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
-                    推荐开启：规划、执行、审查会自动匹配可用模型
-                  </span>
-                </span>
-              </span>
-              {modelRoutingMode === 'auto' ? <Check size={15} /> : <ShieldCheck size={15} />}
-            </button>
-          </section>
-
-          {groups.map((group) => (
-            <section key={group.title}>
-              <div className="mb-1 px-1 text-[11px] font-medium uppercase text-[#9d988a]">
-                {group.title}
+              <div className="mb-2 flex items-center justify-between px-2 py-1">
+                <div className="text-xs font-semibold text-[#2f2b22]">选择写作模型</div>
+                <button
+                  type="button"
+                  onClick={openSettings}
+                  className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-[#6f7168] transition hover:bg-[#f4ead8] hover:text-[#171714]"
+                >
+                  <Settings2 size={12} />
+                  设置
+                </button>
               </div>
-              <div className="space-y-1">
-                {group.providers.map((provider) => {
-                  const active = modelRoutingMode === 'manual' && provider.id === activeProviderId
-                  const usable =
-                    provider.type === 'scallion_proxy' ||
-                    (canCallProvider(provider) && isProviderValidated(provider))
 
-                  return (
-                    <button
-                      key={provider.id}
-                      type="button"
-                      onClick={() => selectProvider(provider.id)}
-                      className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
-                        active
-                          ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
-                          : 'border-transparent text-[#5f6159] hover:border-[#e8ddc7] hover:bg-[#fffdf7]'
-                      }`}
-                    >
+              <div
+                className="papyrus-scrollbar space-y-3 overflow-y-auto p-1"
+                style={{ maxHeight: popoverRect.maxHeight - 44 }}
+              >
+                <section>
+                  <button
+                    type="button"
+                    onClick={selectAuto}
+                    className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
+                      modelRoutingMode === 'auto'
+                        ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
+                        : 'border-[#d7aa4f]/45 bg-[#fff9ed] text-[#4f4a3d] hover:border-[#d7aa4f]/80'
+                    }`}
+                  >
+                    <span className="flex min-w-0 items-start gap-2">
+                      <Route size={15} className="mt-0.5 shrink-0" />
                       <span className="min-w-0">
-                        <span className="block truncate text-sm font-medium">{provider.label}</span>
-                        <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
-                          {provider.modelName || '未填写模型名'} · {contextLabel(getEffectiveContextLimit(provider))}
+                        <span className="block truncate text-sm font-semibold">Auto 推荐</span>
+                        <span className={`block truncate text-xs ${modelRoutingMode === 'auto' ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
+                          推荐开启：规划、执行、审查会自动匹配可用模型
                         </span>
                       </span>
-                      {active ? (
-                        <Check size={15} />
-                      ) : usable ? (
-                        <ShieldCheck size={15} />
-                      ) : (
-                        <TriangleAlert size={15} />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-          ))}
-        </div>
-      </div>
-    </details>
-  )
-}
+                    </span>
+                    {modelRoutingMode === 'auto' ? <Check size={15} /> : <ShieldCheck size={15} />}
+                  </button>
+                </section>
 
-function closeOpenDetails() {
-  document.querySelectorAll('details[open]').forEach((node) => {
-    node.removeAttribute('open')
-  })
+                {scallionModels.length ? (
+                  <section>
+                    <div className="mb-1 flex items-center justify-between px-1 text-[11px] font-medium uppercase text-[#9d988a]">
+                      <span>主站可用模型</span>
+                      <span>{scallionModels.length} 个</span>
+                    </div>
+                    <div className="space-y-1">
+                      {scallionModels.map((model) => {
+                        const active =
+                          modelRoutingMode === 'manual' &&
+                          activeProviderId === 'qwen36' &&
+                          providerConfigs.qwen36.modelName === model.modelName
+                        const disabled = model.available === false
+
+                        return (
+                          <button
+                            key={model.id}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => selectScallionModel(model)}
+                            className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                              active
+                                ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
+                                : 'border-transparent text-[#5f6159] hover:border-[#e8ddc7] hover:bg-[#fffdf7]'
+                            }`}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-medium">{model.label}</span>
+                              <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
+                                {model.modelName} · {contextLabel(model.contextWindowTokens ?? providerConfigs.qwen36.contextWindowTokens)}
+                                {model.tier ? ` · ${model.tier}` : ''}
+                              </span>
+                            </span>
+                            {active ? <Check size={15} /> : <ShieldCheck size={15} />}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                ) : null}
+
+                {groups.map((group) => (
+                  <section key={group.title}>
+                    <div className="mb-1 px-1 text-[11px] font-medium uppercase text-[#9d988a]">
+                      {group.title}
+                    </div>
+                    <div className="space-y-1">
+                      {group.providers.map((provider) => {
+                        const active = modelRoutingMode === 'manual' && provider.id === activeProviderId
+                        const usable =
+                          provider.type === 'scallion_proxy' ||
+                          (canCallProvider(provider) && isProviderValidated(provider))
+
+                        return (
+                          <button
+                            key={provider.id}
+                            type="button"
+                            onClick={() => selectProvider(provider.id)}
+                            className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
+                              active
+                                ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
+                                : 'border-transparent text-[#5f6159] hover:border-[#e8ddc7] hover:bg-[#fffdf7]'
+                            }`}
+                          >
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-medium">
+                                {provider.id === 'qwen36' ? currentScallionModel?.label || provider.label : provider.label}
+                              </span>
+                              <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
+                                {provider.modelName || '未填写模型名'} · {contextLabel(getEffectiveContextLimit(provider))}
+                              </span>
+                            </span>
+                            {active ? (
+                              <Check size={15} />
+                            ) : usable ? (
+                              <ShieldCheck size={15} />
+                            ) : (
+                              <TriangleAlert size={15} />
+                            )}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+
+              <div
+                aria-hidden="true"
+                className={`absolute right-5 size-3 rotate-45 border-[#e8ddc7] bg-[#fffefa] ${
+                  popoverRect.placement === 'top'
+                    ? '-bottom-1.5 border-b border-r'
+                    : '-top-1.5 border-l border-t'
+                }`}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  )
 }
 
 function contextLabel(tokens: number) {

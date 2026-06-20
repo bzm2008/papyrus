@@ -1101,7 +1101,7 @@ type AppState = TokenSnapshot & {
   setUpdateState: (patch: UpdateStatePatch) => void
   updateProviderModelMetadata: (
     providerId: ProviderId,
-    patch: { contextWindowTokens?: number; modelName?: string },
+    patch: { contextWindowTokens?: number; modelName?: string; label?: string },
   ) => void
   updateProviderConfig: (
     providerId: ProviderId,
@@ -2836,6 +2836,7 @@ export const useAppStore = create<AppState>()(
 
           const provider = {
             ...existing,
+            label: patch.label?.trim() || existing.label,
             serverContextWindowTokens:
               patch.contextWindowTokens ?? existing.serverContextWindowTokens,
             modelName: patch.modelName?.trim() || existing.modelName,
@@ -2912,15 +2913,22 @@ export const useAppStore = create<AppState>()(
       setScallionModelMetadata: (scallionModels) =>
         set((state) => {
           const normalized = sanitizeScallionModels(scallionModels)
-          const primary = normalized.find((model) => model.available) ?? normalized[0]
+          const currentProvider = state.providerConfigs.qwen36
+          const primary =
+            normalized.find(
+              (model) => model.available && model.modelName === currentProvider.modelName,
+            ) ??
+            normalized.find((model) => model.available) ??
+            normalized[0]
 
           if (!primary) {
             return { scallionModels: normalized }
           }
 
-          const provider = state.providerConfigs.qwen36
+          const provider = currentProvider
           const updatedProvider = {
             ...provider,
+            label: primary.label || provider.label,
             modelName: primary.modelName || provider.modelName,
             serverContextWindowTokens: primary.contextWindowTokens ?? provider.serverContextWindowTokens,
           }

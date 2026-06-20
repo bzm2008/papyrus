@@ -71,7 +71,7 @@ export const defaultProviderConfigs: Record<ProviderId, LlmProviderConfig> = {
   qwen36: {
     id: 'qwen36',
     type: 'scallion_proxy',
-    label: 'qwen3.6',
+    label: 'Scallion 内置模型',
     baseUrl: 'https://scallion.uno/api/papyrus/llm',
     apiKey: '',
     modelName: 'astron-code-latest',

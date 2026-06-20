@@ -732,6 +732,7 @@ function ThinkingEffortControl({
     { value: 'ultra_hive', label: 'ultra+hive' },
   ]
   const hiveActive = value === 'ultra_hive'
+  const activeIndex = Math.max(0, options.findIndex((option) => option.value === value))
   const hiveTitle =
     'ultra+hive 蜂巢模式：最大思考强度，会调度多个专长 Agent 小队，适合长文、研究、合规、跨文档、复杂运营和 /goal；优先完成质量，并用缓存和摘要减少重复消耗。'
 
@@ -756,6 +757,33 @@ function ThinkingEffortControl({
           transition={{ duration: 2.4, repeat: shouldReduceMotion ? 0 : Infinity, ease: 'easeInOut' }}
         />
       ) : null}
+      <motion.span
+        aria-hidden="true"
+        className={`pointer-events-none absolute top-1 bottom-1 z-[1] rounded-lg shadow-[0_4px_12px_rgba(32,32,29,0.18)] ${
+          hiveActive ? 'bg-[#2f2a1a] ring-1 ring-[#d7aa4f]/70' : 'bg-[#20201d]'
+        }`}
+        style={{
+          width: 'calc(25% - 2px)',
+          left: `calc(4px + ${activeIndex * 25}% - ${activeIndex * 2}px)`,
+        }}
+        animate={
+          shouldReduceMotion
+            ? undefined
+            : hiveActive
+              ? {
+                  boxShadow: [
+                    '0 4px 12px rgba(32,32,29,0.18), 0 0 0 rgba(215,170,79,0)',
+                    '0 5px 16px rgba(32,32,29,0.2), 0 0 16px rgba(215,170,79,0.34)',
+                    '0 4px 12px rgba(32,32,29,0.18), 0 0 0 rgba(215,170,79,0)',
+                  ],
+                }
+              : undefined
+        }
+        transition={{
+          left: { type: 'spring', stiffness: 520, damping: 38, mass: 0.62 },
+          boxShadow: { duration: 2.2, repeat: shouldReduceMotion || !hiveActive ? 0 : Infinity, ease: 'easeInOut' },
+        }}
+      />
       {options.map((option) => {
         const active = value === option.value
         const isHive = option.value === 'ultra_hive'
@@ -771,15 +799,7 @@ function ThinkingEffortControl({
               active ? 'text-[#fffefa]' : 'text-[#6f7168] hover:text-[#20201d]'
             }`}
           >
-            {active ? (
-              <motion.span
-                layoutId="thinking-effort-active"
-                className={`absolute inset-0 rounded-lg shadow-[0_4px_12px_rgba(32,32,29,0.18)] ${
-                  isHive ? 'bg-[#2f2a1a] ring-1 ring-[#d7aa4f]/70' : 'bg-[#20201d]'
-                }`}
-                transition={{ type: 'spring', stiffness: 540, damping: 36, mass: 0.62 }}
-              />
-            ) : (
+            {!active ? (
               <motion.span
                 className="absolute inset-0 rounded-lg bg-[#fffefa]"
                 initial={false}
@@ -787,7 +807,7 @@ function ThinkingEffortControl({
                 whileHover={{ opacity: 0.86 }}
                 transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
               />
-            )}
+            ) : null}
             <motion.span
               className="relative z-10 block truncate"
               animate={shouldReduceMotion ? undefined : { y: active ? -0.5 : 0 }}
