@@ -106,15 +106,15 @@ function MainWorkbench() {
       data-vibe={activeVibeId}
       className="papyrus-grain flex h-screen min-h-0 flex-col overflow-hidden text-[#171714]"
     >
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#e1dccf] bg-[#fffefa] px-4">
-        <div className="flex items-center gap-3">
+      <header className="papyrus-toolbar grid h-12 shrink-0 grid-cols-[minmax(180px,1fr)_auto_minmax(180px,1fr)] items-center border-b px-3">
+        <div className="flex min-w-0 items-center gap-2.5">
           <BrandMark size="sm" />
-          <div className="leading-tight">
-            <div className="flex items-center gap-2 text-sm font-semibold">
+          <div className="min-w-0 leading-tight">
+            <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
               Papyrus
-              <Sparkles size={13} className="text-[#31a96b]" />
+              <Sparkles size={12} className="shrink-0 text-[#31a96b]" />
             </div>
-            <div className="text-xs text-[#6f7168]">全能文学与文科写作工作台</div>
+            <div className="truncate text-[11px] text-[#6f7168]">文学与文科写作工作台</div>
           </div>
         </div>
 
@@ -124,9 +124,9 @@ function MainWorkbench() {
           type="button"
           title="打开模型与全局设置"
           onClick={() => setSettingsOpen(true)}
-          className="papyrus-icon-button size-9 rounded-lg"
+          className="papyrus-icon-button ml-auto size-8 rounded-lg"
         >
-          <Settings size={18} />
+          <Settings size={16} />
         </button>
       </header>
 
@@ -151,11 +151,11 @@ function MainWorkbench() {
             <motion.div
               key={mode}
               className="h-full min-h-0"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-            >
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          >
               {isFlowMode ? <FlowWorkspace /> : <EditorPane />}
             </motion.div>
           </AnimatePresence>

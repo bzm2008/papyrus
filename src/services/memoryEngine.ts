@@ -1,4 +1,5 @@
 import { estimateTokens } from './tokenizer'
+import { suggestUserMemoryFromText } from './userMemoryService'
 import {
   useAppStore,
   type AgentMemoryKind,
@@ -184,6 +185,8 @@ export function observeAgentRun(observation: MemoryObservation) {
   for (const memory of extractStableUserMemories(run.prompt, run.id)) {
     memories.push(memory)
   }
+
+  suggestUserMemoryFromText(run.prompt, run.id)
 
   return memories
 }

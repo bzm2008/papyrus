@@ -20,15 +20,10 @@ export type { CustomContextTier, LlmProviderConfig, ModelContextSource, Provider
 
 export type AppMode = 'companion' | 'flow'
 export type ColumnMode = 1 | 2 | 3
-export type FlowAgentId =
-  | 'writer'
-  | 'researcher'
-  | 'critic'
-  | 'dramatist'
-  | 'stylist'
-  | 'proofreader'
-  | 'archivist'
+export type StudioAgentId = string
+export type FlowAgentId = StudioAgentId
 export type FlowReviewMode = 'auto' | 'review'
+export type FlowThinkingEffort = 'low' | 'medium' | 'high' | 'max'
 export type ChatRole = 'user' | 'assistant' | 'system'
 export type LlmRunState = 'idle' | 'running' | 'error'
 export type CompressionState = 'idle' | 'running' | 'error'
@@ -49,6 +44,9 @@ export type AgentMemoryKind =
   | 'remote_contact'
   | 'task_pattern'
   | 'decision'
+  | 'identity'
+  | 'habit'
+  | 'constraint'
 export type AgentMemoryStatus = 'active' | 'tentative' | 'archived'
 export type MaintenanceTab = 'connections' | 'models' | 'memory'
 export type MaintenanceCheckId = 'tauri' | 'sqlite' | 'llm'
@@ -99,6 +97,17 @@ export type RemoteRelayPlatform =
   | 'custom'
 export type RemoteRelayMode = 'companion' | 'flow'
 export type RemoteRelayStatus = 'idle' | 'connecting' | 'online' | 'error'
+export type RemotePlatformCredentialStatus = 'idle' | 'testing' | 'ok' | 'error'
+
+export type RemotePlatformCredential = {
+  platform: Extract<RemoteRelayPlatform, 'feishu' | 'qq' | 'wecom'>
+  appId: string
+  secret: string
+  enabled: boolean
+  status: RemotePlatformCredentialStatus
+  lastError?: string
+  updatedAt?: number
+}
 
 export type ScallionAuthStatus =
   | 'idle'
@@ -479,12 +488,211 @@ export type McpServerConfig = {
   updatedAt: number
 }
 
+export type QueuedUserInputStatus = 'queued' | 'guidance' | 'sending'
+
+export type QueuedUserInput = {
+  id: string
+  content: string
+  status: QueuedUserInputStatus
+  createdAt: number
+  updatedAt: number
+  guidedAt?: number
+}
+
+export type GoalJudgeVerdict = 'continue' | 'complete' | 'blocked'
+
+export type GoalJudgeResult = {
+  verdict: GoalJudgeVerdict
+  summary: string
+  evidence: string[]
+  nextStep: string
+  checkedAt: number
+}
+
+export type GoalCheckpoint = {
+  id: string
+  goalId: string
+  title: string
+  summary: string
+  judge: GoalJudgeResult
+  createdAt: number
+}
+
+export type SecretaryGoalStatus = 'active' | 'paused' | 'completed' | 'blocked' | 'cancelled'
+
+export type SecretaryGoal = {
+  id: string
+  title: string
+  request: string
+  acceptanceCriteria: string[]
+  phasePlan: string[]
+  currentProgress: string
+  status: SecretaryGoalStatus
+  createdAt: number
+  updatedAt: number
+}
+
+export type StudioAgentCategory =
+  | 'core'
+  | 'writing'
+  | 'academic'
+  | 'operations'
+  | 'marketing'
+  | 'professional'
+  | 'product'
+  | 'review'
+
+export type StudioAgentOutputType =
+  | 'draft'
+  | 'research'
+  | 'critique'
+  | 'strategy'
+  | 'compliance'
+  | 'summary'
+
+export type CustomStudioAgent = {
+  id: StudioAgentId
+  name: string
+  shortName: string
+  category: StudioAgentCategory
+  description: string
+  taskTypes: string[]
+  keywords: string[]
+  systemPrompt: string
+  outputRules: string[]
+  outputType: StudioAgentOutputType
+  enabled: boolean
+  builtIn: false
+  createdAt: number
+  updatedAt: number
+}
+
+export type UserMemoryCategory =
+  | 'identity'
+  | 'personality'
+  | 'habit'
+  | 'style'
+  | 'preference'
+  | 'constraint'
+  | 'project'
+  | 'other'
+
+export type UserMemoryMode = 'off' | 'confirm' | 'low_risk_auto'
+
+export type UserMemoryProfile = {
+  enabled: boolean
+  mode: UserMemoryMode
+  displayName: string
+  identity: string
+  personality: string
+  writingHabits: string
+  stylePreferences: string
+  constraints: string
+  updatedAt?: number
+}
+
+export type UserMemoryRecord = {
+  id: string
+  category: UserMemoryCategory
+  content: string
+  source: 'manual' | 'agent_suggestion' | 'towrite' | 'agent_observation'
+  enabled: boolean
+  confidence: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type ProjectWritingMemory = {
+  id: string
+  projectId?: string
+  chatId?: string
+  title: string
+  content: string
+  tags: string[]
+  enabled: boolean
+  source: 'manual' | 'towrite' | 'resource' | 'story' | 'agent'
+  createdAt: number
+  updatedAt: number
+}
+
+export type TowriteSuggestion = {
+  id: string
+  scope: 'global' | 'project'
+  title: string
+  content: string
+  reason: string
+  status: 'pending' | 'accepted' | 'rejected'
+  sourceRunId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type DocumentChangeStat = {
+  id: string
+  chatId?: string
+  articleId?: string
+  agentRunId?: string
+  patchId?: string
+  title: string
+  operation: DocumentPatchOperation
+  insertedChars: number
+  deletedChars: number
+  changedChars: number
+  createdAt: number
+}
+
 type CustomAgentSkillInput = Omit<CustomAgentSkill, 'id' | 'createdAt' | 'updatedAt'> & {
   id?: string
 }
 
 type McpServerConfigInput = Omit<McpServerConfig, 'id' | 'createdAt' | 'updatedAt'> & {
   id?: string
+}
+
+type CustomStudioAgentInput = Omit<CustomStudioAgent, 'id' | 'createdAt' | 'updatedAt' | 'builtIn'> & {
+  id?: string
+  createdAt?: number
+  updatedAt?: number
+}
+
+type RemotePlatformCredentialInput = Partial<RemotePlatformCredential> & {
+  platform: RemotePlatformCredential['platform']
+}
+
+type UserMemoryRecordInput = Omit<UserMemoryRecord, 'id' | 'createdAt' | 'updatedAt'> & {
+  id?: string
+  createdAt?: number
+  updatedAt?: number
+}
+
+type ProjectWritingMemoryInput = Omit<ProjectWritingMemory, 'id' | 'createdAt' | 'updatedAt'> & {
+  id?: string
+  createdAt?: number
+  updatedAt?: number
+}
+
+type TowriteSuggestionInput = Omit<TowriteSuggestion, 'id' | 'createdAt' | 'updatedAt' | 'status'> & {
+  id?: string
+  status?: TowriteSuggestion['status']
+  createdAt?: number
+  updatedAt?: number
+}
+
+type DocumentChangeStatInput = Omit<DocumentChangeStat, 'id' | 'createdAt'> & {
+  id?: string
+  createdAt?: number
+}
+
+type SecretaryGoalInput = Omit<SecretaryGoal, 'id' | 'createdAt' | 'updatedAt' | 'status'> & {
+  id?: string
+  status?: SecretaryGoalStatus
+  createdAt?: number
+  updatedAt?: number
+}
+
+type GoalCheckpointInput = Omit<GoalCheckpoint, 'id' | 'createdAt'> & {
+  id?: string
+  createdAt?: number
 }
 
 type TokenSnapshot = {
@@ -514,6 +722,7 @@ type AppState = TokenSnapshot & {
   activeProviderId: ProviderId
   activeAgentId: FlowAgentId
   flowReviewMode: FlowReviewMode
+  flowThinkingEffort: FlowThinkingEffort
   activeVibeId: VibeId
   vibeIntensity: number
   contextLimitTokens: number
@@ -550,6 +759,9 @@ type AppState = TokenSnapshot & {
   resources: ImportedResource[]
   pendingDocumentPatch?: DocumentPatch
   secretaryPlanDraft?: SecretaryPlanDraft
+  queuedUserInputs: QueuedUserInput[]
+  activeSecretaryGoal?: SecretaryGoal
+  goalCheckpoints: GoalCheckpoint[]
   llmRunState: LlmRunState
   llmStatusMessage: string
   updateStatus: UpdateStatus
@@ -571,9 +783,19 @@ type AppState = TokenSnapshot & {
   remoteRelayStatus: RemoteRelayStatus
   remoteRelayMessage: string
   remoteRelayLastJobAt?: number
+  remotePlatformCredentials: RemotePlatformCredential[]
   providerConfigs: Record<ProviderId, LlmProviderConfig>
+  disabledBuiltInStudioAgentIds: StudioAgentId[]
+  customStudioAgents: CustomStudioAgent[]
   customAgentSkills: CustomAgentSkill[]
   mcpServers: McpServerConfig[]
+  userMemoryProfile: UserMemoryProfile
+  userMemoryRecords: UserMemoryRecord[]
+  projectWritingMemories: ProjectWritingMemory[]
+  globalTowriteMarkdown: string
+  projectTowriteMarkdown: string
+  towriteSuggestions: TowriteSuggestion[]
+  documentChangeStats: DocumentChangeStat[]
   storyProjects: StoryProject[]
   activeStoryProjectId?: string
   storyContracts: StoryContract[]
@@ -585,6 +807,7 @@ type AppState = TokenSnapshot & {
   openLoops: OpenLoop[]
   readerPromises: ReaderPromise[]
   isStoryDashboardOpen: boolean
+  isUsageCollapsed: boolean
   setMode: (mode: AppMode) => void
   setColumnMode: (columnMode: ColumnMode) => void
   toggleLeftCollapsed: () => void
@@ -592,6 +815,7 @@ type AppState = TokenSnapshot & {
   setActiveProviderId: (providerId: ProviderId) => void
   setActiveAgentId: (agentId: FlowAgentId) => void
   setFlowReviewMode: (reviewMode: FlowReviewMode) => void
+  setFlowThinkingEffort: (effort: FlowThinkingEffort) => void
   setActiveVibeId: (vibeId: VibeId) => void
   setVibeIntensity: (intensity: number) => void
   setArticleTitle: (title: string) => void
@@ -669,6 +893,14 @@ type AppState = TokenSnapshot & {
   ) => void
   approveSecretaryPlanDraft: () => void
   clearSecretaryPlanDraft: () => void
+  enqueueUserInput: (content: string) => QueuedUserInput | undefined
+  updateQueuedUserInput: (id: string, patch: Partial<Pick<QueuedUserInput, 'content' | 'status'>>) => void
+  removeQueuedUserInput: (id: string) => void
+  sendQueuedInputAsGuidance: (id: string) => QueuedUserInput | undefined
+  createSecretaryGoal: (goal: SecretaryGoalInput) => SecretaryGoal
+  updateSecretaryGoal: (id: string, patch: Partial<Omit<SecretaryGoal, 'id' | 'createdAt'>>) => void
+  addGoalCheckpoint: (checkpoint: GoalCheckpointInput) => GoalCheckpoint
+  clearSecretaryGoal: () => void
   upsertCustomAgentSkill: (skill: CustomAgentSkillInput) => CustomAgentSkill
   deleteCustomAgentSkill: (id: string) => void
   toggleCustomAgentSkill: (id: string, enabled: boolean) => void
@@ -678,6 +910,29 @@ type AppState = TokenSnapshot & {
     id: string,
     patch: Pick<McpServerConfig, 'status'> & { lastError?: string },
   ) => void
+  toggleStudioAgent: (agentId: StudioAgentId, enabled: boolean) => void
+  upsertCustomStudioAgent: (agent: CustomStudioAgentInput) => CustomStudioAgent
+  deleteCustomStudioAgent: (id: StudioAgentId) => void
+  upsertRemotePlatformCredential: (credential: RemotePlatformCredentialInput) => RemotePlatformCredential
+  updateRemotePlatformCredentialStatus: (
+    platform: RemotePlatformCredential['platform'],
+    patch: Pick<RemotePlatformCredential, 'status'> & { lastError?: string },
+  ) => void
+  setUserMemoryProfile: (patch: Partial<UserMemoryProfile>) => void
+  upsertUserMemoryRecord: (record: UserMemoryRecordInput) => UserMemoryRecord
+  deleteUserMemoryRecord: (id: string) => void
+  toggleUserMemoryRecord: (id: string, enabled: boolean) => void
+  clearUserMemoryRecords: () => void
+  upsertProjectWritingMemory: (memory: ProjectWritingMemoryInput) => ProjectWritingMemory
+  deleteProjectWritingMemory: (id: string) => void
+  clearProjectWritingMemories: () => void
+  setGlobalTowriteMarkdown: (markdown: string) => void
+  setProjectTowriteMarkdown: (markdown: string) => void
+  addTowriteSuggestion: (suggestion: TowriteSuggestionInput) => TowriteSuggestion
+  updateTowriteSuggestion: (id: string, patch: Partial<Omit<TowriteSuggestion, 'id'>>) => void
+  clearTowriteSuggestions: () => void
+  recordDocumentChangeStat: (stat: DocumentChangeStatInput) => DocumentChangeStat
+  clearDocumentChangeStats: (chatId?: string) => void
   addResources: (resources: ImportedResource[]) => void
   updateResource: (id: string, patch: Partial<ImportedResource>) => void
   deleteResource: (id: string) => void
@@ -736,6 +991,7 @@ type AppState = TokenSnapshot & {
   upsertOpenLoops: (loops: Array<Omit<OpenLoop, 'id' | 'updatedAt'>>) => void
   upsertReaderPromises: (promises: Array<Omit<ReaderPromise, 'id' | 'updatedAt'>>) => void
   setStoryDashboardOpen: (open: boolean) => void
+  setUsageCollapsed: (collapsed: boolean) => void
   setFirstLaunchComplete: () => void
   setEnvReady: (ready: boolean) => void
   setMaintenanceTab: (tab: MaintenanceTab) => void
@@ -745,10 +1001,10 @@ type AppState = TokenSnapshot & {
 }
 
 const initialEditorText =
-  '论记忆、材料与判断\n\n这里是 Papyrus 的主编辑区。\n\n你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。\n\n在秘书模式中，主笔会根据任务拆解待办、调用子 Agent，并在需要时把正文写回文稿。'
+  '论记忆、材料与判断\n\n这里是 Papyrus 的主编辑区。\n\n你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。\n\n在秘书模式中，秘书长会根据任务拆解待办、调用工作室 Agent，并在需要时把正文写回文稿。'
 
 const initialEditorHtml =
-  '<h1>论记忆、材料与判断</h1><p>这里是 Papyrus 的主编辑区。</p><p>你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。</p><p>在秘书模式中，主笔会根据任务拆解待办、调用子 Agent，并在需要时把正文写回文稿。</p>'
+  '<h1>论记忆、材料与判断</h1><p>这里是 Papyrus 的主编辑区。</p><p>你可以像 Word 或 WPS 一样直接编辑文稿，也可以选中文本呼出伴写菜单，让 AI 做审查、纠错、查重、降噪或按指令改写。</p><p>在秘书模式中，秘书长会根据任务拆解待办、调用工作室 Agent，并在需要时把正文写回文稿。</p>'
 
 const initialFlowMessages: FlowMessage[] = [
   {
@@ -756,7 +1012,7 @@ const initialFlowMessages: FlowMessage[] = [
     role: 'assistant',
     agentId: 'writer',
     content:
-      '秘书编队已就绪。给我一个主题、材料清单或章节目标，我会协调主笔、寻根、刺客和其他专业 Agent 推进。',
+      '秘书编队已就绪。给我一个主题、材料清单或章节目标，我会由秘书长协调工作室 Agent 推进。',
     createdAt: Date.now(),
   },
 ]
@@ -803,6 +1059,7 @@ export const useAppStore = create<AppState>()(
       activeProviderId: defaultActiveProviderId,
       activeAgentId: 'writer',
       flowReviewMode: 'auto',
+      flowThinkingEffort: 'medium',
       activeVibeId: defaultVibeId,
       vibeIntensity: 58,
       contextLimitTokens: defaultContextLimitTokens,
@@ -862,6 +1119,9 @@ export const useAppStore = create<AppState>()(
       resources: [],
       pendingDocumentPatch: undefined,
       secretaryPlanDraft: undefined,
+      queuedUserInputs: [],
+      activeSecretaryGoal: undefined,
+      goalCheckpoints: [],
       llmRunState: 'idle',
       llmStatusMessage: 'LLM 待命',
       updateStatus: 'idle',
@@ -883,9 +1143,30 @@ export const useAppStore = create<AppState>()(
       remoteRelayStatus: 'idle',
       remoteRelayMessage: '远程中继未启用',
       remoteRelayLastJobAt: undefined,
+      remotePlatformCredentials: defaultRemotePlatformCredentials(),
       providerConfigs: defaultProviderConfigs,
+      disabledBuiltInStudioAgentIds: [],
+      customStudioAgents: [],
       customAgentSkills: [],
       mcpServers: [],
+      userMemoryProfile: {
+        enabled: true,
+        mode: 'confirm',
+        displayName: '',
+        identity: '',
+        personality: '',
+        writingHabits: '',
+        stylePreferences: '',
+        constraints: '',
+      },
+      userMemoryRecords: [],
+      projectWritingMemories: [],
+      globalTowriteMarkdown:
+        '# towrite.md\n\n## 个人记忆\n\n- 在这里记录稳定的身份、习惯、写作偏好和长期约束。\n\n## 写作默认规则\n\n- 用户声音和真实意图优先于模板化表达。\n',
+      projectTowriteMarkdown:
+        '# project-towrite.md\n\n## 项目规则\n\n- 在这里记录人物、术语、风格规则、来源资料和写作决策。\n\n## 待解决问题\n\n- 未确认的设定和问题要明确标注。\n',
+      towriteSuggestions: [],
+      documentChangeStats: [],
       storyProjects: [],
       activeStoryProjectId: undefined,
       storyContracts: [],
@@ -897,6 +1178,7 @@ export const useAppStore = create<AppState>()(
       openLoops: [],
       readerPromises: [],
       isStoryDashboardOpen: false,
+      isUsageCollapsed: false,
       ...calculateTokenSnapshot(initialEditorText, initialFlowMessages, ''),
       setMode: (mode) => set({ mode }),
       setColumnMode: (columnMode) => set({ columnMode }),
@@ -916,6 +1198,7 @@ export const useAppStore = create<AppState>()(
         }),
       setActiveAgentId: (activeAgentId) => set({ activeAgentId }),
       setFlowReviewMode: () => set({ flowReviewMode: 'auto' }),
+      setFlowThinkingEffort: (flowThinkingEffort) => set({ flowThinkingEffort }),
       setActiveVibeId: (activeVibeId) => set({ activeVibeId }),
       setVibeIntensity: (vibeIntensity) =>
         set({ vibeIntensity: Math.max(0, Math.min(100, Math.round(vibeIntensity))) }),
@@ -1590,6 +1873,226 @@ export const useAppStore = create<AppState>()(
             : undefined,
         })),
       clearSecretaryPlanDraft: () => set({ secretaryPlanDraft: undefined }),
+      enqueueUserInput: (content) => {
+        const trimmed = content.trim()
+
+        if (!trimmed) {
+          return undefined
+        }
+
+        const now = Date.now()
+        const queued: QueuedUserInput = {
+          id: globalThis.crypto?.randomUUID?.() ?? `queued-input-${now}`,
+          content: trimmed,
+          status: 'queued',
+          createdAt: now,
+          updatedAt: now,
+        }
+
+        set((state) => ({
+          queuedUserInputs: [...state.queuedUserInputs, queued].slice(-20),
+        }))
+
+        return queued
+      },
+      updateQueuedUserInput: (id, patch) =>
+        set((state) => ({
+          queuedUserInputs: state.queuedUserInputs.map((input) =>
+            input.id === id
+              ? {
+                  ...input,
+                  ...patch,
+                  content: patch.content !== undefined ? patch.content.trim() : input.content,
+                  updatedAt: Date.now(),
+                }
+              : input,
+          ),
+        })),
+      removeQueuedUserInput: (id) =>
+        set((state) => ({
+          queuedUserInputs: state.queuedUserInputs.filter((input) => input.id !== id),
+        })),
+      sendQueuedInputAsGuidance: (id) => {
+        let guided: QueuedUserInput | undefined
+
+        set((state) => {
+          const now = Date.now()
+          const nextInputs = state.queuedUserInputs.map((input) => {
+            if (input.id !== id) {
+              return input
+            }
+
+            guided = {
+              ...input,
+              status: 'guidance',
+              guidedAt: now,
+              updatedAt: now,
+            }
+            return guided
+          })
+
+          return { queuedUserInputs: nextInputs }
+        })
+
+        if (guided) {
+          get().addAgentStep({
+            type: 'tool',
+            title: '收到用户引导',
+            status: 'completed',
+            details: guided.content,
+            isExpanded: true,
+            agentId: 'writer',
+            endedAt: Date.now(),
+          })
+          get().addFlowTrace({
+            kind: 'memory',
+            title: '用户引导已加入当前任务',
+            detail: guided.content,
+            status: 'completed',
+            agentId: 'writer',
+            endedAt: Date.now(),
+          })
+        }
+
+        return guided
+      },
+      createSecretaryGoal: (input) => {
+        const now = Date.now()
+        const goal: SecretaryGoal = {
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `secretary-goal-${now}`,
+          title: input.title.trim() || '长程写作目标',
+          request: input.request.trim(),
+          acceptanceCriteria: normalizeStringList(input.acceptanceCriteria).slice(0, 8),
+          phasePlan: normalizeStringList(input.phasePlan).slice(0, 10),
+          currentProgress: input.currentProgress.trim() || '目标已建立，等待秘书模式推进。',
+          status: input.status ?? 'active',
+          createdAt: input.createdAt ?? now,
+          updatedAt: input.updatedAt ?? now,
+        }
+
+        set({ activeSecretaryGoal: goal })
+        return goal
+      },
+      updateSecretaryGoal: (id, patch) =>
+        set((state) => ({
+          activeSecretaryGoal:
+            state.activeSecretaryGoal?.id === id
+              ? {
+                  ...state.activeSecretaryGoal,
+                  ...patch,
+                  title: patch.title?.trim() || state.activeSecretaryGoal.title,
+                  request: patch.request?.trim() || state.activeSecretaryGoal.request,
+                  acceptanceCriteria: patch.acceptanceCriteria
+                    ? normalizeStringList(patch.acceptanceCriteria).slice(0, 8)
+                    : state.activeSecretaryGoal.acceptanceCriteria,
+                  phasePlan: patch.phasePlan
+                    ? normalizeStringList(patch.phasePlan).slice(0, 10)
+                    : state.activeSecretaryGoal.phasePlan,
+                  currentProgress:
+                    patch.currentProgress?.trim() || state.activeSecretaryGoal.currentProgress,
+                  updatedAt: Date.now(),
+                }
+              : state.activeSecretaryGoal,
+        })),
+      addGoalCheckpoint: (input) => {
+        const now = Date.now()
+        const checkpoint: GoalCheckpoint = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `goal-checkpoint-${now}`,
+          title: input.title.trim() || '裁判检查',
+          summary: input.summary.trim(),
+          judge: {
+            verdict: normalizeGoalVerdict(input.judge.verdict),
+            summary: input.judge.summary.trim(),
+            evidence: normalizeStringList(input.judge.evidence).slice(0, 6),
+            nextStep: input.judge.nextStep.trim(),
+            checkedAt: input.judge.checkedAt || now,
+          },
+          createdAt: input.createdAt ?? now,
+        }
+
+        set((state) => ({
+          goalCheckpoints: [
+            checkpoint,
+            ...state.goalCheckpoints.filter((item) => item.id !== checkpoint.id),
+          ].slice(0, 80),
+        }))
+
+        return checkpoint
+      },
+      clearSecretaryGoal: () =>
+        set((state) => ({
+          activeSecretaryGoal: undefined,
+          goalCheckpoints: state.activeSecretaryGoal
+            ? state.goalCheckpoints.filter((checkpoint) => checkpoint.goalId !== state.activeSecretaryGoal?.id)
+            : state.goalCheckpoints,
+        })),
+      toggleStudioAgent: (agentId, enabled) => {
+        if (agentId === 'writer') {
+          return
+        }
+
+        set((state) => {
+          if (state.customStudioAgents.some((agent) => agent.id === agentId)) {
+            return {
+              customStudioAgents: state.customStudioAgents.map((agent) =>
+                agent.id === agentId ? { ...agent, enabled, updatedAt: Date.now() } : agent,
+              ),
+            }
+          }
+
+          const disabled = new Set(state.disabledBuiltInStudioAgentIds)
+          if (enabled) {
+            disabled.delete(agentId)
+          } else {
+            disabled.add(agentId)
+          }
+
+          return {
+            disabledBuiltInStudioAgentIds: Array.from(disabled).filter((id) => id !== 'writer'),
+          }
+        })
+      },
+      upsertCustomStudioAgent: (input) => {
+        const now = Date.now()
+        const existing = input.id
+          ? get().customStudioAgents.find((agent) => agent.id === input.id)
+          : undefined
+        const name = input.name.trim()
+        const agent: CustomStudioAgent = {
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `custom-agent-${now}`,
+          name,
+          shortName: input.shortName.trim() || name.slice(0, 6) || 'Agent',
+          category: normalizeStudioAgentCategory(input.category),
+          description: input.description.trim(),
+          taskTypes: normalizeStringList(input.taskTypes).slice(0, 12),
+          keywords: normalizeStringList(input.keywords).slice(0, 24),
+          systemPrompt: input.systemPrompt.trim(),
+          outputRules: normalizeStringList(input.outputRules).slice(0, 12),
+          outputType: normalizeStudioAgentOutputType(input.outputType),
+          enabled: input.enabled === true,
+          builtIn: false,
+          createdAt: existing?.createdAt ?? input.createdAt ?? now,
+          updatedAt: now,
+        }
+
+        if (!agent.name) {
+          return existing ?? agent
+        }
+
+        set((state) => ({
+          customStudioAgents: [
+            agent,
+            ...state.customStudioAgents.filter((item) => item.id !== agent.id),
+          ].slice(0, 80),
+        }))
+
+        return agent
+      },
+      deleteCustomStudioAgent: (id) =>
+        set((state) => ({
+          customStudioAgents: state.customStudioAgents.filter((agent) => agent.id !== id),
+        })),
       upsertCustomAgentSkill: (input) => {
         const now = Date.now()
         const existing = input.id
@@ -1667,6 +2170,133 @@ export const useAppStore = create<AppState>()(
               ? { ...server, ...patch, updatedAt: Date.now() }
               : server,
           ),
+        })),
+      setUserMemoryProfile: (patch) =>
+        set((state) => ({
+          userMemoryProfile: { ...state.userMemoryProfile, ...patch, updatedAt: Date.now() },
+        })),
+      upsertUserMemoryRecord: (input) => {
+        const now = Date.now()
+        const record: UserMemoryRecord = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `user-memory-${now}`,
+          content: input.content.trim(),
+          confidence: clampNumber(input.confidence, 0.1, 1),
+          createdAt: input.createdAt ?? now,
+          updatedAt: input.updatedAt ?? now,
+        }
+
+        if (!record.content) {
+          return record
+        }
+
+        set((state) => ({
+          userMemoryRecords: [
+            record,
+            ...state.userMemoryRecords.filter((item) => item.id !== record.id),
+          ].slice(0, 160),
+        }))
+
+        return record
+      },
+      deleteUserMemoryRecord: (id) =>
+        set((state) => ({
+          userMemoryRecords: state.userMemoryRecords.filter((record) => record.id !== id),
+        })),
+      toggleUserMemoryRecord: (id, enabled) =>
+        set((state) => ({
+          userMemoryRecords: state.userMemoryRecords.map((record) =>
+            record.id === id ? { ...record, enabled, updatedAt: Date.now() } : record,
+          ),
+        })),
+      clearUserMemoryRecords: () => set({ userMemoryRecords: [] }),
+      upsertProjectWritingMemory: (input) => {
+        const now = Date.now()
+        const memory: ProjectWritingMemory = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `project-memory-${now}`,
+          title: input.title.trim() || '未命名记忆',
+          content: input.content.trim(),
+          tags: normalizeStringList(input.tags),
+          createdAt: input.createdAt ?? now,
+          updatedAt: input.updatedAt ?? now,
+        }
+
+        if (!memory.content) {
+          return memory
+        }
+
+        set((state) => ({
+          projectWritingMemories: [
+            memory,
+            ...state.projectWritingMemories.filter((item) => item.id !== memory.id),
+          ].slice(0, 240),
+        }))
+
+        return memory
+      },
+      deleteProjectWritingMemory: (id) =>
+        set((state) => ({
+          projectWritingMemories: state.projectWritingMemories.filter((memory) => memory.id !== id),
+        })),
+      clearProjectWritingMemories: () => set({ projectWritingMemories: [] }),
+      setGlobalTowriteMarkdown: (globalTowriteMarkdown) => set({ globalTowriteMarkdown }),
+      setProjectTowriteMarkdown: (projectTowriteMarkdown) => set({ projectTowriteMarkdown }),
+      addTowriteSuggestion: (input) => {
+        const now = Date.now()
+        const suggestion: TowriteSuggestion = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `towrite-suggestion-${now}`,
+          title: input.title.trim() || '记忆建议',
+          content: input.content.trim(),
+          reason: input.reason.trim(),
+          status: input.status ?? 'pending',
+          createdAt: input.createdAt ?? now,
+          updatedAt: input.updatedAt ?? now,
+        }
+
+        if (!suggestion.content) {
+          return suggestion
+        }
+
+        set((state) => ({
+          towriteSuggestions: [
+            suggestion,
+            ...state.towriteSuggestions.filter((item) => item.id !== suggestion.id),
+          ].slice(0, 80),
+        }))
+
+        return suggestion
+      },
+      updateTowriteSuggestion: (id, patch) =>
+        set((state) => ({
+          towriteSuggestions: state.towriteSuggestions.map((suggestion) =>
+            suggestion.id === id ? { ...suggestion, ...patch, updatedAt: Date.now() } : suggestion,
+          ),
+        })),
+      clearTowriteSuggestions: () => set({ towriteSuggestions: [] }),
+      recordDocumentChangeStat: (input) => {
+        const now = Date.now()
+        const stat: DocumentChangeStat = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `document-change-${now}`,
+          insertedChars: Math.max(0, Math.round(input.insertedChars)),
+          deletedChars: Math.max(0, Math.round(input.deletedChars)),
+          changedChars: Math.max(0, Math.round(input.changedChars)),
+          createdAt: input.createdAt ?? now,
+        }
+
+        set((state) => ({
+          documentChangeStats: [stat, ...state.documentChangeStats].slice(0, 400),
+        }))
+
+        return stat
+      },
+      clearDocumentChangeStats: (chatId) =>
+        set((state) => ({
+          documentChangeStats: chatId
+            ? state.documentChangeStats.filter((stat) => stat.chatId !== chatId)
+            : [],
         })),
       addResources: (resources) =>
         set((state) => {
@@ -2019,7 +2649,7 @@ export const useAppStore = create<AppState>()(
           remoteRelayAccessKey: patch.accessKey ?? state.remoteRelayAccessKey,
           remoteRelayAllowedPlatforms:
             patch.allowedPlatforms ?? state.remoteRelayAllowedPlatforms,
-          remoteRelayDefaultMode: patch.defaultMode ?? state.remoteRelayDefaultMode,
+          remoteRelayDefaultMode: 'flow',
           remoteRelayPollIntervalSeconds: Math.max(
             8,
             Math.min(120, Math.round(patch.pollIntervalSeconds ?? state.remoteRelayPollIntervalSeconds)),
@@ -2030,6 +2660,55 @@ export const useAppStore = create<AppState>()(
           remoteRelayStatus: patch.status ?? state.remoteRelayStatus,
           remoteRelayMessage: patch.message ?? state.remoteRelayMessage,
           remoteRelayLastJobAt: patch.lastJobAt ?? state.remoteRelayLastJobAt,
+        })),
+      upsertRemotePlatformCredential: (input) => {
+        const now = Date.now()
+        const existing = get().remotePlatformCredentials.find(
+          (item) => item.platform === input.platform,
+        )
+        const credential: RemotePlatformCredential = {
+          platform: input.platform,
+          appId: input.appId ?? existing?.appId ?? '',
+          secret: input.secret ?? existing?.secret ?? '',
+          enabled: input.enabled ?? existing?.enabled ?? false,
+          status: input.status ?? existing?.status ?? 'idle',
+          lastError: input.lastError ?? existing?.lastError,
+          updatedAt: now,
+        }
+
+        set((state) => ({
+          remoteRelayEnabled:
+            credential.enabled ||
+            state.remotePlatformCredentials.some(
+              (item) => item.platform !== credential.platform && item.enabled,
+            ),
+          remoteRelayAllowedPlatforms: ['feishu', 'qq', 'wecom'],
+          remoteRelayDefaultMode: 'flow',
+          remotePlatformCredentials: defaultRemotePlatformCredentials()
+            .map((item) =>
+              item.platform === credential.platform
+                ? credential
+                : state.remotePlatformCredentials.find((saved) => saved.platform === item.platform) ?? item,
+            ),
+        }))
+
+        return credential
+      },
+      updateRemotePlatformCredentialStatus: (platform, patch) =>
+        set((state) => ({
+          remotePlatformCredentials: defaultRemotePlatformCredentials().map((item) => {
+            const existing =
+              state.remotePlatformCredentials.find((saved) => saved.platform === item.platform) ?? item
+
+            return existing.platform === platform
+              ? {
+                  ...existing,
+                  status: patch.status,
+                  lastError: patch.lastError,
+                  updatedAt: Date.now(),
+                }
+              : existing
+          }),
         })),
       upsertStoryProject: (input) => {
         const now = Date.now()
@@ -2172,6 +2851,7 @@ export const useAppStore = create<AppState>()(
           return { readerPromises: [...next, ...state.readerPromises].slice(0, 300) }
         }),
       setStoryDashboardOpen: (isStoryDashboardOpen) => set({ isStoryDashboardOpen }),
+      setUsageCollapsed: (isUsageCollapsed) => set({ isUsageCollapsed }),
       setFirstLaunchComplete: () => set({ isFirstLaunch: false, isEnvReady: false }),
       setEnvReady: (isEnvReady) => set({ isEnvReady }),
       setMaintenanceTab: (maintenanceTab) => set({ maintenanceTab }),
@@ -2207,6 +2887,7 @@ export const useAppStore = create<AppState>()(
         activeProviderId: state.activeProviderId,
         activeAgentId: state.activeAgentId,
         flowReviewMode: 'auto' as const,
+        flowThinkingEffort: state.flowThinkingEffort,
         activeVibeId: state.activeVibeId,
         vibeIntensity: state.vibeIntensity,
         compressionCount: state.compressionCount,
@@ -2234,6 +2915,9 @@ export const useAppStore = create<AppState>()(
         agentRuns: state.agentRuns,
         resources: state.resources,
         pendingDocumentPatch: state.pendingDocumentPatch,
+        queuedUserInputs: state.queuedUserInputs,
+        activeSecretaryGoal: state.activeSecretaryGoal,
+        goalCheckpoints: state.goalCheckpoints,
         scallionUser: state.scallionUser,
         scallionToken: state.scallionToken,
         authStatus: state.authStatus,
@@ -2242,9 +2926,21 @@ export const useAppStore = create<AppState>()(
         remoteRelayChannelId: state.remoteRelayChannelId,
         remoteRelayAccessKey: state.remoteRelayAccessKey,
         remoteRelayAllowedPlatforms: state.remoteRelayAllowedPlatforms,
-        remoteRelayDefaultMode: state.remoteRelayDefaultMode,
+        remoteRelayDefaultMode: 'flow' as const,
         remoteRelayPollIntervalSeconds: state.remoteRelayPollIntervalSeconds,
+        remotePlatformCredentials: state.remotePlatformCredentials,
         providerConfigs: state.providerConfigs,
+        disabledBuiltInStudioAgentIds: state.disabledBuiltInStudioAgentIds,
+        customStudioAgents: state.customStudioAgents,
+        customAgentSkills: state.customAgentSkills,
+        mcpServers: state.mcpServers,
+        userMemoryProfile: state.userMemoryProfile,
+        userMemoryRecords: state.userMemoryRecords,
+        projectWritingMemories: state.projectWritingMemories,
+        globalTowriteMarkdown: state.globalTowriteMarkdown,
+        projectTowriteMarkdown: state.projectTowriteMarkdown,
+        towriteSuggestions: state.towriteSuggestions,
+        documentChangeStats: state.documentChangeStats,
         storyProjects: state.storyProjects,
         activeStoryProjectId: state.activeStoryProjectId,
         storyContracts: state.storyContracts,
@@ -2255,6 +2951,7 @@ export const useAppStore = create<AppState>()(
         storyMemories: state.storyMemories,
         openLoops: state.openLoops,
         readerPromises: state.readerPromises,
+        isUsageCollapsed: state.isUsageCollapsed,
       }),
       merge: (persisted, current) => {
         const persistedState = persisted as Partial<AppState>
@@ -2298,6 +2995,7 @@ export const useAppStore = create<AppState>()(
           activeArticleId,
           activeChatId,
           flowReviewMode: 'auto' as const,
+          flowThinkingEffort: normalizeFlowThinkingEffort(persistedState.flowThinkingEffort),
           articles,
           chatSessions,
           articleTitle: persistedState.articleTitle ?? current.articleTitle,
@@ -2317,6 +3015,9 @@ export const useAppStore = create<AppState>()(
           agentMemoryRecords: persistedState.agentMemoryRecords ?? current.agentMemoryRecords,
           agentRuns: persistedState.agentRuns ?? current.agentRuns,
           activeAgentRunId: undefined,
+          queuedUserInputs: sanitizeQueuedUserInputs(persistedState.queuedUserInputs),
+          activeSecretaryGoal: sanitizeSecretaryGoal(persistedState.activeSecretaryGoal),
+          goalCheckpoints: sanitizeGoalCheckpoints(persistedState.goalCheckpoints),
           updateStatus: 'idle' as const,
           updateMessage: '自动更新待命',
           updateProgress: 0,
@@ -2325,10 +3026,8 @@ export const useAppStore = create<AppState>()(
           remoteRelayEndpoint: persistedState.remoteRelayEndpoint ?? current.remoteRelayEndpoint,
           remoteRelayChannelId: persistedState.remoteRelayChannelId ?? current.remoteRelayChannelId,
           remoteRelayAccessKey: persistedState.remoteRelayAccessKey ?? current.remoteRelayAccessKey,
-          remoteRelayAllowedPlatforms:
-            persistedState.remoteRelayAllowedPlatforms ?? current.remoteRelayAllowedPlatforms,
-          remoteRelayDefaultMode:
-            persistedState.remoteRelayDefaultMode ?? current.remoteRelayDefaultMode,
+          remoteRelayAllowedPlatforms: ['feishu', 'qq', 'wecom'] as RemoteRelayPlatform[],
+          remoteRelayDefaultMode: 'flow' as const,
           remoteRelayPollIntervalSeconds:
             persistedState.remoteRelayPollIntervalSeconds ?? current.remoteRelayPollIntervalSeconds,
           remoteRelayStatus: 'idle' as const,
@@ -2336,9 +3035,34 @@ export const useAppStore = create<AppState>()(
             ? '远程中继等待连接'
             : '远程中继未启用',
           remoteRelayLastJobAt: persistedState.remoteRelayLastJobAt,
+          remotePlatformCredentials: sanitizeRemotePlatformCredentials(
+            persistedState.remotePlatformCredentials,
+          ),
           providerConfigs,
+          disabledBuiltInStudioAgentIds: sanitizeDisabledStudioAgentIds(
+            persistedState.disabledBuiltInStudioAgentIds,
+          ),
+          customStudioAgents: sanitizeCustomStudioAgents(persistedState.customStudioAgents),
           customAgentSkills: sanitizeCustomAgentSkills(persistedState.customAgentSkills),
           mcpServers: sanitizeMcpServers(persistedState.mcpServers),
+          userMemoryProfile: sanitizeUserMemoryProfile(
+            persistedState.userMemoryProfile,
+            current.userMemoryProfile,
+          ),
+          userMemoryRecords: sanitizeUserMemoryRecords(persistedState.userMemoryRecords),
+          projectWritingMemories: sanitizeProjectWritingMemories(
+            persistedState.projectWritingMemories,
+          ),
+          globalTowriteMarkdown:
+            typeof persistedState.globalTowriteMarkdown === 'string'
+              ? persistedState.globalTowriteMarkdown
+              : current.globalTowriteMarkdown,
+          projectTowriteMarkdown:
+            typeof persistedState.projectTowriteMarkdown === 'string'
+              ? persistedState.projectTowriteMarkdown
+              : current.projectTowriteMarkdown,
+          towriteSuggestions: sanitizeTowriteSuggestions(persistedState.towriteSuggestions),
+          documentChangeStats: sanitizeDocumentChangeStats(persistedState.documentChangeStats),
           secretaryPlanDraft: undefined,
           storyProjects: persistedState.storyProjects ?? current.storyProjects,
           activeStoryProjectId: persistedState.activeStoryProjectId ?? current.activeStoryProjectId,
@@ -2351,6 +3075,7 @@ export const useAppStore = create<AppState>()(
           openLoops: persistedState.openLoops ?? current.openLoops,
           readerPromises: persistedState.readerPromises ?? current.readerPromises,
           isStoryDashboardOpen: false,
+          isUsageCollapsed: persistedState.isUsageCollapsed ?? current.isUsageCollapsed,
           contextLimitTokens,
           effectiveContextLimitTokens: contextLimitTokens,
           modelContextSource: getModelContextSource(provider),
@@ -2370,19 +3095,141 @@ export const useAppStore = create<AppState>()(
   ),
 )
 
-const validFlowAgentIds: FlowAgentId[] = [
-  'writer',
-  'researcher',
-  'critic',
-  'dramatist',
-  'stylist',
-  'proofreader',
-  'archivist',
-]
-
 function normalizeFlowAgents(agents: FlowAgentId[] = []): FlowAgentId[] {
-  const valid = agents.filter((agentId) => validFlowAgentIds.includes(agentId))
+  const valid = agents
+    .map((agentId) => (typeof agentId === 'string' ? agentId.trim() : ''))
+    .filter(Boolean)
   return valid.length ? Array.from(new Set(valid)) : (['writer'] as FlowAgentId[])
+}
+
+function defaultRemotePlatformCredentials(): RemotePlatformCredential[] {
+  return [
+    { platform: 'feishu', appId: '', secret: '', enabled: false, status: 'idle' },
+    { platform: 'qq', appId: '', secret: '', enabled: false, status: 'idle' },
+    { platform: 'wecom', appId: '', secret: '', enabled: false, status: 'idle' },
+  ]
+}
+
+function sanitizeRemotePlatformCredentials(value: unknown): RemotePlatformCredential[] {
+  if (!Array.isArray(value)) {
+    return defaultRemotePlatformCredentials()
+  }
+
+  const allowed = new Set<RemotePlatformCredential['platform']>(['feishu', 'qq', 'wecom'])
+  const saved = new Map<RemotePlatformCredential['platform'], Partial<RemotePlatformCredential>>()
+
+  value
+    .filter((item): item is Partial<RemotePlatformCredential> => Boolean(item && typeof item === 'object'))
+    .forEach((item) => {
+      if (allowed.has(item.platform as RemotePlatformCredential['platform'])) {
+        saved.set(item.platform as RemotePlatformCredential['platform'], item)
+      }
+    })
+
+  return defaultRemotePlatformCredentials().map((fallback) => {
+    const item = saved.get(fallback.platform)
+    const status: RemotePlatformCredentialStatus = ['idle', 'testing', 'ok', 'error'].includes(
+      item?.status ?? '',
+    )
+      ? (item?.status as RemotePlatformCredentialStatus)
+      : 'idle'
+
+    return {
+      platform: fallback.platform,
+      appId: typeof item?.appId === 'string' ? item.appId : '',
+      secret: typeof item?.secret === 'string' ? item.secret : '',
+      enabled: item?.enabled === true,
+      status,
+      lastError: typeof item?.lastError === 'string' ? item.lastError : undefined,
+      updatedAt: typeof item?.updatedAt === 'number' ? item.updatedAt : undefined,
+    }
+  })
+}
+
+function sanitizeDisabledStudioAgentIds(value: unknown): StudioAgentId[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter((item) => item && item !== 'writer'),
+    ),
+  ).slice(0, 200)
+}
+
+function normalizeStudioAgentCategory(value: unknown): StudioAgentCategory {
+  const allowed: StudioAgentCategory[] = [
+    'core',
+    'writing',
+    'academic',
+    'operations',
+    'marketing',
+    'professional',
+    'product',
+    'review',
+  ]
+
+  return allowed.includes(value as StudioAgentCategory) ? (value as StudioAgentCategory) : 'writing'
+}
+
+function normalizeStudioAgentOutputType(value: unknown): StudioAgentOutputType {
+  const allowed: StudioAgentOutputType[] = [
+    'draft',
+    'research',
+    'critique',
+    'strategy',
+    'compliance',
+    'summary',
+  ]
+
+  return allowed.includes(value as StudioAgentOutputType)
+    ? (value as StudioAgentOutputType)
+    : 'summary'
+}
+
+function sanitizeCustomStudioAgents(value: unknown): CustomStudioAgent[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<CustomStudioAgent> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const name = typeof item.name === 'string' ? item.name.trim() : ''
+
+      if (!name) {
+        return undefined
+      }
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id.trim()
+            : `custom-agent-${now}-${index}`,
+        name,
+        shortName:
+          typeof item.shortName === 'string' && item.shortName.trim()
+            ? item.shortName.trim()
+            : name.slice(0, 6),
+        category: normalizeStudioAgentCategory(item.category),
+        description: typeof item.description === 'string' ? item.description.trim() : '',
+        taskTypes: normalizeStringList(item.taskTypes).slice(0, 12),
+        keywords: normalizeStringList(item.keywords).slice(0, 24),
+        systemPrompt: typeof item.systemPrompt === 'string' ? item.systemPrompt.trim() : '',
+        outputRules: normalizeStringList(item.outputRules).slice(0, 12),
+        outputType: normalizeStudioAgentOutputType(item.outputType),
+        enabled: item.enabled === true,
+        builtIn: false,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      } satisfies CustomStudioAgent
+    })
+    .filter(Boolean)
+    .slice(0, 80) as CustomStudioAgent[]
 }
 
 function sanitizeCustomAgentSkills(value: unknown): CustomAgentSkill[] {
@@ -2460,6 +3307,330 @@ function sanitizeMcpServers(value: unknown): McpServerConfig[] {
     })
     .filter(Boolean)
     .slice(0, 40) as McpServerConfig[]
+}
+
+function sanitizeUserMemoryProfile(
+  value: unknown,
+  fallback: UserMemoryProfile,
+): UserMemoryProfile {
+  if (!value || typeof value !== 'object') {
+    return fallback
+  }
+
+  const item = value as Partial<UserMemoryProfile>
+  const mode: UserMemoryMode =
+    item.mode === 'off' || item.mode === 'low_risk_auto' ? item.mode : 'confirm'
+
+  return {
+    enabled: item.enabled !== false,
+    mode,
+    displayName: typeof item.displayName === 'string' ? item.displayName : '',
+    identity: typeof item.identity === 'string' ? item.identity : '',
+    personality: typeof item.personality === 'string' ? item.personality : '',
+    writingHabits: typeof item.writingHabits === 'string' ? item.writingHabits : '',
+    stylePreferences: typeof item.stylePreferences === 'string' ? item.stylePreferences : '',
+    constraints: typeof item.constraints === 'string' ? item.constraints : '',
+    updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : undefined,
+  }
+}
+
+function sanitizeUserMemoryRecords(value: unknown): UserMemoryRecord[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<UserMemoryRecord> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const content = typeof item.content === 'string' ? item.content.trim() : ''
+
+      if (!content) {
+        return undefined
+      }
+
+      return {
+        id: typeof item.id === 'string' && item.id.trim() ? item.id : `user-memory-${now}-${index}`,
+        category: normalizeUserMemoryCategory(item.category),
+        content,
+        source: normalizeUserMemorySource(item.source),
+        enabled: item.enabled !== false,
+        confidence: clampNumber(typeof item.confidence === 'number' ? item.confidence : 0.7, 0.1, 1),
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      } satisfies UserMemoryRecord
+    })
+    .filter(Boolean)
+    .slice(0, 160) as UserMemoryRecord[]
+}
+
+function sanitizeProjectWritingMemories(value: unknown): ProjectWritingMemory[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<ProjectWritingMemory> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const content = typeof item.content === 'string' ? item.content.trim() : ''
+
+      if (!content) {
+        return undefined
+      }
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `project-memory-${now}-${index}`,
+        projectId: typeof item.projectId === 'string' ? item.projectId : undefined,
+        chatId: typeof item.chatId === 'string' ? item.chatId : undefined,
+        title: typeof item.title === 'string' && item.title.trim() ? item.title.trim() : '未命名记忆',
+        content,
+        tags: normalizeStringList(item.tags),
+        enabled: item.enabled !== false,
+        source: normalizeProjectMemorySource(item.source),
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      } satisfies ProjectWritingMemory
+    })
+    .filter(Boolean)
+    .slice(0, 240) as ProjectWritingMemory[]
+}
+
+function sanitizeTowriteSuggestions(value: unknown): TowriteSuggestion[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<TowriteSuggestion> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const content = typeof item.content === 'string' ? item.content.trim() : ''
+
+      if (!content) {
+        return undefined
+      }
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `towrite-suggestion-${now}-${index}`,
+        scope: item.scope === 'project' ? 'project' : 'global',
+        title: typeof item.title === 'string' && item.title.trim() ? item.title.trim() : '记忆建议',
+        content,
+        reason: typeof item.reason === 'string' ? item.reason.trim() : '',
+        status:
+          item.status === 'accepted' || item.status === 'rejected' ? item.status : 'pending',
+        sourceRunId: typeof item.sourceRunId === 'string' ? item.sourceRunId : undefined,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      } satisfies TowriteSuggestion
+    })
+    .filter(Boolean)
+    .slice(0, 80) as TowriteSuggestion[]
+}
+
+function sanitizeDocumentChangeStats(value: unknown): DocumentChangeStat[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<DocumentChangeStat> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const operation = normalizePatchOperationValue(item.operation)
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `document-change-${now}-${index}`,
+        chatId: typeof item.chatId === 'string' ? item.chatId : undefined,
+        articleId: typeof item.articleId === 'string' ? item.articleId : undefined,
+        agentRunId: typeof item.agentRunId === 'string' ? item.agentRunId : undefined,
+        patchId: typeof item.patchId === 'string' ? item.patchId : undefined,
+        title: typeof item.title === 'string' && item.title.trim() ? item.title.trim() : '文稿写入',
+        operation,
+        insertedChars: Math.max(0, Math.round(item.insertedChars ?? 0)),
+        deletedChars: Math.max(0, Math.round(item.deletedChars ?? 0)),
+        changedChars: Math.max(0, Math.round(item.changedChars ?? 0)),
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+      } satisfies DocumentChangeStat
+    })
+    .slice(0, 400)
+}
+
+function normalizeFlowThinkingEffort(value: unknown): FlowThinkingEffort {
+  const allowed: FlowThinkingEffort[] = ['low', 'medium', 'high', 'max']
+  return allowed.includes(value as FlowThinkingEffort) ? (value as FlowThinkingEffort) : 'medium'
+}
+
+function normalizeGoalVerdict(value: unknown): GoalJudgeVerdict {
+  const allowed: GoalJudgeVerdict[] = ['continue', 'complete', 'blocked']
+  return allowed.includes(value as GoalJudgeVerdict) ? (value as GoalJudgeVerdict) : 'continue'
+}
+
+function sanitizeQueuedUserInputs(value: unknown): QueuedUserInput[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<QueuedUserInput> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const content = typeof item.content === 'string' ? item.content.trim() : ''
+
+      if (!content) {
+        return undefined
+      }
+
+      const status: QueuedUserInputStatus =
+        item.status === 'guidance' || item.status === 'sending' ? item.status : 'queued'
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `queued-input-${now}-${index}`,
+        content,
+        status,
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+        guidedAt: typeof item.guidedAt === 'number' ? item.guidedAt : undefined,
+      } satisfies QueuedUserInput
+    })
+    .filter(Boolean)
+    .slice(-20) as QueuedUserInput[]
+}
+
+function sanitizeSecretaryGoal(value: unknown): SecretaryGoal | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const item = value as Partial<SecretaryGoal>
+  const request = typeof item.request === 'string' ? item.request.trim() : ''
+
+  if (!request) {
+    return undefined
+  }
+
+  const now = Date.now()
+  const allowedStatus: SecretaryGoalStatus[] = ['active', 'paused', 'completed', 'blocked', 'cancelled']
+  const status = allowedStatus.includes(item.status as SecretaryGoalStatus)
+    ? (item.status as SecretaryGoalStatus)
+    : 'active'
+
+  return {
+    id: typeof item.id === 'string' && item.id.trim() ? item.id : `secretary-goal-${now}`,
+    title:
+      typeof item.title === 'string' && item.title.trim()
+        ? item.title.trim()
+        : '长程写作目标',
+    request,
+    acceptanceCriteria: normalizeStringList(item.acceptanceCriteria).slice(0, 8),
+    phasePlan: normalizeStringList(item.phasePlan).slice(0, 10),
+    currentProgress:
+      typeof item.currentProgress === 'string' && item.currentProgress.trim()
+        ? item.currentProgress.trim()
+        : '目标已建立，等待秘书模式推进。',
+    status,
+    createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+    updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+  }
+}
+
+function sanitizeGoalCheckpoints(value: unknown): GoalCheckpoint[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<GoalCheckpoint> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const goalId = typeof item.goalId === 'string' ? item.goalId.trim() : ''
+
+      if (!goalId || !item.judge) {
+        return undefined
+      }
+
+      const judge = item.judge as Partial<GoalJudgeResult>
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `goal-checkpoint-${now}-${index}`,
+        goalId,
+        title:
+          typeof item.title === 'string' && item.title.trim()
+            ? item.title.trim()
+            : '裁判检查',
+        summary: typeof item.summary === 'string' ? item.summary.trim() : '',
+        judge: {
+          verdict: normalizeGoalVerdict(judge.verdict),
+          summary: typeof judge.summary === 'string' ? judge.summary.trim() : '',
+          evidence: normalizeStringList(judge.evidence).slice(0, 6),
+          nextStep: typeof judge.nextStep === 'string' ? judge.nextStep.trim() : '',
+          checkedAt: typeof judge.checkedAt === 'number' ? judge.checkedAt : now,
+        },
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+      } satisfies GoalCheckpoint
+    })
+    .filter(Boolean)
+    .slice(0, 80) as GoalCheckpoint[]
+}
+
+function normalizeUserMemoryCategory(value: unknown): UserMemoryCategory {
+  const allowed: UserMemoryCategory[] = [
+    'identity',
+    'personality',
+    'habit',
+    'style',
+    'preference',
+    'constraint',
+    'project',
+    'other',
+  ]
+  return allowed.includes(value as UserMemoryCategory) ? (value as UserMemoryCategory) : 'other'
+}
+
+function normalizeUserMemorySource(value: unknown): UserMemoryRecord['source'] {
+  const allowed: UserMemoryRecord['source'][] = [
+    'manual',
+    'agent_suggestion',
+    'towrite',
+    'agent_observation',
+  ]
+  return allowed.includes(value as UserMemoryRecord['source'])
+    ? (value as UserMemoryRecord['source'])
+    : 'manual'
+}
+
+function normalizeProjectMemorySource(value: unknown): ProjectWritingMemory['source'] {
+  const allowed: ProjectWritingMemory['source'][] = ['manual', 'towrite', 'resource', 'story', 'agent']
+  return allowed.includes(value as ProjectWritingMemory['source'])
+    ? (value as ProjectWritingMemory['source'])
+    : 'manual'
+}
+
+function normalizePatchOperationValue(value: unknown): DocumentPatchOperation {
+  const allowed: DocumentPatchOperation[] = [
+    'insert_at_cursor',
+    'append_section',
+    'replace_selection',
+    'replace_document',
+  ]
+  return allowed.includes(value as DocumentPatchOperation)
+    ? (value as DocumentPatchOperation)
+    : 'append_section'
 }
 
 function pickActiveProviderId(
@@ -2573,6 +3744,25 @@ function upsertCurrentArticle(
 
 function uniqueIds(ids: Array<string | undefined>) {
   return Array.from(new Set(ids.filter(Boolean) as string[]))
+}
+
+function normalizeStringList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return Array.from(
+    new Set(
+      value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  ).slice(0, 20)
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value))
 }
 
 function getChatArticles(

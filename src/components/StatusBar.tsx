@@ -25,8 +25,13 @@ export function StatusBar() {
   const updateMessage = useAppStore((state) => state.updateMessage)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const authStatus = useAppStore((state) => state.authStatus)
+  const activeChatId = useAppStore((state) => state.activeChatId)
+  const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const activeProvider = providerConfigs[activeProviderId]
+  const conversationChangedChars = documentChangeStats
+    .filter((stat) => stat.chatId === activeChatId)
+    .reduce((sum, stat) => sum + stat.changedChars, 0)
   const contextPercent = Math.min(
     999,
     Math.round((contextUsedTokens / Math.max(1, effectiveContextLimitTokens)) * 100),
@@ -39,8 +44,8 @@ export function StatusBar() {
         : '预设'
 
   return (
-    <footer className="flex h-9 shrink-0 items-center justify-between border-t border-[#e1dccf] bg-[#fffefa]/92 px-3 text-xs text-[#6f7168] backdrop-blur">
-      <div className="flex items-center gap-1">
+    <footer className="papyrus-toolbar flex h-8 shrink-0 items-center justify-between gap-3 border-t px-2.5 text-[11px] text-[#6f7168]">
+      <div className="flex shrink-0 items-center gap-1">
         {columnControls.map((item) => {
           const Icon = item.icon
           const active = columnMode === item.value
@@ -52,29 +57,30 @@ export function StatusBar() {
               title={item.title}
               aria-pressed={active}
               onClick={() => setColumnMode(item.value)}
-              className={`flex h-7 items-center gap-1 rounded-lg px-2 transition ${
+              className={`flex h-6 items-center gap-1 rounded-md px-2 ${
                 active
-                  ? 'bg-[#171714] text-[#fffefa] shadow-[0_8px_18px_rgba(23,23,20,0.14)]'
+                  ? 'bg-[#171714] text-[#fffefa] shadow-[0_5px_14px_rgba(23,23,20,0.12)]'
                   : 'text-[#6f7168] hover:bg-[#edf6eb] hover:text-[#171714]'
               }`}
             >
-              <Icon size={14} />
-              <span>{item.label}</span>
+              <Icon size={13} />
+              <span className="hidden sm:inline">{item.label}</span>
             </button>
           )
         })}
       </div>
 
-      <div className="flex min-w-0 items-center gap-4">
-        <span className="truncate">模式: {mode === 'companion' ? '秘书' : 'Flow'}</span>
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-3 overflow-hidden">
+        <span className="truncate">模式: {mode === 'companion' ? '写作' : '秘书'}</span>
         <span className="truncate">
-          模型: {activeProvider.label} /{' '}
+          {activeProvider.label} ·{' '}
           {activeProvider.type === 'scallion_proxy' ? '代理' : activeProvider.modelName || '未设置'}
         </span>
-        <span className="truncate">
-          Context: {contextPercent}% · {Math.round(effectiveContextLimitTokens / 1024)}K ·{' '}
+        <span className="truncate tabular-nums">
+          上下文 {contextPercent}% · {Math.round(effectiveContextLimitTokens / 1024)}K ·{' '}
           {contextSourceLabel}
         </span>
+        <span className="truncate tabular-nums">累计修改 {conversationChangedChars} 字</span>
         {updateStatus !== 'idle' ? <span className="truncate">更新: {updateMessage}</span> : null}
         {scallionUser ? (
           <span className="truncate">Scallion: {scallionUser.username}</span>
@@ -82,17 +88,17 @@ export function StatusBar() {
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-[#dfe4d6] bg-[#fffdf7] px-2 text-[#5f6159] transition hover:border-[#31a96b] hover:text-[#171714]"
+            className="papyrus-control inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2"
           >
             <LogIn size={12} />
-            {authStatus === 'polling' ? '等待主站授权' : '登录 Scallion'}
+            {authStatus === 'polling' ? '等待主站授权' : '登录'}
           </button>
         )}
-        <span className="flex items-center gap-1 text-[#315d39]">
-          <Radio size={14} />
-          本地工作台就绪
+        <span className="hidden items-center gap-1 text-[#315d39] md:flex">
+          <Radio size={13} />
+          就绪
         </span>
-        <Sparkles size={13} className="text-[#31a96b]" />
+        <Sparkles size={12} className="shrink-0 text-[#31a96b]" />
       </div>
     </footer>
   )

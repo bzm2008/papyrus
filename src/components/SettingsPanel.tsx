@@ -21,6 +21,7 @@ import { useState } from 'react'
 import { agentSkills } from '../services/agentSkillLibrary'
 import { callOpenAICompatible, canCallProvider } from '../services/llmClient'
 import { testMcpServer } from '../services/mcpClient'
+import { acceptTowriteSuggestion, rejectTowriteSuggestion, syncTowriteToMemory } from '../services/towriteService'
 import {
   customContextTiers,
   isProviderValidated,
@@ -39,11 +40,23 @@ import {
 } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { RemoteRelaySettings } from './RemoteRelaySettings'
+import { StudioSettingsSection } from './StudioSettingsSection'
+
+type SettingsSectionId =
+  | 'account'
+  | 'models'
+  | 'remote'
+  | 'studio'
+  | 'memory'
+  | 'skills'
+  | 'mcp'
+  | 'updates'
 
 export function SettingsPanel() {
   const [checkingProviderId, setCheckingProviderId] = useState<ProviderId | null>(null)
   const [checkMessages, setCheckMessages] = useState<Partial<Record<ProviderId, string>>>({})
   const [selectedVendorId, setSelectedVendorId] = useState<ProviderId>('openai')
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('models')
   const isOpen = useAppStore((state) => state.isSettingsOpen)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const resetOobe = useAppStore((state) => state.resetOobe)
@@ -108,25 +121,25 @@ export function SettingsPanel() {
           <motion.button
             type="button"
             aria-label="关闭设置面板"
-            className="fixed inset-0 z-40 bg-[#171714]/24 backdrop-blur-[1px]"
+            className="fixed inset-0 z-40 bg-[#171714]/22 backdrop-blur-[2px]"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={() => setSettingsOpen(false)}
           />
           <motion.aside
-            className="fixed right-0 top-0 z-50 flex h-screen w-[560px] max-w-[calc(100vw-24px)] flex-col border-l border-[#e8ddc7] bg-[#fffefa] shadow-[0_24px_80px_rgba(43,34,19,0.22)]"
+            className="papyrus-panel fixed right-0 top-0 z-50 flex h-screen w-[620px] max-w-[calc(100vw-20px)] flex-col rounded-l-2xl border-y-0 border-r-0"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
-            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+            transition={{ type: 'spring', stiffness: 440, damping: 42, mass: 0.85 }}
           >
-            <div className="flex h-16 shrink-0 items-center justify-between border-b border-[#e8ddc7] px-4">
+            <div className="papyrus-toolbar flex h-12 shrink-0 items-center justify-between border-b px-4">
               <div className="flex min-w-0 items-center gap-3">
                 <BrandMark size="sm" />
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 text-sm font-semibold text-[#171714]">
-                    <SlidersHorizontal size={15} className="text-[#6f7f68]" />
+                    <SlidersHorizontal size={14} className="text-[#6f7f68]" />
                     模型与全局设置
                   </div>
                   <div className="truncate text-xs text-[#8f897a]">
@@ -138,16 +151,18 @@ export function SettingsPanel() {
                 type="button"
                 title="关闭设置"
                 onClick={() => setSettingsOpen(false)}
-                className="papyrus-icon-button size-8 rounded-lg border-0 bg-transparent"
+                className="papyrus-icon-button size-7 rounded-md border-0 bg-transparent"
               >
-                <X size={18} />
+                <X size={16} />
               </button>
             </div>
 
-            <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto p-4">
-              <div className="space-y-4">
-                <SettingsQuickNav />
-                <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
+            <div className="min-h-0 flex-1 overflow-hidden p-3">
+              <div className="grid h-full min-h-0 grid-cols-[132px_1fr] gap-3">
+                <SettingsSidebar activeSection={activeSection} onSelect={setActiveSection} />
+                <div className="papyrus-scrollbar min-h-0 overflow-y-auto pr-1">
+                  <div className="space-y-3">
+                <section className={`papyrus-inset rounded-xl p-4 ${activeSection === 'account' ? '' : 'hidden'}`}>
                   <div className="mb-3 flex items-start justify-between gap-3">
                     <div>
                       <div className="flex items-center gap-2 text-sm font-semibold text-[#2f2b22]">
@@ -201,7 +216,7 @@ export function SettingsPanel() {
                   )}
                 </section>
 
-                <section id="settings-models" className="rounded-xl border border-[#d7aa4f]/45 bg-[#fff7e3] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.05)]">
+                <section id="settings-models" className={`rounded-xl border border-[#d7aa4f]/45 bg-[#fff7e3] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.05)] ${activeSection === 'models' ? '' : 'hidden'}`}>
                   <div className="mb-3 flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">内置云模型</div>
@@ -219,7 +234,7 @@ export function SettingsPanel() {
                   </div>
                 </section>
 
-                <section className="rounded-xl border border-[#e8ddc7] bg-[#fffdf7] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.05)]">
+                <section className={`rounded-xl border border-[#e8ddc7] bg-[#fffdf7] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.05)] ${activeSection === 'updates' ? '' : 'hidden'}`}>
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">自动更新</div>
@@ -270,7 +285,7 @@ export function SettingsPanel() {
                   </div>
                 </section>
 
-                <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
+                <section className={`rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)] ${activeSection === 'updates' ? '' : 'hidden'}`}>
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">初始化向导</div>
@@ -292,11 +307,15 @@ export function SettingsPanel() {
                   </div>
                 </section>
 
-                <div id="settings-remote">
+                <div id="settings-remote" className={activeSection === 'remote' ? '' : 'hidden'}>
                   <RemoteRelaySettings />
                 </div>
 
-                <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
+                <div className={activeSection === 'studio' ? '' : 'hidden'}>
+                  <StudioSettingsSection />
+                </div>
+
+                <section className={`rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)] ${activeSection === 'models' ? '' : 'hidden'}`}>
                   <div className="mb-3">
                     <div className="text-sm font-semibold text-[#2f2b22]">厂商 Key</div>
                     <div className="mt-1 text-xs leading-5 text-[#8f897a]">
@@ -314,7 +333,7 @@ export function SettingsPanel() {
                   />
                 </section>
 
-                <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
+                <section className={`rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)] ${activeSection === 'models' ? '' : 'hidden'}`}>
                   <div className="mb-3 flex items-start justify-between gap-3">
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">自定义模型</div>
@@ -342,7 +361,7 @@ export function SettingsPanel() {
                     />
                     <Field
                       icon={Lock}
-                      label="Model Name"
+                      label="模型名称"
                       value={customProvider.modelName}
                       placeholder="your-model-name"
                       onChange={(value) => updateProviderConfig('custom', { modelName: value })}
@@ -365,11 +384,16 @@ export function SettingsPanel() {
                   </div>
                 </section>
 
-                <div id="settings-skills">
+                <div id="settings-memory" className={activeSection === 'memory' ? '' : 'hidden'}>
+                  <MemorySettingsSection />
+                </div>
+                <div id="settings-skills" className={activeSection === 'skills' ? '' : 'hidden'}>
                   <SkillSettingsSection />
                 </div>
-                <div id="settings-mcp">
+                <div id="settings-mcp" className={activeSection === 'mcp' ? '' : 'hidden'}>
                   <McpSettingsSection />
+                </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -381,24 +405,39 @@ export function SettingsPanel() {
 }
 
 
-function SettingsQuickNav() {
-  const links = [
-    { id: 'settings-models', label: '模型' },
-    { id: 'settings-remote', label: '远程连接' },
-    { id: 'settings-skills', label: 'Skills' },
-    { id: 'settings-mcp', label: 'MCP' },
+function SettingsSidebar({
+  activeSection,
+  onSelect,
+}: {
+  activeSection: SettingsSectionId
+  onSelect: (section: SettingsSectionId) => void
+}) {
+  const links: Array<{ id: SettingsSectionId; label: string }> = [
+    { id: 'account', label: '账户' },
+    { id: 'models', label: '模型' },
+    { id: 'remote', label: '远程连接' },
+    { id: 'studio', label: '工作室' },
+    { id: 'memory', label: '记忆' },
+    { id: 'skills', label: '技能' },
+    { id: 'mcp', label: 'MCP' },
+    { id: 'updates', label: '更新' },
   ]
 
   return (
-    <nav className="sticky top-0 z-10 -mx-1 flex gap-1 rounded-lg border border-[#e8ddc7] bg-[#fffefa]/95 p-1 shadow-[0_8px_20px_rgba(43,34,19,0.05)] backdrop-blur">
+    <nav className="papyrus-toolbar h-full rounded-xl border p-1.5">
       {links.map((link) => (
-        <a
+        <button
           key={link.id}
-          href={'#' + link.id}
-          className="flex-1 rounded-md px-2 py-1.5 text-center text-xs font-medium text-[#6f7168] transition hover:bg-[#fff7e3] hover:text-[#171714]"
+          type="button"
+          onClick={() => onSelect(link.id)}
+          className={`mb-1 flex h-8 w-full items-center rounded-lg px-2 text-left text-xs font-medium transition ${
+            activeSection === link.id
+              ? 'bg-[#171714] text-[#fffefa]'
+              : 'text-[#6f7168] hover:bg-[#fff7e3] hover:text-[#171714]'
+          }`}
         >
           {link.label}
-        </a>
+        </button>
       ))}
     </nav>
   )
@@ -465,7 +504,7 @@ function VendorUnifiedCard({
         </div>
         <Field
           icon={Lock}
-          label="Model Name"
+          label="模型名称"
           value={provider.modelName}
           placeholder="请输入模型名"
           onChange={(value) => updateProviderConfig(provider.id, { modelName: value })}
@@ -551,7 +590,7 @@ function ProviderCard({
         </div>
         <Field
           icon={Lock}
-          label="Model Name"
+          label="模型名称"
           value={provider.modelName}
           placeholder="请输入模型名"
           onChange={(value) => updateProviderConfig(provider.id, { modelName: value })}
@@ -710,7 +749,7 @@ function SectionShell({
   children: React.ReactNode
 }) {
   return (
-    <section className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)]">
+    <section className="papyrus-inset rounded-xl p-4">
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
           <div className="text-sm font-semibold text-[#2f2b22]">{title}</div>
@@ -732,6 +771,227 @@ const defaultSkillDraft = {
   instructionsText: '',
   outputRulesText: '',
   enabled: true,
+}
+
+function MemorySettingsSection() {
+  const profile = useAppStore((state) => state.userMemoryProfile)
+  const userMemoryRecords = useAppStore((state) => state.userMemoryRecords)
+  const projectWritingMemories = useAppStore((state) => state.projectWritingMemories)
+  const globalTowriteMarkdown = useAppStore((state) => state.globalTowriteMarkdown)
+  const projectTowriteMarkdown = useAppStore((state) => state.projectTowriteMarkdown)
+  const towriteSuggestions = useAppStore((state) => state.towriteSuggestions)
+  const setUserMemoryProfile = useAppStore((state) => state.setUserMemoryProfile)
+  const upsertUserMemoryRecord = useAppStore((state) => state.upsertUserMemoryRecord)
+  const deleteUserMemoryRecord = useAppStore((state) => state.deleteUserMemoryRecord)
+  const toggleUserMemoryRecord = useAppStore((state) => state.toggleUserMemoryRecord)
+  const clearUserMemoryRecords = useAppStore((state) => state.clearUserMemoryRecords)
+  const deleteProjectWritingMemory = useAppStore((state) => state.deleteProjectWritingMemory)
+  const clearProjectWritingMemories = useAppStore((state) => state.clearProjectWritingMemories)
+  const setGlobalTowriteMarkdown = useAppStore((state) => state.setGlobalTowriteMarkdown)
+  const setProjectTowriteMarkdown = useAppStore((state) => state.setProjectTowriteMarkdown)
+  const [manualMemory, setManualMemory] = useState('')
+
+  const pendingSuggestions = towriteSuggestions.filter((suggestion) => suggestion.status === 'pending')
+
+  return (
+    <SectionShell
+      title="记忆"
+      description="长期记忆和跨文档记忆默认保存在本机，仅用于增强 AI 对你的写作习惯、项目设定和上下文的理解。Papyrus 不会因为此功能收集或上传用户信息。"
+    >
+      <div className="space-y-3">
+        <div className="rounded-lg border border-[#cfd8c7] bg-[#f4fbf2] p-3 text-xs leading-5 text-[#315d39]">
+          本功能类似 Hermes / WorkBuddy 的长期记忆，但以本地写作辅助为目标。你可以随时编辑、禁用或删除每条记忆；AI 默认只提出建议，确认后才会保存。
+        </div>
+
+        <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="inline-flex items-center gap-2 text-xs text-[#6f7168]">
+              <input
+                type="checkbox"
+                checked={profile.enabled}
+                onChange={(event) => setUserMemoryProfile({ enabled: event.target.checked })}
+              />
+              启用本地长期记忆
+            </label>
+            <select
+              value={profile.mode}
+              onChange={(event) =>
+                setUserMemoryProfile({ mode: event.target.value as typeof profile.mode })
+              }
+              className="h-8 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#2f2b22] outline-none"
+            >
+              <option value="off">关闭自动建议</option>
+              <option value="confirm">建议后确认</option>
+              <option value="low_risk_auto">低风险自动保存</option>
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <PlainField
+              label="称呼"
+              value={profile.displayName}
+              placeholder="例如：张老师、林同学"
+              onChange={(value) => setUserMemoryProfile({ displayName: value })}
+            />
+            <PlainField
+              label="身份/职业"
+              value={profile.identity}
+              placeholder="例如：小说作者、研究生、编辑"
+              onChange={(value) => setUserMemoryProfile({ identity: value })}
+            />
+          </div>
+          <TextAreaField
+            label="性格与协作方式"
+            value={profile.personality}
+            placeholder="例如：希望直接指出问题，少用客套话。"
+            onChange={(value) => setUserMemoryProfile({ personality: value })}
+          />
+          <TextAreaField
+            label="写作习惯"
+            value={profile.writingHabits}
+            placeholder="例如：先列结构，再写正文；偏好中文长文。"
+            onChange={(value) => setUserMemoryProfile({ writingHabits: value })}
+          />
+          <TextAreaField
+            label="文风偏好"
+            value={profile.stylePreferences}
+            placeholder="例如：克制、准确、有判断，不要营销腔。"
+            onChange={(value) => setUserMemoryProfile({ stylePreferences: value })}
+          />
+          <TextAreaField
+            label="长期约束"
+            value={profile.constraints}
+            placeholder="例如：不要擅自改变人物设定；资料不确定时标注待核实。"
+            onChange={(value) => setUserMemoryProfile({ constraints: value })}
+          />
+        </div>
+
+        <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <TextAreaField
+            label="手动新增个人记忆"
+            value={manualMemory}
+            placeholder="写入一条稳定、可复用的身份、习惯、偏好或约束。"
+            onChange={setManualMemory}
+          />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              disabled={!manualMemory.trim()}
+              onClick={() => {
+                upsertUserMemoryRecord({
+                  category: 'other',
+                  content: manualMemory,
+                  source: 'manual',
+                  enabled: true,
+                  confidence: 0.9,
+                })
+                setManualMemory('')
+              }}
+              className="papyrus-primary-button h-8 rounded-md px-3 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              保存记忆
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-medium text-[#6f7168]">个人长期记忆</div>
+            <button type="button" onClick={clearUserMemoryRecords} className="text-xs text-[#9b3d30]">
+              清空
+            </button>
+          </div>
+          {userMemoryRecords.length ? (
+            userMemoryRecords.map((record) => (
+              <div key={record.id} className="flex items-start gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-2">
+                <input
+                  type="checkbox"
+                  checked={record.enabled}
+                  onChange={(event) => toggleUserMemoryRecord(record.id, event.target.checked)}
+                  className="mt-1"
+                />
+                <div className="min-w-0 flex-1 text-xs leading-5 text-[#2f2b22]">
+                  <div className="font-medium">{record.category}</div>
+                  <div className="break-words text-[#6f7168]">{record.content}</div>
+                </div>
+                <button type="button" onClick={() => deleteUserMemoryRecord(record.id)} className="text-[#9b3d30]">
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-lg border border-dashed border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs text-[#8f897a]">
+              还没有保存个人长期记忆。
+            </div>
+          )}
+        </div>
+
+        <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <TextAreaField
+            label="全局 towrite.md"
+            value={globalTowriteMarkdown}
+            onChange={setGlobalTowriteMarkdown}
+          />
+          <TextAreaField
+            label="项目 towrite.md"
+            value={projectTowriteMarkdown}
+            onChange={setProjectTowriteMarkdown}
+          />
+          <div className="flex flex-wrap justify-between gap-2">
+            <button type="button" onClick={() => syncTowriteToMemory()} className="papyrus-control h-8 rounded-md px-3 text-xs">
+              同步到记忆索引
+            </button>
+            <button type="button" onClick={clearProjectWritingMemories} className="text-xs text-[#9b3d30]">
+              清空项目记忆
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-2">
+          <div className="text-xs font-medium text-[#6f7168]">待确认记忆建议</div>
+          {pendingSuggestions.length ? (
+            pendingSuggestions.map((suggestion) => (
+              <div key={suggestion.id} className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+                <div className="text-sm font-medium text-[#2f2b22]">{suggestion.title}</div>
+                <div className="mt-1 text-xs leading-5 text-[#6f7168]">{suggestion.content}</div>
+                <div className="mt-1 text-[11px] text-[#8f897a]">{suggestion.reason}</div>
+                <div className="mt-2 flex justify-end gap-2">
+                  <button type="button" onClick={() => rejectTowriteSuggestion(suggestion.id)} className="papyrus-control h-7 rounded-md px-2 text-xs">
+                    忽略
+                  </button>
+                  <button type="button" onClick={() => acceptTowriteSuggestion(suggestion.id)} className="papyrus-primary-button h-7 rounded-md px-2 text-xs">
+                    保存
+                  </button>
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="rounded-lg border border-dashed border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs text-[#8f897a]">
+              暂无待确认建议。
+            </div>
+          )}
+        </div>
+
+        <details className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <summary className="cursor-pointer text-xs font-medium text-[#6f7168]">
+            项目跨文档记忆 ({projectWritingMemories.length})
+          </summary>
+          <div className="mt-2 grid gap-2">
+            {projectWritingMemories.slice(0, 20).map((memory) => (
+              <div key={memory.id} className="flex items-start gap-2 rounded-md bg-[#fffefa] px-2 py-1.5">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium text-[#2f2b22]">{memory.title}</div>
+                  <div className="line-clamp-2 text-xs text-[#8f897a]">{memory.content}</div>
+                </div>
+                <button type="button" onClick={() => deleteProjectWritingMemory(memory.id)} className="text-[#9b3d30]">
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </details>
+      </div>
+    </SectionShell>
+  )
 }
 
 function SkillSettingsSection() {
@@ -773,8 +1033,8 @@ function SkillSettingsSection() {
 
   return (
     <SectionShell
-      title="Skills"
-      description="Built-in skills are read-only. Custom skills use plain keyword matching and are merged into agent prompts."
+      title="技能"
+      description="内置技能只读展示。自定义技能使用安全关键词匹配，并会合并进对应 Agent 的提示词。"
       action={
         <button
           type="button"
@@ -783,7 +1043,7 @@ function SkillSettingsSection() {
           disabled={!draft.name.trim()}
         >
           <Plus size={13} />
-          {editingId ? 'Save' : 'Add skill'}
+          {editingId ? '保存' : '添加技能'}
         </button>
       }
     >
@@ -791,40 +1051,40 @@ function SkillSettingsSection() {
         <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
           <div className="grid grid-cols-2 gap-2">
             <PlainField
-              label="Name"
+              label="名称"
               value={draft.name}
-              placeholder="Scene continuity"
+              placeholder="场景连续性"
               onChange={(value) => setDraft((item) => ({ ...item, name: value }))}
             />
             <PlainField
-              label="Short name"
+              label="短名"
               value={draft.shortName}
-              placeholder="Continuity"
+              placeholder="连续性"
               onChange={(value) => setDraft((item) => ({ ...item, shortName: value }))}
             />
           </div>
           <PlainField
-            label="Trigger"
+            label="触发说明"
             value={draft.trigger}
-            placeholder="When the user asks for continuity checks."
+            placeholder="当用户要求检查连续性、时间线或伏笔时触发。"
             onChange={(value) => setDraft((item) => ({ ...item, trigger: value }))}
           />
           <PlainField
-            label="Keywords"
+            label="关键词"
             value={draft.keywordsText}
-            placeholder="continuity, timeline, foreshadowing"
+            placeholder="连续性、时间线、伏笔"
             onChange={(value) => setDraft((item) => ({ ...item, keywordsText: value }))}
           />
           <TextAreaField
-            label="Execution rules"
+            label="执行规则"
             value={draft.instructionsText}
-            placeholder="One rule per line."
+            placeholder="每行一条执行规则。"
             onChange={(value) => setDraft((item) => ({ ...item, instructionsText: value }))}
           />
           <TextAreaField
-            label="Output rules"
+            label="输出规则"
             value={draft.outputRulesText}
-            placeholder="One output rule per line."
+            placeholder="每行一条输出规则。"
             onChange={(value) => setDraft((item) => ({ ...item, outputRulesText: value }))}
           />
           <label className="inline-flex items-center gap-2 text-xs text-[#6f7168]">
@@ -833,12 +1093,12 @@ function SkillSettingsSection() {
               checked={draft.enabled}
               onChange={(event) => setDraft((item) => ({ ...item, enabled: event.target.checked }))}
             />
-            Enabled
+            启用
           </label>
         </div>
 
         <div className="grid gap-2">
-          <div className="text-xs font-medium text-[#6f7168]">Custom skills</div>
+          <div className="text-xs font-medium text-[#6f7168]">自定义技能</div>
           {customAgentSkills.length ? (
             customAgentSkills.map((skill) => (
               <div
@@ -855,13 +1115,13 @@ function SkillSettingsSection() {
                     onClick={() => toggleCustomAgentSkill(skill.id, !skill.enabled)}
                     className="h-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
                   >
-                    {skill.enabled ? 'On' : 'Off'}
+                    {skill.enabled ? '启用' : '停用'}
                   </button>
                   <button
                     type="button"
                     onClick={() => deleteCustomAgentSkill(skill.id)}
                     className="papyrus-icon-button size-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa]"
-                    title="Delete skill"
+                    title="删除技能"
                   >
                     <Trash2 size={13} />
                   </button>
@@ -870,13 +1130,13 @@ function SkillSettingsSection() {
             ))
           ) : (
             <div className="rounded-lg border border-dashed border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs text-[#8f897a]">
-              No custom skills yet.
+              还没有自定义技能。
             </div>
           )}
         </div>
 
         <details className="rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
-          <summary className="cursor-pointer text-xs font-medium text-[#6f7168]">Built-in skills</summary>
+          <summary className="cursor-pointer text-xs font-medium text-[#6f7168]">内置技能</summary>
           <div className="mt-2 grid gap-2">
             {builtinSkills.map((skill) => (
               <div key={skill.id} className="rounded-md bg-[#fffefa] px-2 py-1.5">
@@ -954,7 +1214,7 @@ function McpSettingsSection() {
   return (
     <SectionShell
       title="MCP"
-      description="Save HTTP MCP endpoints for retrieval. Stdio servers can be stored now and will show as pending adapter support."
+      description="保存 HTTP MCP 端点用于检索。stdio 服务可先保存和校验命令字段，运行适配中，不会伪装成已可用。"
       action={
         <button
           type="button"
@@ -963,7 +1223,7 @@ function McpSettingsSection() {
           className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-[#171714] px-2.5 text-xs font-medium text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Plus size={13} />
-          {editingId ? 'Save' : 'Add server'}
+          {editingId ? '保存' : '添加服务'}
         </button>
       }
     >
@@ -971,13 +1231,13 @@ function McpSettingsSection() {
         <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
           <div className="grid grid-cols-[1fr_120px] gap-2">
             <PlainField
-              label="Name"
+              label="名称"
               value={draft.name}
-              placeholder="Knowledge base"
+              placeholder="知识库"
               onChange={(value) => setDraft((item) => ({ ...item, name: value }))}
             />
             <label className="block">
-              <span className="mb-1 block text-xs font-medium text-[#6f7168]">Transport</span>
+              <span className="mb-1 block text-xs font-medium text-[#6f7168]">传输方式</span>
               <select
                 value={draft.transport}
                 onChange={(event) =>
@@ -992,21 +1252,21 @@ function McpSettingsSection() {
           </div>
           {draft.transport === 'http' ? (
             <PlainField
-              label="Endpoint"
+              label="端点"
               value={draft.endpoint}
               placeholder="https://example.com/mcp"
               onChange={(value) => setDraft((item) => ({ ...item, endpoint: value }))}
             />
           ) : (
             <PlainField
-              label="Command"
+              label="命令"
               value={draft.command}
               placeholder="node ./server.js"
               onChange={(value) => setDraft((item) => ({ ...item, command: value }))}
             />
           )}
           <TextAreaField
-            label={draft.transport === 'http' ? 'Headers' : 'Env'}
+            label={draft.transport === 'http' ? '请求头' : '环境变量'}
             value={draft.transport === 'http' ? draft.headersText : draft.envText}
             placeholder="KEY=value"
             onChange={(value) =>
@@ -1021,7 +1281,7 @@ function McpSettingsSection() {
               checked={draft.enabled}
               onChange={(event) => setDraft((item) => ({ ...item, enabled: event.target.checked }))}
             />
-            Enabled
+            启用
           </label>
         </div>
 
@@ -1038,7 +1298,7 @@ function McpSettingsSection() {
                       </span>
                     </div>
                     <div className="mt-1 truncate text-xs text-[#8f897a]">
-                      {server.transport === 'http' ? server.endpoint : server.command || 'stdio command pending'}
+                       {server.transport === 'http' ? server.endpoint : server.command || 'stdio 命令待填写'}
                     </div>
                   </button>
                   <div className="flex shrink-0 items-center gap-1.5">
@@ -1049,7 +1309,7 @@ function McpSettingsSection() {
                       }
                       className="h-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
                     >
-                      {server.enabled ? 'On' : 'Off'}
+                      {server.enabled ? '启用' : '停用'}
                     </button>
                     <button
                       type="button"
@@ -1058,33 +1318,45 @@ function McpSettingsSection() {
                       className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714] disabled:cursor-wait disabled:opacity-50"
                     >
                       <TestTube2 size={12} />
-                      {server.status === 'testing' ? 'Testing' : 'Test'}
+                      {server.status === 'testing' ? '测试中' : '测试连接'}
                     </button>
                     <button
                       type="button"
                       onClick={() => deleteMcpServer(server.id)}
                       className="papyrus-icon-button size-7 rounded-lg border border-[#e8ddc7] bg-[#fffefa]"
-                      title="Delete MCP server"
+                      title="删除 MCP 服务"
                     >
                       <Trash2 size={13} />
                     </button>
                   </div>
                 </div>
                 <div className="mt-2 text-xs text-[#8f897a]">
-                  Status: {server.status}
+                  状态：{formatMcpStatus(server.status)}
                   {server.lastError ? <span className="ml-2 text-[#9b3d30]">{server.lastError}</span> : null}
                 </div>
               </div>
             ))
           ) : (
             <div className="rounded-lg border border-dashed border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs text-[#8f897a]">
-              No MCP servers configured.
+              还没有配置 MCP 服务。
             </div>
           )}
         </div>
       </div>
     </SectionShell>
   )
+}
+
+function formatMcpStatus(status: McpServerConfig['status']) {
+  const labels: Record<McpServerConfig['status'], string> = {
+    idle: '未测试',
+    testing: '测试中',
+    ok: '可用',
+    error: '错误',
+    unsupported: '适配中',
+  }
+
+  return labels[status] ?? '未测试'
 }
 
 function PlainField({

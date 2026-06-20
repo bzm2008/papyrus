@@ -49,7 +49,7 @@ export function normalizeRelayEndpoint(endpoint?: string) {
   return value.replace(/\/+$/, '')
 }
 
-export function createRemotePrompt(job: RemoteRelayJob, mode: RemoteRelayMode) {
+export function createRemotePrompt(job: RemoteRelayJob) {
   const sender = [job.senderName, job.senderId].filter(Boolean).join(' / ') || 'unknown sender'
   const createdAt = job.createdAt ? new Date(job.createdAt).toLocaleString() : 'unknown time'
   const attachments = job.attachments?.length
@@ -66,13 +66,13 @@ export function createRemotePrompt(job: RemoteRelayJob, mode: RemoteRelayMode) {
     `来源平台: ${job.platform}`,
     `发送者: ${sender}`,
     `时间: ${createdAt}`,
-    `目标模式: ${mode === 'flow' ? '秘书模式' : '文学秘书'}`,
+    '目标模式: 秘书模式',
     '',
     '用户消息:',
     job.content,
     attachments ? `\n附件与资料:\n${attachments}` : '',
     '',
-    '请像 Papyrus 文学秘书一样处理。若需要写入文稿，请生成可审阅的文稿补丁；若只是问答，请直接给出清楚、可执行的回复。',
+    '请按 Papyrus 秘书模式处理。远程消息默认由秘书长调度工作室 Agent；若需要写入文稿，请生成可审阅的文稿补丁；若只是问答，请直接给出清楚、可执行的回复。',
   ]
     .filter(Boolean)
     .join('\n')
@@ -132,7 +132,7 @@ export function createAdapterWebhookPayloadExample(platform: RemoteRelayPlatform
     senderId: `${platform}-user-123`,
     senderName: 'Remote User',
     content: '请帮我把这段文字润色，并指出最需要改的一处。',
-    mode: 'companion' as RemoteRelayMode,
+    mode: 'flow' as RemoteRelayMode,
     threadId: `${platform}-thread-001`,
     attachments: [
       {

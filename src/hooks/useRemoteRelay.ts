@@ -1,5 +1,4 @@
 import { useEffect, useRef } from 'react'
-import { sendCompanionMessage } from '../services/companionAgent'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import {
   ackRemoteRelayJob,
@@ -9,11 +8,12 @@ import {
   reportRemoteRelayResult,
   type RemoteRelayJob,
 } from '../services/remoteRelayService'
-import { useAppStore, type RemoteRelayMode } from '../stores/useAppStore'
+import { useAppStore } from '../stores/useAppStore'
 
 export function useRemoteRelay() {
   const enabled = useAppStore((state) => state.remoteRelayEnabled)
   const token = useAppStore((state) => state.scallionToken)
+  const platformCredentials = useAppStore((state) => state.remotePlatformCredentials)
   const endpoint = useAppStore((state) => state.remoteRelayEndpoint)
   const channelId = useAppStore((state) => state.remoteRelayChannelId)
   const accessKey = useAppStore((state) => state.remoteRelayAccessKey)
@@ -24,15 +24,19 @@ export function useRemoteRelay() {
     if (!enabled) {
       useAppStore.getState().setRemoteRelayState({
         status: 'idle',
-        message: '远程中继未启用',
+        message: '远程连接未启用',
       })
       return
     }
 
-    if (!token) {
+    const activeCredential = platformCredentials.find(
+      (credential) => credential.enabled && credential.appId.trim() && credential.secret.trim(),
+    )
+
+    if (!token && !activeCredential) {
       useAppStore.getState().setRemoteRelayState({
         status: 'error',
-        message: '请先登录 Scallion 账号，再启用远程中继',
+        message: '请先在远程连接里启用一个平台，并填写 AppID 与密钥',
       })
       return
     }
@@ -52,10 +56,10 @@ export function useRemoteRelay() {
         let activeAccessKey = state.remoteRelayAccessKey
 
         if (!activeChannelId) {
-          state.setRemoteRelayState({ status: 'connecting', message: '正在注册远程中继频道' })
+          state.setRemoteRelayState({ status: 'connecting', message: '正在准备远程连接' })
           const channel = await registerRemoteRelayChannel({
             endpoint: state.remoteRelayEndpoint,
-            token: state.scallionToken ?? '',
+            token: activeRemoteToken(state),
             channelId: activeChannelId,
             accessKey: activeAccessKey,
           })
@@ -69,14 +73,14 @@ export function useRemoteRelay() {
 
         const jobs = await pollRemoteRelayJobs({
           endpoint: state.remoteRelayEndpoint,
-          token: state.scallionToken ?? '',
+          token: activeRemoteToken(state),
           channelId: activeChannelId,
           accessKey: activeAccessKey,
         })
 
         useAppStore.getState().setRemoteRelayState({
           status: 'online',
-          message: jobs.length ? `收到 ${jobs.length} 条远程任务` : '远程中继在线，等待消息',
+          message: jobs.length ? `收到 ${jobs.length} 条远程任务` : '远程连接在线，等待消息',
         })
 
         for (const job of jobs) {
@@ -89,7 +93,7 @@ export function useRemoteRelay() {
       } catch (error) {
         useAppStore.getState().setRemoteRelayState({
           status: 'error',
-          message: error instanceof Error ? error.message : '远程中继连接失败',
+        message: error instanceof Error ? error.message : '远程连接失败',
         })
       } finally {
         processingRef.current = false
@@ -105,16 +109,19 @@ export function useRemoteRelay() {
         window.clearInterval(timer)
       }
     }
-  }, [accessKey, channelId, enabled, endpoint, pollIntervalSeconds, token])
+  }, [accessKey, channelId, enabled, endpoint, platformCredentials, pollIntervalSeconds, token])
 }
 
 async function handleRemoteJob(job: RemoteRelayJob, channelId?: string, accessKey?: string) {
   const state = useAppStore.getState()
-  const mode = pickMode(job.mode, state.remoteRelayDefaultMode)
-  const allowedPlatforms = new Set(state.remoteRelayAllowedPlatforms)
+  const mode = 'flow' as const
+  const enabledPlatforms = state.remotePlatformCredentials
+    .filter((credential) => credential.enabled)
+    .map((credential) => credential.platform)
+  const allowedPlatforms = new Set(enabledPlatforms.length ? enabledPlatforms : ['feishu', 'qq', 'wecom'])
   const clientConfig = {
     endpoint: state.remoteRelayEndpoint,
-    token: state.scallionToken ?? '',
+    token: activeRemoteToken(state),
     channelId,
     accessKey,
   }
@@ -126,7 +133,7 @@ async function handleRemoteJob(job: RemoteRelayJob, channelId?: string, accessKe
       throw new Error(`Remote platform is not allowed: ${job.platform}`)
     }
 
-    const prompt = createRemotePrompt(job, mode)
+    const prompt = createRemotePrompt(job)
     let reply = ''
     const harnessInput = {
       source: 'remote' as const,
@@ -135,21 +142,16 @@ async function handleRemoteJob(job: RemoteRelayJob, channelId?: string, accessKe
       remoteSenderId: job.senderId,
     }
 
-    if (mode === 'flow') {
-      const before = useAppStore.getState().flowMessages.length
-      await sendFlowMessage(prompt, harnessInput)
-      const messages = useAppStore.getState().flowMessages.slice(before)
-      reply =
-        [...messages].reverse().find((message) => message.role === 'assistant')?.content ||
-        'Flow 已处理该远程任务，请回到 Papyrus 查看工作流结果。'
-    } else {
-      const result = await sendCompanionMessage(prompt, harnessInput)
-      reply = result.reply || '文学秘书已处理该远程任务。'
-    }
+    const before = useAppStore.getState().flowMessages.length
+    await sendFlowMessage(prompt, harnessInput)
+    const messages = useAppStore.getState().flowMessages.slice(before)
+    reply =
+      [...messages].reverse().find((message) => message.role === 'assistant')?.content ||
+      '秘书模式已处理该远程任务，请回到 Papyrus 查看工作流结果。'
 
     useAppStore.getState().setRemoteRelayState({
       status: 'online',
-      message: `已处理来自 ${job.platform} 的远程消息`,
+      message: `已用秘书模式处理来自 ${job.platform} 的远程消息`,
       lastJobAt: Date.now(),
     })
     await reportRemoteRelayResult(clientConfig, job.id, {
@@ -173,6 +175,14 @@ async function handleRemoteJob(job: RemoteRelayJob, channelId?: string, accessKe
   }
 }
 
-function pickMode(input: RemoteRelayMode | undefined, fallback: RemoteRelayMode) {
-  return input === 'flow' || input === 'companion' ? input : fallback
+function activeRemoteToken(state: ReturnType<typeof useAppStore.getState>) {
+  if (state.scallionToken) {
+    return state.scallionToken
+  }
+
+  const credential = state.remotePlatformCredentials.find(
+    (item) => item.enabled && item.appId.trim() && item.secret.trim(),
+  )
+
+  return credential ? `${credential.platform}:${credential.appId}:${credential.secret}` : ''
 }

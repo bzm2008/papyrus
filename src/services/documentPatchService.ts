@@ -14,7 +14,7 @@ type CreatePatchInput = {
 }
 
 const writeIntentPattern =
-  /(写|写个|写一|写篇|写部|写成|写出|写下|创作|生成|起草|成稿|草稿|初稿|再稿|正文|文稿|文章|小说|中篇|长篇|章节|续写|补写|扩写|改写|重写|插入|写入|放进|放到|加入文稿|更新文稿|替换|完整章节|完整结果|append|insert|replace|draft|rewrite|continue|write|novel|chapter)/i
+  /(写|写一|写个|写成|写出|写下|创作|生成|起草|成稿|草稿|初稿|正文|文稿|文章|小说|中篇|长篇|章节|续写|补写|扩写|改写|重写|插入|写入|放进|放到|加入文稿|更新文稿|替换|完整章节|完整结果|append|insert|replace|draft|rewrite|continue|write|novel|chapter)/i
 
 export function queueDocumentPatch(input: CreatePatchInput) {
   const content = input.content.trim()
@@ -24,16 +24,16 @@ export function queueDocumentPatch(input: CreatePatchInput) {
   }
 
   useAppStore.getState().setPendingDocumentPatch({
-      operation: input.operation,
-      title: input.title,
-      content,
-      chapterId: input.chapterId,
-      commitIntent: input.commitIntent,
-      memoryExtractionRequired: input.memoryExtractionRequired,
-      targetArticleId: input.targetArticleId,
-      targetChatId: input.targetChatId,
-      createArticle: input.createArticle,
-    })
+    operation: input.operation,
+    title: input.title,
+    content,
+    chapterId: input.chapterId,
+    commitIntent: input.commitIntent,
+    memoryExtractionRequired: input.memoryExtractionRequired,
+    targetArticleId: input.targetArticleId,
+    targetChatId: input.targetChatId,
+    createArticle: input.createArticle,
+  })
 
   useAppStore.getState().addFlowTrace({
     kind: 'document',

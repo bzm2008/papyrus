@@ -9,9 +9,19 @@
   --papyrus-sage: #6f7f68;
   --papyrus-sage-dark: #3f5845;
   --papyrus-gold: #d7aa4f;
+  --papyrus-surface: #fffefa;
+  --papyrus-surface-soft: #fffdf7;
+  --papyrus-surface-muted: #f7f2e7;
+  --papyrus-focus: rgba(49, 169, 107, 0.24);
+  --papyrus-shadow-popover: 0 20px 64px rgba(43, 34, 19, 0.14);
+  --papyrus-shadow-panel: 0 10px 32px rgba(43, 34, 19, 0.055);
+  --papyrus-radius-sm: 7px;
+  --papyrus-radius-md: 10px;
+  --papyrus-radius-lg: 14px;
+  --papyrus-ease: cubic-bezier(0.22, 1, 0.36, 1);
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "Microsoft YaHei", sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI",
+    "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
   color: var(--papyrus-ink);
   background: var(--papyrus-paper);
   font-synthesis: none;
@@ -32,6 +42,10 @@ body,
   margin: 0;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 button,
 input,
 textarea {
@@ -40,6 +54,33 @@ textarea {
 
 button {
   cursor: default;
+}
+
+button,
+a,
+input,
+textarea,
+select {
+  transition:
+    background-color 180ms var(--papyrus-ease),
+    border-color 180ms var(--papyrus-ease),
+    box-shadow 180ms var(--papyrus-ease),
+    color 180ms var(--papyrus-ease),
+    opacity 180ms var(--papyrus-ease),
+    transform 180ms var(--papyrus-ease);
+}
+
+button:active {
+  transform: scale(0.985);
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--papyrus-focus);
 }
 
 textarea {
@@ -51,7 +92,9 @@ textarea {
 }
 
 .papyrus-grain {
-  background: #fbfaf6;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(215, 170, 79, 0.08), transparent 30%),
+    linear-gradient(180deg, #fbfaf6 0%, #f8f5ed 100%);
   transition:
     background-color 260ms ease,
     background-image 260ms ease;
@@ -70,9 +113,76 @@ textarea {
 }
 
 .papyrus-surface {
-  border-color: rgba(238, 232, 220, 0.96);
-  background: rgba(255, 254, 250, 0.96);
-  box-shadow: 0 8px 24px rgba(43, 34, 19, 0.045);
+  border-color: rgba(232, 221, 199, 0.92);
+  background: rgba(255, 254, 250, 0.88);
+  box-shadow: var(--papyrus-shadow-panel);
+  backdrop-filter: blur(18px);
+}
+
+.papyrus-toolbar {
+  border-color: rgba(225, 220, 207, 0.94);
+  background: rgba(255, 254, 250, 0.86);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.74) inset;
+  backdrop-filter: blur(18px);
+}
+
+.papyrus-panel {
+  border: 1px solid rgba(232, 221, 199, 0.88);
+  background: rgba(255, 254, 250, 0.82);
+  box-shadow: var(--papyrus-shadow-panel);
+  backdrop-filter: blur(18px);
+}
+
+.papyrus-inset {
+  border: 1px solid rgba(232, 221, 199, 0.76);
+  background: rgba(255, 253, 247, 0.78);
+}
+
+.papyrus-control {
+  border: 1px solid rgba(232, 221, 199, 0.92);
+  background: rgba(255, 254, 250, 0.84);
+  color: var(--papyrus-muted);
+}
+
+.papyrus-control:hover {
+  border-color: rgba(111, 127, 104, 0.28);
+  background: rgba(255, 253, 247, 0.96);
+  color: var(--papyrus-ink);
+}
+
+.papyrus-control.is-active {
+  border-color: rgba(23, 23, 20, 0.94);
+  background: var(--papyrus-ink);
+  color: var(--papyrus-surface);
+}
+
+.papyrus-primary-button {
+  background: var(--papyrus-ink);
+  color: var(--papyrus-surface);
+}
+
+.papyrus-primary-button:hover {
+  background: var(--papyrus-sage-dark);
+}
+
+.papyrus-command-bar {
+  border: 1px solid rgba(223, 228, 214, 0.96);
+  background: rgba(255, 254, 250, 0.9);
+  box-shadow:
+    0 12px 36px rgba(43, 34, 19, 0.07),
+    0 1px 0 rgba(255, 255, 255, 0.8) inset;
+  backdrop-filter: blur(20px);
+}
+
+.papyrus-command-bar:focus-within {
+  border-color: rgba(111, 127, 104, 0.46);
+  box-shadow:
+    0 14px 40px rgba(43, 34, 19, 0.08),
+    0 0 0 3px rgba(49, 169, 107, 0.12);
+}
+
+.papyrus-text-balance {
+  text-wrap: balance;
 }
 
 .papyrus-icon-button {
@@ -81,19 +191,13 @@ textarea {
   border: 1px solid rgba(232, 221, 199, 0.95);
   background: rgba(255, 254, 250, 0.86);
   color: #6f7168;
-  transition:
-    transform 160ms ease,
-    border-color 160ms ease,
-    background-color 160ms ease,
-    color 160ms ease,
-    box-shadow 160ms ease;
 }
 
 .papyrus-icon-button:hover {
-  border-color: rgba(215, 170, 79, 0.55);
+  border-color: rgba(111, 127, 104, 0.32);
   background: #fffdf7;
   color: var(--papyrus-ink);
-  box-shadow: 0 6px 16px rgba(43, 34, 19, 0.05);
+  box-shadow: 0 8px 20px rgba(43, 34, 19, 0.055);
 }
 
 .papyrus-scrollbar {
@@ -202,7 +306,22 @@ textarea {
   border: 1px solid var(--papyrus-line);
   border-radius: 8px;
   background: #fffefa;
-  box-shadow: 0 18px 50px rgba(43, 34, 19, 0.16);
+  box-shadow: var(--papyrus-shadow-popover);
+}
+
+.papyrus-window-enter {
+  animation: papyrus-window-enter 220ms var(--papyrus-ease) both;
+}
+
+@keyframes papyrus-window-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .papyrus-mention-item {
@@ -258,6 +377,15 @@ textarea {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+
   .vibe-dock::after {
     animation: none;
   }

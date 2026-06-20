@@ -1,7 +1,7 @@
+import { type LlmProviderConfig, useAppStore } from '../stores/useAppStore'
 import { composeSystemPrompt } from './agentPromptContext'
 import { callOpenAICompatible, canCallProvider } from './llmClient'
 import { retrieveMentionContext } from './projectContext'
-import { useAppStore, type LlmProviderConfig } from '../stores/useAppStore'
 
 export type WritingAction = '指令' | '审查' | '纠错' | '查重' | '降噪'
 

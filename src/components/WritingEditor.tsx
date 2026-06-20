@@ -6,6 +6,7 @@ import {
   Ban,
   Bold,
   CheckCheck,
+  CheckCircle2,
   Feather,
   FileSearch,
   Heading1,
@@ -24,12 +25,12 @@ import {
   ShieldCheck,
   Strikethrough,
   Undo2,
-  CheckCircle2,
 } from 'lucide-react'
 import { useEffect, useState, type FormEvent } from 'react'
 import { AiDiffMark, AiRewriteExtension } from '../extensions/aiRewrite'
 import { InlineAutocomplete } from '../extensions/inlineAutocomplete'
 import { ProjectMention } from '../extensions/projectMention'
+import { formatChangeStat, recordDocumentChange } from '../services/documentChangeStatsService'
 import { requestInlineCompletion } from '../services/localAutocomplete'
 import { runCompanionRewrite, type WritingAction } from '../services/writingActions'
 import { type DocumentPatch, useAppStore } from '../stores/useAppStore'
@@ -37,8 +38,8 @@ import { type DocumentPatch, useAppStore } from '../stores/useAppStore'
 const initialContent = `
   <h1>论记忆、材料与判断</h1>
   <p>这里是 Papyrus 的主编辑区。</p>
-  <p>你可以选中任意一段文字，呼出悬浮菜单，然后使用伴写能力测试原位改写、纠错、审查、查重或降噪。</p>
-  <p>写作时，左侧用于组织材料与大纲，中间尽可能保持安静，秘书模式负责主笔对话、上下文管理与项目级记忆。</p>
+  <p>你可以选中任意一段文字，呼出悬浮菜单，然后使用伴写能力做原位改写、纠错、审查、查重或降噪。</p>
+  <p>写作时，左侧用于组织材料与大纲，中间尽可能保持安静，秘书模式负责秘书长对话、上下文管理与项目级记忆。</p>
 `
 
 const actions: Array<{
@@ -100,12 +101,18 @@ export function WritingEditor() {
     }
 
     if (pendingDocumentPatch.createArticle) {
+      const beforeText = editor.getText()
       createArticleFromPatch(pendingDocumentPatch)
       markDocumentPatch('applied')
+      const stat = recordDocumentChange({
+        patch: pendingDocumentPatch,
+        beforeText,
+        afterText: pendingDocumentPatch.content,
+      })
       addFlowTrace({
         kind: 'document',
         title: '已创建新文章',
-        detail: pendingDocumentPatch.title,
+        detail: `${pendingDocumentPatch.title} · ${formatChangeStat(stat.insertedChars, stat.deletedChars)}`,
         status: 'completed',
         toolName: 'document.patch',
         endedAt: Date.now(),
@@ -113,14 +120,24 @@ export function WritingEditor() {
       return
     }
 
+    const beforeText = editor.getText()
+    const replacedText =
+      pendingDocumentPatch.operation === 'replace_selection' ? getSelectedText(editor) : undefined
     const applied = applyDocumentPatch(editor, pendingDocumentPatch)
 
     if (applied) {
+      const afterText = editor.getText()
+      const stat = recordDocumentChange({
+        patch: pendingDocumentPatch,
+        beforeText,
+        afterText,
+        replacedText,
+      })
       markDocumentPatch('applied')
       addFlowTrace({
         kind: 'document',
         title: '已写入文稿',
-        detail: pendingDocumentPatch.title,
+        detail: `${pendingDocumentPatch.title} · ${formatChangeStat(stat.insertedChars, stat.deletedChars)}`,
         status: 'completed',
         toolName: 'document.patch',
         endedAt: Date.now(),
@@ -144,7 +161,7 @@ export function WritingEditor() {
 
   if (!editor) {
     return (
-      <div className="grid min-h-[520px] place-items-center text-sm text-slate-400">
+      <div className="grid min-h-[520px] place-items-center text-sm text-[#8f897a]">
         <span className="inline-flex items-center gap-2">
           <Feather size={16} className="text-[#d7aa4f]" />
           正在准备编辑器
@@ -183,7 +200,7 @@ export function WritingEditor() {
       setActionNotice({
         status: 'completed',
         title: `${action}已应用`,
-        detail: '选区已原位替换，并用浅金色高亮标出本次 AI 改动。',
+        detail: '选区已原位替换，并用浅金色标出本次 AI 改动。',
       })
       setCustomPromptOpen(false)
       setCustomPrompt('')
@@ -215,7 +232,7 @@ export function WritingEditor() {
   }
 
   return (
-    <div className="relative min-h-[560px] flex-1">
+    <div className="relative min-h-[560px] flex-1 bg-[#fbfaf6]/38">
       <BubbleMenu
         editor={editor}
         shouldShow={({ state }) => !state.selection.empty}
@@ -231,7 +248,7 @@ export function WritingEditor() {
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: 8, scale: 0.98 }}
           transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-          className="w-[min(540px,calc(100vw-32px))] rounded-xl border border-[#e8ddc7] bg-[#fffefa]/96 p-2 shadow-[0_24px_70px_rgba(43,34,19,0.18)] backdrop-blur"
+          className="papyrus-panel w-[min(520px,calc(100vw-32px))] rounded-xl p-2"
         >
           <div className="grid grid-cols-6 gap-1">
             {actions.map((action) => {
@@ -248,9 +265,9 @@ export function WritingEditor() {
                       : void runAction(action.label)
                   }
                   disabled={isRunning}
-                  className="flex h-9 items-center justify-center gap-1.5 rounded-lg text-xs font-medium text-[#6f7168] transition hover:bg-[#f4ead8] hover:text-[#3f5845] disabled:cursor-wait disabled:opacity-50"
+                  className="flex h-8 items-center justify-center gap-1.5 rounded-md text-xs font-medium text-[#6f7168] hover:bg-[#f4ead8] hover:text-[#3f5845] disabled:cursor-wait disabled:opacity-50"
                 >
-                  <Icon size={14} />
+                  <Icon size={13} />
                   {action.label}
                 </button>
               )
@@ -262,46 +279,14 @@ export function WritingEditor() {
                 setRejectOpen((open) => !open)
                 setCustomPromptOpen(false)
               }}
-              className="flex h-9 items-center justify-center gap-1.5 rounded-lg text-xs font-medium text-[#6f7168] transition hover:bg-[#fff1f1] hover:text-rose-700"
+              className="flex h-8 items-center justify-center gap-1.5 rounded-md text-xs font-medium text-[#6f7168] hover:bg-[#fff1f1] hover:text-rose-700"
             >
-              <Ban size={14} />
+              <Ban size={13} />
               拒绝
             </button>
           </div>
 
-          <AnimatePresence initial={false}>
-            {actionNotice ? (
-              <motion.div
-                initial={{ opacity: 0, y: -4, height: 0 }}
-                animate={{ opacity: 1, y: 0, height: 'auto' }}
-                exit={{ opacity: 0, y: -4, height: 0 }}
-                transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                className="overflow-hidden"
-              >
-                <div
-                  className={`mt-2 flex items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-5 ${
-                    actionNotice.status === 'error'
-                      ? 'border-rose-200 bg-rose-50 text-rose-700'
-                      : actionNotice.status === 'completed'
-                        ? 'border-[#d7e5cd] bg-[#f3f8ef] text-[#3f5845]'
-                        : 'border-[#efe5d1] bg-[#fffdf7] text-[#6f7168]'
-                  }`}
-                >
-                  {actionNotice.status === 'running' ? (
-                    <Loader2 size={14} className="mt-0.5 shrink-0 animate-spin text-[#d7aa4f]" />
-                  ) : actionNotice.status === 'completed' ? (
-                    <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-[#4f7a54]" />
-                  ) : (
-                    <Ban size={14} className="mt-0.5 shrink-0 text-rose-600" />
-                  )}
-                  <div className="min-w-0">
-                    <div className="font-medium">{actionNotice.title}</div>
-                    <div className="text-[11px] opacity-80">{actionNotice.detail}</div>
-                  </div>
-                </div>
-              </motion.div>
-            ) : null}
-          </AnimatePresence>
+          <ActionNotice notice={actionNotice} />
 
           <AnimatePresence initial={false}>
             {customPromptOpen ? (
@@ -319,12 +304,12 @@ export function WritingEditor() {
                     value={customPrompt}
                     onChange={(event) => setCustomPrompt(event.target.value)}
                     placeholder="例如：改得更像一段学术随笔"
-                    className="h-9 min-w-0 flex-1 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] px-3 text-sm text-[#2f2b22] outline-none transition placeholder:text-[#9d988a] focus:border-[#d7aa4f]"
+                    className="h-8 min-w-0 flex-1 rounded-md border border-[#e8ddc7] bg-[#fffdf7] px-3 text-sm text-[#2f2b22] outline-none placeholder:text-[#9d988a] focus:border-[#d7aa4f]"
                   />
                   <button
                     type="submit"
                     disabled={isRunning}
-                    className="h-9 rounded-lg bg-[#171714] px-3 text-sm font-medium text-[#fffefa] transition hover:bg-[#3f5845]"
+                    className="papyrus-primary-button h-8 rounded-md px-3 text-sm font-medium disabled:cursor-wait disabled:opacity-50"
                   >
                     {isRunning ? '处理中' : '应用'}
                   </button>
@@ -349,12 +334,9 @@ export function WritingEditor() {
                     value={rejectReason}
                     onChange={(event) => setRejectReason(event.target.value)}
                     placeholder="例如：不要用这个成语 / 避免过度抒情"
-                    className="h-9 min-w-0 flex-1 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] px-3 text-sm text-[#2f2b22] outline-none transition placeholder:text-[#9d988a] focus:border-rose-300"
+                    className="h-8 min-w-0 flex-1 rounded-md border border-[#e8ddc7] bg-[#fffdf7] px-3 text-sm text-[#2f2b22] outline-none placeholder:text-[#9d988a] focus:border-rose-300"
                   />
-                  <button
-                    type="submit"
-                    className="h-9 rounded-lg bg-rose-600 px-3 text-sm font-medium text-white transition hover:bg-rose-700"
-                  >
+                  <button type="submit" className="h-8 rounded-md bg-rose-600 px-3 text-sm font-medium text-white hover:bg-rose-700">
                     记住
                   </button>
                 </div>
@@ -365,111 +347,76 @@ export function WritingEditor() {
       </BubbleMenu>
 
       <DocumentToolbar editor={editor} />
-      <EditorContent
-        editor={editor}
-        className={`papyrus-editor papyrus-editor-vibe-${activeVibeId} h-full`}
-      />
+      <EditorContent editor={editor} className={`papyrus-editor papyrus-editor-vibe-${activeVibeId} h-full`} />
     </div>
+  )
+}
+
+function ActionNotice({
+  notice,
+}: {
+  notice: {
+    status: 'running' | 'completed' | 'error'
+    title: string
+    detail: string
+  } | null
+}) {
+  return (
+    <AnimatePresence initial={false}>
+      {notice ? (
+        <motion.div
+          initial={{ opacity: 0, y: -4, height: 0 }}
+          animate={{ opacity: 1, y: 0, height: 'auto' }}
+          exit={{ opacity: 0, y: -4, height: 0 }}
+          transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          className="overflow-hidden"
+        >
+          <div
+            className={`mt-2 flex items-start gap-2 rounded-md border px-3 py-2 text-xs leading-5 ${
+              notice.status === 'error'
+                ? 'border-rose-200 bg-rose-50 text-rose-700'
+                : notice.status === 'completed'
+                  ? 'border-[#d7e5cd] bg-[#f3f8ef] text-[#3f5845]'
+                  : 'border-[#efe5d1] bg-[#fffdf7] text-[#6f7168]'
+            }`}
+          >
+            {notice.status === 'running' ? (
+              <Loader2 size={13} className="mt-0.5 shrink-0 animate-spin text-[#d7aa4f]" />
+            ) : notice.status === 'completed' ? (
+              <CheckCircle2 size={13} className="mt-0.5 shrink-0 text-[#4f7a54]" />
+            ) : (
+              <Ban size={13} className="mt-0.5 shrink-0 text-rose-600" />
+            )}
+            <div className="min-w-0">
+              <div className="font-medium">{notice.title}</div>
+              <div className="text-[11px] opacity-80">{notice.detail}</div>
+            </div>
+          </div>
+        </motion.div>
+      ) : null}
+    </AnimatePresence>
   )
 }
 
 function DocumentToolbar({ editor }: { editor: Editor }) {
   const controls = [
-    {
-      label: '撤销',
-      icon: Undo2,
-      active: false,
-      disabled: !editor.can().undo(),
-      action: () => editor.chain().focus().undo().run(),
-    },
-    {
-      label: '重做',
-      icon: Redo2,
-      active: false,
-      disabled: !editor.can().redo(),
-      action: () => editor.chain().focus().redo().run(),
-    },
-    {
-      label: '一级标题',
-      icon: Heading1,
-      active: editor.isActive('heading', { level: 1 }),
-      disabled: false,
-      action: () => editor.chain().focus().toggleHeading({ level: 1 }).run(),
-    },
-    {
-      label: '二级标题',
-      icon: Heading2,
-      active: editor.isActive('heading', { level: 2 }),
-      disabled: false,
-      action: () => editor.chain().focus().toggleHeading({ level: 2 }).run(),
-    },
-    {
-      label: '正文',
-      icon: Pilcrow,
-      active: editor.isActive('paragraph'),
-      disabled: false,
-      action: () => editor.chain().focus().setParagraph().run(),
-    },
-    {
-      label: '加粗',
-      icon: Bold,
-      active: editor.isActive('bold'),
-      disabled: false,
-      action: () => editor.chain().focus().toggleBold().run(),
-    },
-    {
-      label: '斜体',
-      icon: Italic,
-      active: editor.isActive('italic'),
-      disabled: false,
-      action: () => editor.chain().focus().toggleItalic().run(),
-    },
-    {
-      label: '删除线',
-      icon: Strikethrough,
-      active: editor.isActive('strike'),
-      disabled: false,
-      action: () => editor.chain().focus().toggleStrike().run(),
-    },
-    {
-      label: '项目列表',
-      icon: List,
-      active: editor.isActive('bulletList'),
-      disabled: false,
-      action: () => editor.chain().focus().toggleBulletList().run(),
-    },
-    {
-      label: '编号列表',
-      icon: ListOrdered,
-      active: editor.isActive('orderedList'),
-      disabled: false,
-      action: () => editor.chain().focus().toggleOrderedList().run(),
-    },
-    {
-      label: '引用',
-      icon: Quote,
-      active: editor.isActive('blockquote'),
-      disabled: false,
-      action: () => editor.chain().focus().toggleBlockquote().run(),
-    },
-    {
-      label: '分割线',
-      icon: SeparatorHorizontal,
-      active: false,
-      disabled: false,
-      action: () => editor.chain().focus().setHorizontalRule().run(),
-    },
-    {
-      label: '清除格式',
-      icon: RemoveFormatting,
-      active: false,
-      disabled: false,
-      action: () => editor.chain().focus().unsetAllMarks().clearNodes().run(),
-    },
+    { label: '撤销', icon: Undo2, active: false, disabled: !editor.can().undo(), action: () => editor.chain().focus().undo().run() },
+    { label: '重做', icon: Redo2, active: false, disabled: !editor.can().redo(), action: () => editor.chain().focus().redo().run() },
+    { label: '一级标题', icon: Heading1, active: editor.isActive('heading', { level: 1 }), disabled: false, action: () => editor.chain().focus().toggleHeading({ level: 1 }).run() },
+    { label: '二级标题', icon: Heading2, active: editor.isActive('heading', { level: 2 }), disabled: false, action: () => editor.chain().focus().toggleHeading({ level: 2 }).run() },
+    { label: '正文', icon: Pilcrow, active: editor.isActive('paragraph'), disabled: false, action: () => editor.chain().focus().setParagraph().run() },
+    { label: '加粗', icon: Bold, active: editor.isActive('bold'), disabled: false, action: () => editor.chain().focus().toggleBold().run() },
+    { label: '斜体', icon: Italic, active: editor.isActive('italic'), disabled: false, action: () => editor.chain().focus().toggleItalic().run() },
+    { label: '删除线', icon: Strikethrough, active: editor.isActive('strike'), disabled: false, action: () => editor.chain().focus().toggleStrike().run() },
+    { label: '项目列表', icon: List, active: editor.isActive('bulletList'), disabled: false, action: () => editor.chain().focus().toggleBulletList().run() },
+    { label: '编号列表', icon: ListOrdered, active: editor.isActive('orderedList'), disabled: false, action: () => editor.chain().focus().toggleOrderedList().run() },
+    { label: '引用', icon: Quote, active: editor.isActive('blockquote'), disabled: false, action: () => editor.chain().focus().toggleBlockquote().run() },
+    { label: '分割线', icon: SeparatorHorizontal, active: false, disabled: false, action: () => editor.chain().focus().setHorizontalRule().run() },
+    { label: '清除格式', icon: RemoveFormatting, active: false, disabled: false, action: () => editor.chain().focus().unsetAllMarks().clearNodes().run() },
   ]
 
   return (
-    <div className="papyrus-scrollbar sticky top-0 z-20 flex h-11 items-center gap-1 overflow-x-auto border-b border-[#efe5d1] bg-[#fffefa]/94 px-8 backdrop-blur">
+    <div className="papyrus-toolbar papyrus-scrollbar sticky top-0 z-20 flex h-10 items-center gap-0.5 overflow-x-auto border-b px-8">
       {controls.map((control) => {
         const Icon = control.icon
 
@@ -481,13 +428,13 @@ function DocumentToolbar({ editor }: { editor: Editor }) {
             aria-pressed={control.active}
             disabled={control.disabled}
             onClick={control.action}
-            className={`grid size-8 place-items-center rounded-lg transition disabled:cursor-not-allowed disabled:opacity-40 ${
+            className={`grid size-7 place-items-center rounded-md disabled:cursor-not-allowed disabled:opacity-40 ${
               control.active
                 ? 'bg-[#171714] text-[#fffefa]'
                 : 'text-[#6f7168] hover:bg-[#f4ead8] hover:text-[#171714]'
             }`}
           >
-            <Icon size={15} />
+            <Icon size={14} />
           </button>
         )
       })}

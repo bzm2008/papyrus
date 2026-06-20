@@ -17,6 +17,18 @@ import {
 } from './llmClient'
 import { retrieveMentionContext } from './projectContext'
 import {
+  composeGoalExecutionPrompt,
+  describeThinkingEffort,
+  judgeSecretaryGoal,
+} from './secretaryGoalService'
+import {
+  getEnabledStudioAgents,
+  getStudioAgent,
+  getStudioAgentCatalogForPrompt,
+  routeStudioAgents,
+  type AgentRoutingDecision,
+} from './studioAgentLibrary'
+import {
   buildOrUpdateStoryProject,
   commitChapter,
   createChapterBrief,
@@ -30,6 +42,7 @@ import {
   type AgentTodo,
   type DocumentPatchOperation,
   type FlowAgentId,
+  type FlowThinkingEffort,
   type FlowTrace,
   type ImportedResource,
   type SecretaryPlanDraft,
@@ -50,6 +63,7 @@ export type AgentRunPlan = {
   documentPatchOperation?: DocumentPatchOperation
   replyMode: 'conversation_only' | 'conversation_with_patch'
   conversationGoal: string
+  routingRationale?: string
 }
 
 export type AgentRunResult = {
@@ -66,61 +80,13 @@ type AgentOutput = {
   sources?: FlowTrace['sources']
 }
 
-type AgentProfile = {
-  label: string
-  system: string
-}
-
-const subAgentIds: FlowAgentId[] = [
-  'researcher',
-  'critic',
-  'dramatist',
-  'stylist',
-  'proofreader',
-  'archivist',
-]
-
-const agentProfiles: Record<FlowAgentId, AgentProfile> = {
-  writer: {
-    label: '主笔',
-    system:
-      '你是 Papyrus 的主笔 Agent。你负责理解目标、拆解待办、选择工具和子 Agent，最后把结果整合成用户可直接使用的回答。',
-  },
-  researcher: {
-    label: '寻根',
-    system:
-      '你负责资料、来源、事实链、外部检索和项目文件检索。区分已确认事实、不确定线索和可写入正文的素材。',
-  },
-  critic: {
-    label: '刺客',
-    system:
-      '你负责寻找反例、漏洞、逻辑跳跃、空话和事实风险。结论要锋利，但必须可执行。',
-  },
-  dramatist: {
-    label: '编剧',
-    system:
-      '你负责结构、章节节奏、场景推进、人物动机、冲突和叙事张力。',
-  },
-  stylist: {
-    label: '文风师',
-    system:
-      '你负责统一语气、句法、节奏和 STYLE.md 规范，减少模板感和 AI 痕迹。',
-  },
-  proofreader: {
-    label: '校雠',
-    system:
-      '你负责错别字、病句、标点、术语一致性和重复表达，输出干净可靠的修改建议。',
-  },
-  archivist: {
-    label: '档案员',
-    system:
-      '你负责资源树、摘要、人物/设定卡、长期记忆和可复用上下文。',
-  },
-}
-
 type SendFlowMessageOptions = Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mode'>> & {
   displayPrompt?: string
   approvedPlanId?: string
+  thinkingEffort?: FlowThinkingEffort
+  goalId?: string
+  guidanceNotes?: string[]
+  queuedInputId?: string
 }
 
 const sharedAgentRules = [
@@ -128,7 +94,7 @@ const sharedAgentRules = [
   '你可以使用联网搜索、项目上下文和文稿补丁工具。不要因为训练截止时间而拒绝实时问题；需要实时信息时应主动规划联网搜索。',
   '事实、推断、设定和建议必须分开。不要编造来源。',
   '只有当任务需要产出正文、续写、改写、插入、替换或用户明确要求写入文稿时，才生成文稿补丁。',
-  '对话说明、来源说明、计划过程、子 Agent 结论不要写入文稿。',
+  '对话说明、来源说明、计划过程、工作室 Agent 结论不要写入文稿。',
   '始终遵守 STYLE.md、WORLD.md、用户负向记忆、导入资源和当前文稿上下文。',
 ].join('\n')
 
@@ -145,8 +111,23 @@ export async function sendFlowMessage(
 
   const store = useAppStore.getState()
   const provider = store.providerConfigs[store.activeProviderId]
+  const thinkingEffort = harnessInput.thinkingEffort ?? store.flowThinkingEffort
+  const activeGoal =
+    harnessInput.goalId && store.activeSecretaryGoal?.id === harnessInput.goalId
+      ? store.activeSecretaryGoal
+      : undefined
+  const guidanceNotes = [
+    ...(harnessInput.guidanceNotes ?? []),
+    ...store.queuedUserInputs
+      .filter((input) => input.status === 'guidance')
+      .slice(-6)
+      .map((input) => input.content),
+  ]
+  const executionContent = activeGoal
+    ? composeGoalExecutionPrompt(activeGoal, content, thinkingEffort, guidanceNotes)
+    : composeExecutionControlPrompt(content, thinkingEffort, guidanceNotes)
   const run = startAgentRun({
-    prompt: content,
+    prompt: executionContent,
     mode: 'flow',
     source: harnessInput.source ?? 'local',
     remoteJobId: harnessInput.remoteJobId,
@@ -157,11 +138,21 @@ export async function sendFlowMessage(
   store.clearFlowRun()
   store.setActiveAgentRunId(run.id)
   store.addFlowMessage({ role: 'user', content: displayContent || content })
-  store.setLlmRunState('running', '主笔正在判断任务路径')
+  if (guidanceNotes.length) {
+    store.addFlowTrace({
+      kind: 'memory',
+      title: '本轮引导',
+      detail: guidanceNotes.join('\n'),
+      status: 'completed',
+      agentId: 'writer',
+      endedAt: Date.now(),
+    })
+  }
+  store.setLlmRunState('running', '秘书长正在判断任务路径')
 
   try {
-    const plan = await planAgentRun(content)
-    const result = await executeAgentRun(content, plan)
+    const plan = await planAgentRun(executionContent)
+    const result = await executeAgentRun(executionContent, plan)
 
     if (!result.streamedMessageId) {
       useAppStore.getState().addFlowMessage({
@@ -173,10 +164,10 @@ export async function sendFlowMessage(
 
     if (plan.writeIntent && result.patchContent) {
       queueDocumentPatch({
-        operation: plan.documentPatchOperation ?? inferPatchOperation(content),
-        title: '主笔生成正文补丁',
+        operation: plan.documentPatchOperation ?? inferPatchOperation(executionContent),
+        title: '秘书长生成正文补丁',
         content: result.patchContent,
-        createArticle: shouldCreateArticleFromPrompt(content),
+        createArticle: shouldCreateArticleFromPrompt(executionContent),
         targetChatId: useAppStore.getState().activeChatId,
       })
     }
@@ -185,14 +176,18 @@ export async function sendFlowMessage(
       status: 'completed',
       response: result.response,
       patchContent: result.patchContent,
-      summary: summarizeFlowRun(content, plan, result),
+      summary: summarizeFlowRun(executionContent, plan, result),
     })
+
+    if (activeGoal) {
+      await runGoalJudgePass(activeGoal.id, result.response || result.patchContent || '', thinkingEffort)
+    }
 
     useAppStore
       .getState()
       .setLlmRunState(
         'idle',
-        canCallProvider(provider) ? '主笔已完成本轮编排' : '使用本地保守编排完成',
+        canCallProvider(provider) ? '秘书长已完成本轮编排' : '使用本地保守编排完成',
       )
   } catch (error) {
     failAgentRun(run, error)
@@ -329,10 +324,68 @@ export async function reviseSecretaryPlanDraft(feedback: string) {
   }
 }
 
+async function runGoalJudgePass(
+  goalId: string,
+  stageResult: string,
+  thinkingEffort: FlowThinkingEffort,
+) {
+  const goal = useAppStore.getState().activeSecretaryGoal
+
+  if (!goal || goal.id !== goalId) {
+    return
+  }
+
+  const judge = await judgeSecretaryGoal(goal, stageResult, thinkingEffort)
+  useAppStore.getState().addGoalCheckpoint({
+    goalId,
+    title: '裁判检查',
+    summary: judge.summary,
+    judge,
+  })
+
+  if (judge.verdict === 'complete') {
+    useAppStore.getState().updateSecretaryGoal(goalId, {
+      status: 'completed',
+      currentProgress: judge.summary,
+    })
+  } else if (judge.verdict === 'blocked') {
+    useAppStore.getState().updateSecretaryGoal(goalId, {
+      status: 'blocked',
+      currentProgress: judge.nextStep || judge.summary,
+    })
+  } else {
+    useAppStore.getState().updateSecretaryGoal(goalId, {
+      status: 'active',
+      currentProgress: judge.nextStep || judge.summary,
+    })
+  }
+}
+
+function composeExecutionControlPrompt(
+  content: string,
+  thinkingEffort: FlowThinkingEffort,
+  guidanceNotes: string[],
+) {
+  return [
+    content,
+    '',
+    `【思考强度】${describeThinkingEffort(thinkingEffort)}`,
+    guidanceNotes.length
+      ? ['【用户运行中引导】', ...guidanceNotes.map((note, index) => `${index + 1}. ${note}`)].join('\n')
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
 export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
   const store = useAppStore.getState()
   const provider = store.providerConfigs[store.activeProviderId]
   const reviewMode = store.flowReviewMode
+  const agentCatalog = getStudioAgentCatalogForPrompt(
+    store.customStudioAgents,
+    store.disabledBuiltInStudioAgentIds,
+  )
 
   if (canCallProvider(provider)) {
     const step = store.addAgentStep({
@@ -345,8 +398,8 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
     })
     const trace = store.addFlowTrace({
       kind: 'plan',
-      title: '主笔自主规划',
-      detail: '正在判断是否需要联网、子 Agent、项目上下文或文稿写入。',
+      title: '秘书长自主规划',
+      detail: '正在判断是否需要联网、工作室 Agent、项目上下文或文稿写入。',
       status: 'running',
       agentId: 'writer',
     })
@@ -361,7 +414,10 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
               '当前日期是 2026-05-23，时区 Asia/Shanghai。',
               '你只输出严格 JSON，不要 Markdown，不要解释。',
               '字段必须是：needsWebSearch, subAgents, toolCalls, writeIntent, documentPatchOperation, replyMode, conversationGoal。',
-              'subAgents 只能包含 researcher, critic, dramatist, stylist, proofreader, archivist。',
+              'subAgents 必须从下方启用的工作室 Agent id 中选择，不能调用已禁用或不存在的 Agent。',
+              '先判断任务类别，再选择最多 3 个主力 Agent；如有必要再选择最多 2 个审查/顾问 Agent。复杂 /goal 可分阶段增加，但单阶段仍要克制。',
+              '事实争议优先资料核查/研究类 Agent；表达争议优先文风师/出版编辑；结构争议优先结构编辑；平台策略争议优先对应平台运营专家；法律/政策/投资/财务风险必须加入合规或专业审查。',
+              `启用的工作室 Agent：\n${agentCatalog}`,
               'toolCalls 中 name 只能是 web_search, project_context, document_patch。',
               '当任务涉及今天、最近、新闻、实时事实、外部材料、引用、来源、趋势、人物/公司/政策/产品变动、事实核验时，needsWebSearch 必须为 true，并添加 web_search toolCall。',
               '当任务只是解释、闲聊、建议或审查，不要写入文稿。只有正文创作、续写、润色替换、插入、补写、改写才 writeIntent=true。',
@@ -486,7 +542,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
     } catch (error) {
       useAppStore.getState().updateAgentTodo(todo.id, {
         status: 'blocked',
-        detail: error instanceof Error ? error.message : '子 Agent 执行失败',
+        detail: error instanceof Error ? error.message : '工作室 Agent 执行失败',
       })
     }
   }
@@ -502,13 +558,13 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
   const assistantMessage = useAppStore.getState().addFlowMessage({
     role: 'assistant',
     agentId: 'writer',
-    content: '主笔开始整合结果…',
+    content: '秘书长开始整合结果…',
   })
   const updateStream = (text: string) => {
     const visibleText = plan.writeIntent ? visiblePatchConversationText(text) : text
 
     useAppStore.getState().updateFlowMessage(assistantMessage.id, {
-      content: visibleText || '主笔开始整合结果…',
+      content: visibleText || '秘书长开始整合结果…',
     })
   }
   let writerText = await runWriter(prompt, plan, outputs, sources, updateStream, storyBrief)
@@ -591,7 +647,7 @@ async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchC
       type: 'generation',
       title: '二稿修复',
       status: 'running',
-      details: '初稿未过闸门，主笔根据审查结果补写二稿。',
+      details: '初稿未过闸门，秘书长根据审查结果补写二稿。',
       isExpanded: true,
       agentId: 'writer',
     })
@@ -603,7 +659,7 @@ async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchC
         {
           role: 'system',
           content:
-            '你是 Papyrus 主笔。请根据章节任务书和审查问题，直接输出修复后的正文，不要解释过程。',
+            '你是 Papyrus 秘书长。请根据章节任务书和审查问题，直接输出修复后的正文，不要解释过程。',
         },
         {
           role: 'user',
@@ -676,15 +732,16 @@ function createTodos(
   plan.toolCalls.forEach((toolCall) => {
     todos.push({
       title: `准备工具：${toolCall.name}`,
-      detail: toolCall.reason || toolCall.query || '主笔判断需要该工具。',
+      detail: toolCall.reason || toolCall.query || '秘书长判断需要该工具。',
       status: 'completed',
-      agentId: toolCall.name === 'web_search' ? 'researcher' : 'writer',
+      agentId: toolCall.name === 'web_search' ? firstEnabledAgent(['citation-checker', 'academic-historian']) ?? 'writer' : 'writer',
     })
   })
 
   plan.subAgents.forEach((agentId) => {
+    const agent = getRuntimeAgent(agentId)
     todos.push({
-      title: `调用${agentProfiles[agentId].label}`,
+      title: `调用${agent.shortName}`,
       detail: taskDetailForAgent(agentId),
       status: 'pending',
       agentId,
@@ -692,10 +749,10 @@ function createTodos(
   })
 
   todos.push({
-    title: plan.writeIntent ? '主笔整合并生成文稿补丁' : '主笔整合并回复',
+    title: plan.writeIntent ? '秘书长整合并生成文稿补丁' : '秘书长整合并回复',
     detail: plan.writeIntent
       ? '只把正文内容放入 DocumentPatch，对话中保留简短说明和来源。'
-      : '整合工具与子 Agent 结论，只在对话中回答。',
+      : '整合工具与工作室 Agent 结论，只在对话中回答。',
     status: 'pending',
     agentId: 'writer',
   })
@@ -706,6 +763,7 @@ function createTodos(
 async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
   const sources: NonNullable<FlowTrace['sources']> = []
   const webCalls = plan.toolCalls.filter((toolCall) => toolCall.name === 'web_search')
+  const researchAgentId = firstEnabledAgent(['citation-checker', 'academic-historian', 'trend-researcher']) ?? 'writer'
 
   for (const toolCall of webCalls) {
     const query = toolCall.query?.trim() || buildSearchQuery(prompt, plan)
@@ -715,15 +773,15 @@ async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
       status: 'running',
       details: `${toolCall.reason || 'Agent requested external evidence.'}\nQuery: ${query}`,
       isExpanded: true,
-      agentId: plan.subAgents.includes('critic') ? 'critic' : 'researcher',
+      agentId: researchAgentId,
       toolName: 'web_search',
     })
     const trace = useAppStore.getState().addFlowTrace({
       kind: 'tool',
       title: '正在联网搜索',
-      detail: `${toolCall.reason || '主笔判断需要外部资料'}\n查询：${query}`,
+      detail: `${toolCall.reason || '秘书长判断需要外部资料'}\n查询：${query}`,
       status: 'running',
-      agentId: plan.subAgents.includes('critic') ? 'critic' : 'researcher',
+      agentId: researchAgentId,
       toolName: 'web_search',
     })
 
@@ -769,7 +827,7 @@ async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
       status: 'completed',
       details: detail.slice(0, 900),
       isExpanded: false,
-      agentId: 'researcher',
+      agentId: firstEnabledAgent(['archivist', 'citation-checker']) ?? 'writer',
       toolName: 'project_context',
       endedAt: Date.now(),
     })
@@ -778,7 +836,7 @@ async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
       title: '读取项目上下文',
       detail: detail.slice(0, 600),
       status: 'completed',
-      agentId: 'researcher',
+      agentId: firstEnabledAgent(['archivist', 'citation-checker']) ?? 'writer',
       toolName: 'project_context',
       endedAt: Date.now(),
     })
@@ -794,12 +852,12 @@ async function runSubAgent(
   sources: FlowTrace['sources'],
   existingStepId?: string,
 ): Promise<AgentOutput> {
-  const profile = agentProfiles[agentId]
+  const profile = getRuntimeAgent(agentId)
   const stepId =
     existingStepId ??
     useAppStore.getState().addAgentStep({
       type: 'sub_agent',
-      title: `Call sub agent: ${profile.label}`,
+      title: `调用 Agent：${profile.name}`,
       status: 'running',
       details: taskDetailForAgent(agentId),
       isExpanded: true,
@@ -807,7 +865,7 @@ async function runSubAgent(
     }).id
   const trace = useAppStore.getState().addFlowTrace({
     kind: 'agent',
-    title: `调用子 Agent：${profile.label}`,
+    title: `调用 Agent：${profile.name}`,
     detail: taskDetailForAgent(agentId),
     status: 'running',
     agentId,
@@ -840,7 +898,7 @@ async function runSubAgent(
 
   return {
     agentId,
-    label: profile.label,
+    label: profile.name,
     content,
     sources,
   }
@@ -854,14 +912,21 @@ async function callAgent(
 ) {
   const store = useAppStore.getState()
   const provider = store.providerConfigs[store.activeProviderId]
-  const profile = agentProfiles[agentId]
+  const profile = getRuntimeAgent(agentId)
 
   if (!canCallProvider(provider)) {
     return createMockAgentOutput(agentId, prompt, sources)
   }
 
   const system = composeSystemPrompt(
-    [sharedAgentRules, profile.system, composeSkillPrompt(agentId, prompt)].filter(Boolean).join('\n\n'),
+    [
+      sharedAgentRules,
+      profile.systemPrompt,
+      profile.outputRules.length ? `输出规则：\n${profile.outputRules.map((rule) => `- ${rule}`).join('\n')}` : '',
+      composeSkillPrompt(agentId, prompt),
+    ]
+      .filter(Boolean)
+      .join('\n\n'),
   )
 
   return callOpenAICompatible(provider, [
@@ -869,7 +934,7 @@ async function callAgent(
     {
       role: 'user',
       content: [
-        `主笔计划：\n${JSON.stringify(plan, null, 2)}`,
+        `秘书长计划：\n${JSON.stringify(plan, null, 2)}`,
         composeWritingTaskPrompt(prompt),
         `用户任务：\n${prompt}`,
         sources?.length ? `联网来源：\n${formatSources(sources)}` : '',
@@ -906,10 +971,10 @@ async function runWriter(
   })
   const trace = useAppStore.getState().addFlowTrace({
     kind: 'agent',
-    title: '主笔整合结果',
+    title: '秘书长整合结果',
     detail: plan.writeIntent
-      ? '整合工具、来源、项目上下文和子 Agent 结论，准备正文补丁。'
-      : '整合工具、来源、项目上下文和子 Agent 结论，准备对话回复。',
+      ? '整合工具、来源、项目上下文和工作室 Agent 结论，准备正文补丁。'
+      : '整合工具、来源、项目上下文和工作室 Agent 结论，准备对话回复。',
     status: 'running',
     agentId: 'writer',
   })
@@ -918,7 +983,11 @@ async function runWriter(
         {
           role: 'system',
           content: composeSystemPrompt(
-            [sharedAgentRules, agentProfiles.writer.system, composeSkillPrompt('writer', prompt)]
+            [
+              sharedAgentRules,
+              getRuntimeAgent('writer').systemPrompt,
+              composeSkillPrompt('writer', prompt),
+            ]
               .filter(Boolean)
               .join('\n\n'),
           ),
@@ -936,7 +1005,7 @@ async function runWriter(
             storyBrief ? `Story Contract / 写作任务书:\n${storyBrief.briefText}` : '',
             sources?.length ? `联网来源：\n${formatSources(sources)}` : '',
             outputs.length
-              ? `子 Agent 结论：\n${outputs
+              ? `工作室 Agent 结论：\n${outputs
                   .map((output) => `${output.label}:\n${output.content}`)
                   .join('\n\n')}`
               : '',
@@ -954,7 +1023,7 @@ async function runWriter(
                 ].join('\n')
               : '人工审阅模式：可以提出风险和选择，但仍应给出可审阅的阶段成果。',
             plan.writeIntent
-              ? '请严格输出两段：先用“答复:”给用户一句简洁说明；再用“正文:”输出唯一可写入文稿的正文内容。只有“正文:”后面的内容会进入文稿。不要把来源、解释、计划过程、子 Agent 结论或工具轨迹写进“正文”。'
+              ? '请严格输出两段：先用“答复:”给用户一句简洁说明；再用“正文:”输出唯一可写入文稿的正文内容。只有“正文:”后面的内容会进入文稿。不要把来源、解释、计划过程、工作室 Agent 结论或工具轨迹写进“正文”。'
               : '请只输出对话答复。不要包含“正文:”段落，不要生成文稿补丁。若使用了搜索来源，简洁列出来源链路。',
             sources?.length
               ? '已经提供联网来源，不要声称自己无法访问互联网。'
@@ -1017,7 +1086,7 @@ async function repairDraft(
   })
   const trace = useAppStore.getState().addFlowTrace({
     kind: 'agent',
-    title: '主笔补写正文',
+    title: '秘书长补写正文',
     detail: '检测到上一次输出更像策略或过短，正在强制生成可写入文稿的正文。',
     status: 'running',
     agentId: 'writer',
@@ -1055,7 +1124,7 @@ async function repairDraft(
         `用户请求：${prompt}`,
         `执行计划：\n${JSON.stringify(plan, null, 2)}`,
         outputs.length
-          ? `子 Agent 结论：\n${outputs.map((output) => `${output.label}:\n${output.content}`).join('\n\n')}`
+          ? `工作室 Agent 结论：\n${outputs.map((output) => `${output.label}:\n${output.content}`).join('\n\n')}`
           : '',
         sources?.length ? `来源：\n${formatSources(sources)}` : '',
         `上一次输出：\n${previousText}`,
@@ -1073,7 +1142,7 @@ async function repairDraft(
     if (delta) {
       useAppStore.getState().appendAgentStepContent(step.id, delta)
     }
-    onText?.(stripDraftSection(text) || '主笔正在补写正文…')
+    onText?.(stripDraftSection(text) || '秘书长正在补写正文…')
   })
 
   useAppStore.getState().updateFlowTrace(trace.id, {
@@ -1106,7 +1175,7 @@ function createFallbackSecretaryPlan(prompt: string) {
     '1. 梳理请求和当前文稿状态',
     fallback.needsWebSearch ? '2. 检索必要的外部资料' : '2. 核对已有上下文和约束',
     fallback.subAgents.length
-      ? `3. 调度 ${fallback.subAgents.map((agentId) => agentProfiles[agentId].label).join(' / ')} 协作处理`
+      ? `3. 调度 ${fallback.subAgents.map((agentId) => getRuntimeAgent(agentId).shortName).join(' / ')} 协作处理`
       : '3. 由写作代理直接处理',
     fallback.writeIntent ? '4. 生成内容并自动写入文稿' : '4. 输出结果并保留执行轨迹',
     '',
@@ -1164,7 +1233,13 @@ function isInsufficientDraft(draft: string | undefined, prompt: string) {
 
 function sanitizePlan(input: Partial<AgentRunPlan>, prompt: string): AgentRunPlan {
   const fallback = createFallbackPlan(prompt)
-  const subAgents = uniqueAgents(input.subAgents ?? fallback.subAgents)
+  const routing = routeForPrompt(prompt)
+  const routedAgents = [
+    ...routing.primaryAgents,
+    ...routing.reviewerAgents,
+    ...routing.advisorAgents,
+  ]
+  const subAgents = uniqueAgents([...(input.subAgents ?? []), ...routedAgents, ...fallback.subAgents])
   const toolCalls = normalizeToolCalls(input.toolCalls ?? [])
   const needsWebSearch = Boolean(input.needsWebSearch || toolCalls.some((call) => call.name === 'web_search'))
   const localWriteIntent = shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt)
@@ -1173,13 +1248,19 @@ function sanitizePlan(input: Partial<AgentRunPlan>, prompt: string): AgentRunPla
   if (needsWebSearch && !toolCalls.some((call) => call.name === 'web_search')) {
     toolCalls.unshift({
       name: 'web_search',
-      reason: '主笔判断任务需要外部实时资料或事实核验。',
+      reason: '秘书长判断任务需要外部实时资料或事实核验。',
       query: buildSearchQuery(prompt, fallback),
     })
   }
 
-  if (needsWebSearch && !subAgents.includes('researcher') && !subAgents.includes('critic')) {
-    subAgents.unshift('researcher')
+  if (
+    needsWebSearch &&
+    !subAgents.some((agentId) => ['citation-checker', 'academic-historian', 'trend-researcher'].includes(agentId))
+  ) {
+    const researchAgent = firstEnabledAgent(['citation-checker', 'academic-historian', 'trend-researcher'])
+    if (researchAgent) {
+      subAgents.unshift(researchAgent)
+    }
   }
 
   if (writeIntent && !toolCalls.some((call) => call.name === 'document_patch')) {
@@ -1201,13 +1282,17 @@ function sanitizePlan(input: Partial<AgentRunPlan>, prompt: string): AgentRunPla
   }
 
   if (hasLongformIntent(prompt)) {
-    ;(['researcher', 'dramatist', 'stylist', 'critic', 'proofreader'] as FlowAgentId[]).forEach(
-      (agentId) => {
-        if (!subAgents.includes(agentId)) {
-          subAgents.push(agentId)
-        }
-      },
-    )
+    ;[
+      'draft-writer',
+      'narrative-designer',
+      'style-editor',
+      'humanities-arguer',
+      'proofreader',
+    ].forEach((agentId) => {
+      if (firstEnabledAgent([agentId]) && !subAgents.includes(agentId)) {
+        subAgents.push(agentId)
+      }
+    })
   }
 
   return {
@@ -1218,6 +1303,7 @@ function sanitizePlan(input: Partial<AgentRunPlan>, prompt: string): AgentRunPla
     documentPatchOperation: normalizePatchOperation(input.documentPatchOperation, prompt),
     replyMode: writeIntent ? 'conversation_with_patch' : 'conversation_only',
     conversationGoal: input.conversationGoal?.trim() || fallback.conversationGoal,
+    routingRationale: routing.rationale,
   }
 }
 
@@ -1236,7 +1322,7 @@ function normalizeToolCalls(toolCalls: AgentRunPlan['toolCalls']) {
 
     normalized.push({
       name: toolCall.name,
-      reason: toolCall.reason?.trim() || '主笔判断需要该工具。',
+      reason: toolCall.reason?.trim() || '秘书长判断需要该工具。',
       query: toolCall.query?.trim(),
     })
   })
@@ -1258,20 +1344,33 @@ function normalizePatchOperation(operation: unknown, prompt: string) {
 }
 
 function uniqueAgents(agents: FlowAgentId[]) {
-  return Array.from(
-    new Set(agents.filter((agentId) => subAgentIds.includes(agentId)).slice(0, 5)),
+  const enabled = new Set(
+    getEnabledStudioAgents(
+      useAppStore.getState().customStudioAgents,
+      useAppStore.getState().disabledBuiltInStudioAgentIds,
+    ).map((agent) => agent.id),
+  )
+
+  return Array.from(new Set(agents.filter((agentId) => enabled.has(agentId) && agentId !== 'writer'))).slice(
+    0,
+    5,
   )
 }
 
 function createFallbackPlan(prompt: string): AgentRunPlan {
-  const subAgents = new Set<FlowAgentId>()
+  const routing = routeForPrompt(prompt)
+  const subAgents = new Set<FlowAgentId>([
+    ...routing.primaryAgents,
+    ...routing.reviewerAgents,
+    ...routing.advisorAgents,
+  ])
   const toolCalls: AgentRunPlan['toolCalls'] = []
   const needsWebSearch = hasRealtimeOrExternalIntent(prompt)
   const writeIntent = shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt)
   const complexLongform = hasLongformIntent(prompt)
 
   if (needsWebSearch) {
-    subAgents.add('researcher')
+    addFirstEnabled(subAgents, ['citation-checker', 'academic-historian', 'trend-researcher'])
     toolCalls.push({
       name: 'web_search',
       reason: '请求可能涉及实时信息、外部事实或来源核验。',
@@ -1280,27 +1379,27 @@ function createFallbackPlan(prompt: string): AgentRunPlan {
   }
 
   if (complexLongform) {
-    subAgents.add('researcher')
-    subAgents.add('dramatist')
-    subAgents.add('stylist')
-    subAgents.add('critic')
-    subAgents.add('proofreader')
+    addFirstEnabled(subAgents, ['draft-writer'])
+    addFirstEnabled(subAgents, ['narrative-designer', 'structure-editor'])
+    addFirstEnabled(subAgents, ['style-editor'])
+    addFirstEnabled(subAgents, ['humanities-arguer'])
+    addFirstEnabled(subAgents, ['proofreader'])
   }
 
   if (hasCritiqueIntent(prompt)) {
-    subAgents.add('critic')
+    addFirstEnabled(subAgents, ['humanities-arguer', 'citation-checker'])
   }
 
   if (hasStoryIntent(prompt)) {
-    subAgents.add('dramatist')
+    addFirstEnabled(subAgents, ['narrative-designer', 'dialogue-specialist', 'structure-editor'])
   }
 
   if (writeIntent || hasStyleIntent(prompt)) {
-    subAgents.add('stylist')
+    addFirstEnabled(subAgents, ['draft-writer', 'style-editor'])
   }
 
   if (hasProofreadIntent(prompt)) {
-    subAgents.add('proofreader')
+    addFirstEnabled(subAgents, ['proofreader'])
   }
 
   if (hasProjectIntent(prompt)) {
@@ -1333,7 +1432,8 @@ function createFallbackPlan(prompt: string): AgentRunPlan {
     writeIntent,
     documentPatchOperation: inferPatchOperation(prompt),
     replyMode: writeIntent ? 'conversation_with_patch' : 'conversation_only',
-    conversationGoal: writeIntent ? '生成可写入文稿的正文' : '在对话中回答用户问题',
+    conversationGoal: routing.rationale || (writeIntent ? '生成可写入文稿的正文' : '在对话中回答用户问题'),
+    routingRationale: routing.rationale,
   }
 }
 
@@ -1380,6 +1480,41 @@ function hasLongformIntent(prompt: string) {
   )
 }
 
+function routeForPrompt(prompt: string): AgentRoutingDecision {
+  const state = useAppStore.getState()
+  return routeStudioAgents(prompt, {
+    customAgents: state.customStudioAgents,
+    disabledBuiltInIds: state.disabledBuiltInStudioAgentIds,
+    allowMoreForGoal: Boolean(state.activeSecretaryGoal) || /\/goal|长篇|长期|连续|多章节/.test(prompt),
+  })
+}
+
+function getRuntimeAgent(agentId: FlowAgentId) {
+  const state = useAppStore.getState()
+  return (
+    getStudioAgent(agentId, state.customStudioAgents, state.disabledBuiltInStudioAgentIds) ??
+    getStudioAgent('writer')
+  )!
+}
+
+function firstEnabledAgent(ids: FlowAgentId[]) {
+  const enabled = new Set(
+    getEnabledStudioAgents(
+      useAppStore.getState().customStudioAgents,
+      useAppStore.getState().disabledBuiltInStudioAgentIds,
+    ).map((agent) => agent.id),
+  )
+
+  return ids.find((id) => enabled.has(id))
+}
+
+function addFirstEnabled(target: Set<FlowAgentId>, ids: FlowAgentId[]) {
+  const agentId = firstEnabledAgent(ids)
+  if (agentId) {
+    target.add(agentId)
+  }
+}
+
 function buildSearchQuery(prompt: string, plan?: Pick<AgentRunPlan, 'conversationGoal'>) {
   const goal = plan?.conversationGoal?.trim()
   const query = goal && goal.length > 6 ? `${goal} ${prompt}` : prompt
@@ -1391,10 +1526,13 @@ function formatPlanDetail(plan: AgentRunPlan) {
   return [
     `目标：${plan.conversationGoal}`,
     `联网：${plan.needsWebSearch ? '需要' : '不需要'}`,
-    `子 Agent：${plan.subAgents.map((agentId) => agentProfiles[agentId].label).join(' / ') || '无'}`,
+    `Agent：${plan.subAgents.map((agentId) => getRuntimeAgent(agentId).shortName).join(' / ') || '无'}`,
+    plan.routingRationale ? `调度理由：${plan.routingRationale}` : '',
     `工具：${plan.toolCalls.map((call) => call.name).join(' / ') || '无'}`,
     `写入文稿：${plan.writeIntent ? plan.documentPatchOperation : '否'}`,
-  ].join('\n')
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 function summarizeFlowRun(prompt: string, plan: AgentRunPlan, result: AgentRunResult) {
@@ -1410,17 +1548,14 @@ function summarizeFlowRun(prompt: string, plan: AgentRunPlan, result: AgentRunRe
 }
 
 function taskDetailForAgent(agentId: FlowAgentId) {
-  const details: Record<FlowAgentId, string> = {
-    writer: '拆解任务、整合结论、输出最终建议或正文补丁。',
-    researcher: '检索项目资源与外部来源，核对事实链和可引用材料。',
-    critic: '寻找反例，审查逻辑漏洞、空话和薄弱表达。',
-    dramatist: '检查结构、章节节奏、场景推进和叙事张力。',
-    stylist: '统一文风、语气、句法节奏，并贴合 STYLE.md。',
-    proofreader: '校对错别字、病句、术语一致性和重复表达。',
-    archivist: '整理资源、摘要、设定和长期记忆，确保可复用。',
-  }
-
-  return details[agentId]
+  const agent = getRuntimeAgent(agentId)
+  return [
+    agent.description,
+    agent.taskTypes.length ? `适用任务：${agent.taskTypes.join('、')}` : '',
+    agent.outputRules.length ? `输出规则：${agent.outputRules.join('；')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 function contextResources(resources: ImportedResource[]) {
@@ -1486,19 +1621,19 @@ function visiblePatchConversationText(response: string) {
   }
 
   if (response.length > 220) {
-    return '主笔正在准备正文补丁，正文不会塞进对话框；完成后会按当前模式写入文稿或等待审阅。'
+    return '秘书长正在准备正文补丁，正文不会塞进对话框；完成后会按当前模式写入文稿或等待审阅。'
   }
 
   return response.trim()
 }
 
 function createMockAgentOutput(agentId: FlowAgentId, prompt: string, sources?: FlowTrace['sources']) {
-  const profile = agentProfiles[agentId]
+  const profile = getRuntimeAgent(agentId)
   const sourceNote = sources?.length
     ? `\n可参考来源：${sources.map((source) => source.title).join('；')}`
     : ''
 
-  return `${profile.label}已处理“${prompt.slice(0, 80)}”。\n${taskDetailForAgent(agentId)}${sourceNote}`
+  return `${profile.name}已处理“${prompt.slice(0, 80)}”。\n${taskDetailForAgent(agentId)}${sourceNote}`
 }
 
 function createMockWriterResponse(
@@ -1517,7 +1652,7 @@ function createMockWriterResponse(
       : ''
 
   return [
-    `答复: 主笔已完成本轮任务“${prompt}”。${outputs.length ? `已调度：${outputs.map((output) => output.label).join('、')}。` : ''}${sourceNote}`,
+    `答复: 秘书长已完成本轮任务“${prompt}”。${outputs.length ? `已调度：${outputs.map((output) => output.label).join('、')}。` : ''}${sourceNote}`,
     plan.writeIntent
       ? '正文: 这是一段可直接放入文稿的工作稿。它先收束材料中的中心问题，再把判断推进到更清晰的位置，让语气保持克制，同时避免把来源说明和执行过程写进正文。'
       : '',

@@ -45,7 +45,7 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
   return (
     <div className="flex h-full min-h-0 flex-col">
       {!collapsed ? (
-        <div className="grid shrink-0 grid-cols-2 gap-2 border-b border-[#e8ddc7] p-3">
+        <div className="grid shrink-0 grid-cols-2 gap-1.5 border-b border-[#e8ddc7]/80 p-2">
           <SmallAction icon={Plus} label="新建对话" primary onClick={newChatSession} />
           <SmallAction icon={FilePlus2} label="新建文章" onClick={() => newArticleInChat()} />
           <SmallAction icon={Gauge} label="作品体检" onClick={() => setStoryDashboardOpen(true)} />
@@ -54,7 +54,7 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
         </div>
       ) : null}
 
-      <div className="papyrus-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto p-3">
+      <div className="papyrus-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto p-2">
         <NavigatorSection collapsed={collapsed} title="历史聊天">
           {sortedChats.length ? (
             <AnimatedList>
@@ -153,21 +153,20 @@ function ResourceItem({
   return (
     <motion.article
       layout
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, x: -12 }}
-      className={`rounded-lg border p-2 transition ${
-        resource.includedInContext
-          ? 'border-[#cfd8c7] bg-[#f8fff6]'
-          : 'border-[#e8ddc7] bg-[#fffefa]'
+      exit={{ opacity: 0, x: -10 }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+      className={`rounded-md px-2 py-1.5 ${
+        resource.includedInContext ? 'bg-[#edf6eb] text-[#2f2b22]' : 'text-[#6f7168] hover:bg-[#fffdf7]'
       }`}
     >
       <div className="flex items-start gap-2">
-        <FileText size={16} className="mt-0.5 shrink-0 text-[#6f7f68]" />
+        <FileText size={15} className="mt-0.5 shrink-0 text-[#6f7f68]" />
         {!collapsed ? (
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-medium text-[#2f2b22]">{resource.name}</div>
-            <div className="mt-0.5 truncate text-xs text-[#8f897a]">
+            <div className="truncate text-[13px] font-medium">{resource.name}</div>
+            <div className="mt-0.5 truncate text-[11px] text-[#8f897a]">
               {resource.type.toUpperCase()} · {resource.tokenCount.toLocaleString()} tokens ·{' '}
               {resource.includedInContext ? '已入上下文' : '未入上下文'}
             </div>
@@ -175,7 +174,7 @@ function ResourceItem({
         ) : null}
       </div>
       {!collapsed ? (
-        <div className="mt-2 flex justify-end gap-1">
+        <div className="mt-1.5 flex justify-end gap-1">
           <MiniAction
             icon={resource.includedInContext ? MinusCircle : PlusCircle}
             title={resource.includedInContext ? '从上下文排除' : '加入上下文'}
@@ -206,14 +205,12 @@ function SmallAction({
       type="button"
       title={label}
       onClick={onClick}
-      className={`inline-flex h-8 items-center justify-center gap-1.5 rounded-lg px-2 text-xs font-medium transition ${
-        primary
-          ? 'bg-[#171714] text-[#fffefa] hover:bg-[#3f5845]'
-          : 'border border-[#e8ddc7] bg-[#fffefa] text-[#6f7168] hover:text-[#171714]'
+      className={`inline-flex h-7 items-center justify-center gap-1.5 rounded-md px-2 text-[11px] font-medium ${
+        primary ? 'papyrus-primary-button' : 'papyrus-control'
       }`}
     >
-      <Icon size={14} />
-      {!label.includes('打开') ? label : <span className="hidden xl:inline">{label}</span>}
+      <Icon size={13} />
+      <span className="truncate">{label}</span>
     </button>
   )
 }
@@ -232,9 +229,9 @@ function NavigatorSection({
   return (
     <section>
       {!collapsed ? (
-        <div className="mb-2 flex items-center justify-between gap-2 text-xs font-medium uppercase text-[#9d988a]">
+        <div className="mb-1.5 flex items-center justify-between gap-2 px-1 text-[11px] font-semibold text-[#9d988a]">
           <span>{title}</span>
-          {meta ? <span className="truncate normal-case text-[#8f897a]">{meta}</span> : null}
+          {meta ? <span className="truncate font-normal text-[#8f897a]">{meta}</span> : null}
         </div>
       ) : null}
       {children}
@@ -244,7 +241,7 @@ function NavigatorSection({
 
 function AnimatedList({ children }: { children: ReactNode }) {
   return (
-    <motion.div layout className="space-y-2">
+    <motion.div layout className="space-y-1">
       <AnimatePresence initial={false}>{children}</AnimatePresence>
     </motion.div>
   )
@@ -286,21 +283,20 @@ function ChatItem({
   return (
     <motion.article
       layout
-      initial={{ opacity: 0, y: 8 }}
+      initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, x: -12 }}
-      className={`rounded-lg border p-2 transition ${
-        active
-          ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
-          : 'border-transparent text-[#6f7168] hover:border-[#e8ddc7] hover:bg-[#fffdf7] hover:text-[#2f2b22]'
+      exit={{ opacity: 0, x: -10 }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+      className={`rounded-md px-2 py-1.5 ${
+        active ? 'bg-[#171714] text-[#fffefa]' : 'text-[#6f7168] hover:bg-[#fffdf7] hover:text-[#2f2b22]'
       }`}
     >
       <button type="button" onClick={onOpen} title={chat.title} className="flex w-full items-center gap-2 text-left">
-        <MessageSquare size={15} className="shrink-0" />
+        <MessageSquare size={14} className="shrink-0" />
         {!collapsed ? (
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm font-medium">{chat.title}</span>
-            <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
+            <span className="block truncate text-[13px] font-medium">{chat.title}</span>
+            <span className={`block truncate text-[11px] ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
               {chat.messages.length.toLocaleString()} 条消息 · {sortedArticles.length} 篇文章
             </span>
           </span>
@@ -311,7 +307,7 @@ function ChatItem({
         <>
           <ItemActions active={active} pinned={Boolean(chat.pinned)} onRename={onRename} onDelete={onDelete} onTogglePin={onTogglePin} />
           {active ? (
-            <div className="mt-2 space-y-1 border-t border-white/10 pt-2">
+            <div className="mt-1.5 space-y-1 border-t border-white/10 pt-1.5">
               {sortedArticles.map((article) => (
                 <ArticleRow
                   key={article.id}
@@ -326,9 +322,9 @@ function ChatItem({
               <button
                 type="button"
                 onClick={onNewArticle}
-                className="mt-1 flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[#d9c69c] text-xs text-[#8f897a] transition hover:bg-[#fffefa] hover:text-[#171714]"
+                className="mt-1 flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[#d9c69c] text-[11px] text-[#8f897a] hover:bg-[#fffefa] hover:text-[#171714]"
               >
-                <FilePlus2 size={13} />
+                <FilePlus2 size={12} />
                 新建文章
               </button>
             </div>
@@ -385,7 +381,7 @@ function ItemActions({
   const color = active ? 'text-[#d6d0c4] hover:bg-white/10' : 'text-[#8f897a] hover:bg-[#f4ead8]'
 
   return (
-    <div className="mt-2 flex justify-end gap-1">
+    <div className="mt-1.5 flex justify-end gap-1">
       <MiniAction icon={pinned ? PinOff : Pin} title={pinned ? '取消置顶' : '置顶'} onClick={onTogglePin} className={color} />
       <MiniAction icon={Pencil} title="重命名" onClick={onRename} className={color} />
       <MiniAction icon={Trash2} title="删除" onClick={onDelete} className={color} />
@@ -405,7 +401,7 @@ function MiniAction({
   className?: string
 }) {
   return (
-    <button type="button" title={title} onClick={onClick} className={`rounded-md p-1 transition ${className}`}>
+    <button type="button" title={title} onClick={onClick} className={`rounded-md p-1 ${className}`}>
       <Icon size={13} />
     </button>
   )
@@ -421,8 +417,8 @@ function EmptyRow({
   text: string
 }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-dashed border-[#d9c69c] bg-[#fffdf7] px-3 py-3 text-xs text-[#8f897a]">
-      <Icon size={15} className="shrink-0" />
+    <div className="flex items-center gap-2 rounded-md border border-dashed border-[#d9c69c] bg-[#fffdf7] px-2.5 py-2.5 text-xs text-[#8f897a]">
+      <Icon size={14} className="shrink-0" />
       {!collapsed ? <span>{text}</span> : null}
     </div>
   )

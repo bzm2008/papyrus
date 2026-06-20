@@ -1,4 +1,4 @@
-import { Activity, Database, FileText, Radio } from 'lucide-react'
+import { Activity, ChevronDown, ChevronUp, Database, FileText, Radio } from 'lucide-react'
 import { useAppStore } from '../stores/useAppStore'
 
 export function UsageBubble() {
@@ -11,6 +11,8 @@ export function UsageBubble() {
   const resources = useAppStore((state) => state.resources)
   const llmRunState = useAppStore((state) => state.llmRunState)
   const companionRunState = useAppStore((state) => state.companionRunState)
+  const isUsageCollapsed = useAppStore((state) => state.isUsageCollapsed)
+  const setUsageCollapsed = useAppStore((state) => state.setUsageCollapsed)
   const activeProvider = providerConfigs[activeProviderId]
   const contextPercent = Math.min(
     100,
@@ -18,16 +20,42 @@ export function UsageBubble() {
   )
   const isRunning = llmRunState === 'running' || companionRunState === 'running'
 
+  if (isUsageCollapsed) {
+    return (
+      <aside className="fixed bottom-12 right-4 z-40 hidden rounded-xl border border-[#dfe4d6] bg-[#fffefa]/96 p-2 text-xs text-[#5f6159] shadow-[0_14px_38px_rgba(36,45,29,0.12)] backdrop-blur md:block">
+        <button
+          type="button"
+          onClick={() => setUsageCollapsed(false)}
+          className="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-[#f7f8f3]"
+          title="展开用量"
+        >
+          <Activity size={13} className={isRunning ? 'text-[#31a96b]' : 'text-[#315d39]'} />
+          <span>上下文 {contextPercent}%</span>
+          <span className="max-w-24 truncate text-[#8f897a]">{activeProvider.label}</span>
+          <ChevronUp size={13} />
+        </button>
+      </aside>
+    )
+  }
+
   return (
-    <aside className="pointer-events-none fixed bottom-12 right-4 z-40 hidden w-[260px] rounded-xl border border-[#dfe4d6] bg-[#fffefa]/96 p-3 text-xs text-[#5f6159] shadow-[0_14px_38px_rgba(36,45,29,0.12)] backdrop-blur md:block">
+    <aside className="fixed bottom-12 right-4 z-40 hidden w-[260px] rounded-xl border border-[#dfe4d6] bg-[#fffefa]/96 p-3 text-xs text-[#5f6159] shadow-[0_14px_38px_rgba(36,45,29,0.12)] backdrop-blur md:block">
       <div className="mb-2 flex items-center justify-between">
         <span className="inline-flex items-center gap-1.5 font-medium text-[#20201d]">
           <Activity size={13} className={isRunning ? 'text-[#31a96b]' : 'text-[#315d39]'} />
           用量
         </span>
-        <span className={isRunning ? 'text-[#31a96b]' : 'text-[#8f897a]'}>
-          {isRunning ? '运行中' : '待命'}
-        </span>
+        <button
+          type="button"
+          onClick={() => setUsageCollapsed(true)}
+          className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[#8f897a] hover:bg-[#f7f8f3]"
+          title="收起用量"
+        >
+          <span className={isRunning ? 'text-[#31a96b]' : 'text-[#8f897a]'}>
+            {isRunning ? '运行中' : '待命'}
+          </span>
+          <ChevronDown size={13} />
+        </button>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-[#e8e1d3]">
         <div

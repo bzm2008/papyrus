@@ -211,7 +211,7 @@ export const agentSkills: Record<AgentSkillId, AgentSkill> = {
   },
 }
 
-export const agentSkillAssignments: Record<FlowAgentId, AgentSkillId[]> = {
+export const agentSkillAssignments: Partial<Record<FlowAgentId, AgentSkillId[]>> = {
   writer: [
     'literary-drafting',
     'structure-room',
@@ -225,6 +225,31 @@ export const agentSkillAssignments: Record<FlowAgentId, AgentSkillId[]> = {
   stylist: ['style-continuity', 'literary-drafting', 'character-voice', 'publication-polish'],
   proofreader: ['copyediting-final-pass', 'style-continuity', 'publication-polish'],
   archivist: ['archival-memory', 'research-and-critique', 'character-voice'],
+  'draft-writer': ['literary-drafting', 'style-continuity', 'publication-polish'],
+  'structure-editor': ['structure-room', 'humanities-argument'],
+  'style-editor': ['style-continuity', 'literary-drafting', 'publication-polish'],
+  'narrative-designer': ['structure-room', 'scene-cinematography', 'character-voice'],
+  'dialogue-specialist': ['character-voice', 'literary-drafting'],
+  'publication-editor': ['publication-polish', 'style-continuity', 'copyediting-final-pass'],
+  'humanities-arguer': ['humanities-argument', 'research-and-critique', 'structure-room'],
+  'citation-checker': ['research-and-critique', 'archival-memory'],
+  'academic-anthropologist': ['research-and-critique', 'humanities-argument'],
+  'academic-historian': ['research-and-critique', 'archival-memory'],
+  'academic-narratologist': ['humanities-argument', 'structure-room'],
+  'academic-psychologist': ['character-voice', 'research-and-critique'],
+  'academic-geographer': ['research-and-critique', 'archival-memory'],
+  'academic-study-planner': ['structure-room', 'archival-memory'],
+  'xiaohongshu-operator': ['publication-polish', 'style-continuity'],
+  'douyin-strategist': ['scene-cinematography', 'publication-polish'],
+  'bilibili-strategist': ['structure-room', 'publication-polish'],
+  'wechat-official-account': ['publication-polish', 'style-continuity'],
+  'zhihu-strategist': ['humanities-argument', 'publication-polish'],
+  'legal-compliance-checker': ['research-and-critique', 'copyediting-final-pass'],
+  'contract-reviewer': ['research-and-critique', 'humanities-argument'],
+  'policy-writer': ['humanities-argument', 'copyediting-final-pass'],
+  'product-manager': ['structure-room', 'humanities-argument'],
+  'executive-summary': ['archival-memory', 'structure-room'],
+  'data-reporter': ['research-and-critique', 'humanities-argument'],
 }
 
 export function searchAgentSkills(query: string, limit = 8) {
@@ -252,7 +277,7 @@ export function findMentionedSkills(prompt: string) {
 }
 
 export function inferSkillsForPrompt(prompt: string, agentId?: FlowAgentId) {
-  const baseIds = agentId ? agentSkillAssignments[agentId] : []
+  const baseIds = agentId ? (agentSkillAssignments[agentId] ?? []) : []
   const explicitIds = findMentionedSkills(prompt).map((skill) => skill.id)
   const allSkills = getAllAgentSkills()
   const matchedIds = allSkills

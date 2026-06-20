@@ -18,8 +18,8 @@ const builtInProjectItems: MentionContextItem[] = [
   {
     id: 'character-lead-writer',
     type: 'character',
-    label: '主笔',
-    excerpt: '负责理解目标、拆解任务、协调子 Agent，并把结果整合成可直接使用的文本。',
+    label: '秘书长',
+    excerpt: '负责理解目标、拆解任务、协调工作室 Agent，并把结果整合成可直接使用的文本。',
   },
   {
     id: 'character-researcher',

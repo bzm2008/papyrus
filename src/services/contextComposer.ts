@@ -1,6 +1,9 @@
+import { composeMemoryContext } from './memoryEngine'
 import { composeStoryContext } from './storyEngine'
 import { estimateTokens } from './tokenizer'
-import { composeMemoryContext } from './memoryEngine'
+import { composeTowriteContext } from './towriteService'
+import { composeUserMemoryContext } from './userMemoryService'
+import { composeWritingKnowledgeContext } from './writingKnowledgeService'
 import { useAppStore, type ArticleRecord } from '../stores/useAppStore'
 
 export type WritingContextBundle = {
@@ -52,17 +55,23 @@ export function composeWritingContext(options: { includeFullCurrentArticle?: boo
     limit: 6,
     includeTentative: true,
   })
+  const userMemoryContext = composeUserMemoryContext()
+  const towriteContext = composeTowriteContext()
+  const writingKnowledgeContext = composeWritingKnowledgeContext(memoryQuery, 8)
   const sections = [
+    userMemoryContext ? `User Memory:\n${userMemoryContext}` : '',
+    towriteContext ? `towrite.md:\n${towriteContext}` : '',
     state.projectGuidance.style ? `STYLE.md:\n${state.projectGuidance.style}` : '',
     state.projectGuidance.world ? `WORLD.md:\n${state.projectGuidance.world}` : '',
     state.negativeMemories.length ? `负向记忆:\n${state.negativeMemories.join('\n')}` : '',
+    writingKnowledgeContext.text ? `Writing Knowledge:\n${writingKnowledgeContext.text}` : '',
     memoryContext.text ? `Agent Memory:\n${memoryContext.text}` : '',
     currentArticle
       ? `当前文章:\n${
           options.includeFullCurrentArticle ? currentArticle.text : currentArticle.text.slice(0, 7000)
         }`
       : `当前文稿:\n${state.editorText.slice(0, 7000)}`,
-    articleSummaries ? `同一聊天下的其他文章:\n${articleSummaries}` : '',
+    articleSummaries ? `同一对话下的其他文章:\n${articleSummaries}` : '',
     storyContext ? `Story System:\n${storyContext}` : '',
     resources ? `导入资料:\n${resources}` : '',
     recentMessages ? `最近对话:\n${recentMessages}` : '',

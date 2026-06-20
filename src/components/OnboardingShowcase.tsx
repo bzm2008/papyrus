@@ -24,7 +24,7 @@ const cards: ShowcaseCard[] = [
     id: 'flow',
     eyebrow: 'Flow',
     title: '虚拟编辑部',
-    copy: '多智能体协作，你的专属主笔与刺客',
+    copy: '多智能体协作，你的秘书长与工作室',
     visual: 'flow',
   },
   {
@@ -245,7 +245,7 @@ function CompanionVisual() {
 
 function FlowVisual() {
   const nodes = [
-    { label: '主笔', x: 'left-[44%]', y: 'top-8', delay: 0 },
+    { label: '秘书长', x: 'left-[44%]', y: 'top-8', delay: 0 },
     { label: '寻根', x: 'left-[12%]', y: 'top-[42%]', delay: 0.22 },
     { label: '刺客', x: 'left-[42%]', y: 'top-[48%]', delay: 0.34 },
     { label: '文风师', x: 'left-[68%]', y: 'top-[38%]', delay: 0.46 },

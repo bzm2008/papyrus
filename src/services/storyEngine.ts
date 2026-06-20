@@ -469,7 +469,7 @@ export function createChapterBrief(prompt: string, project: StoryProject, genre:
     genre.structureTemplates?.length ? `结构模板: ${genre.structureTemplates.join(' / ')}` : '',
     genre.scoringRubric?.length ? `评分关注: ${genre.scoringRubric.join(' / ')}` : '',
     genre.forbiddenCliches?.length ? `避开套话: ${genre.forbiddenCliches.join(' / ')}` : '',
-    `人物: ${chapter.activeCharacters.join(' / ') || '由主笔按任务补足'}`,
+    `人物: ${chapter.activeCharacters.join(' / ') || '由秘书长按任务补足'}`,
     `节奏线: ${strand}`,
     `收束: ${chapter.endingHook}`,
     memory ? `长期记忆:\n${memory}` : '',
