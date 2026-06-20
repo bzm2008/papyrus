@@ -1,6 +1,14 @@
 import { composeSystemPrompt } from './agentPromptContext'
 import { failAgentRun, finishAgentRun, startAgentRun, type AgentHarnessRunInput } from './agentHarness'
+import { formatSkillPacksForPrompt } from './agentSkillPacks'
 import { composeSkillPrompt } from './agentSkillLibrary'
+import {
+  agentProtocolInstruction,
+  formatStructuredOutputForHandoff,
+  parseStructuredAgentOutput,
+  shouldEarlyStopAgentLoop,
+  type StructuredAgentOutput,
+} from './agentProtocolService'
 import { composeWritingContext } from './contextComposer'
 import {
   extractDraftText,
@@ -15,12 +23,19 @@ import {
   canCallProvider,
   type ChatMessage,
 } from './llmClient'
+import { describeModelRouting, selectModelForRole } from './modelRouterService'
 import { retrieveMentionContext } from './projectContext'
 import {
   composeGoalExecutionPrompt,
   describeThinkingEffort,
   judgeSecretaryGoal,
 } from './secretaryGoalService'
+import {
+  classifySecretaryTask,
+  type SecretaryTaskClassification,
+  type SecretaryTaskComplexity,
+} from './secretaryTaskClassifier'
+import { findSemanticCacheHit, rememberSemanticResult } from './semanticCacheService'
 import {
   getEnabledStudioAgents,
   getStudioAgent,
@@ -64,6 +79,13 @@ export type AgentRunPlan = {
   replyMode: 'conversation_only' | 'conversation_with_patch'
   conversationGoal: string
   routingRationale?: string
+  taskComplexity?: SecretaryTaskComplexity
+  taskType?: string
+  classificationConfidence?: number
+  maxAgentCount?: number
+  earlyStopReason?: string
+  semanticCacheHitId?: string
+  modelRoutingSummary?: string[]
 }
 
 export type AgentRunResult = {
@@ -77,6 +99,8 @@ type AgentOutput = {
   agentId: FlowAgentId
   label: string
   content: string
+  outputId?: string
+  structured?: StructuredAgentOutput
   sources?: FlowTrace['sources']
 }
 
@@ -212,7 +236,9 @@ export async function createSecretaryPlanDraft(
   }
 
   const store = useAppStore.getState()
-  const provider = store.providerConfigs[store.activeProviderId]
+  const classification = classifySecretaryTask(cleanExecutionPrompt)
+  const plannerRouting = selectModelForRole('planning', { complexity: classification.complexity })
+  const provider = plannerRouting.provider
   store.clearFlowRun()
   store.addFlowMessage({ role: 'user', content: cleanRequest })
   store.setLlmRunState('running', '正在生成规划')
@@ -228,6 +254,7 @@ export async function createSecretaryPlanDraft(
                 '你是 Papyrus 的 /plan 规划器，只输出可协商的执行规划，不要执行 Agent。',
                 '风格像 Codex 的任务规划：清晰、可执行、便于用户修改。',
                 '请用简短 Markdown 输出，包含目标、步骤和风险。',
+                describeModelRouting(plannerRouting),
               ].join('\n'),
             ),
           },
@@ -235,6 +262,7 @@ export async function createSecretaryPlanDraft(
             role: 'user',
             content: [
               `用户请求：${cleanExecutionPrompt}`,
+              `复杂度：${classification.complexity}`,
               `当前文稿摘要：${store.editorText.slice(0, 1200)}`,
               store.resources.length
                 ? `可用资源：${store.resources.slice(0, 10).map((resource) => resource.name).join(' / ')}`
@@ -285,7 +313,8 @@ export async function reviseSecretaryPlanDraft(feedback: string) {
     return current
   }
 
-  const provider = useAppStore.getState().providerConfigs[useAppStore.getState().activeProviderId]
+  const plannerRouting = selectModelForRole('planning', { complexity: 'standard' })
+  const provider = plannerRouting.provider
   useAppStore.getState().setLlmRunState('running', '正在修订规划')
 
   try {
@@ -293,7 +322,10 @@ export async function reviseSecretaryPlanDraft(feedback: string) {
       ? await callOpenAICompatible(provider, [
           {
             role: 'system',
-            content: '你是 Papyrus /plan 规划器，根据用户反馈修订规划，只输出 Markdown。',
+            content: [
+              '你是 Papyrus /plan 规划器，根据用户反馈修订规划，只输出 Markdown。',
+              describeModelRouting(plannerRouting),
+            ].join('\n'),
           },
           {
             role: 'user',
@@ -353,6 +385,11 @@ async function runGoalJudgePass(
       status: 'blocked',
       currentProgress: judge.nextStep || judge.summary,
     })
+  } else if (judge.verdict === 'early_stop') {
+    useAppStore.getState().updateSecretaryGoal(goalId, {
+      status: 'active',
+      currentProgress: judge.nextStep || judge.summary,
+    })
   } else {
     useAppStore.getState().updateSecretaryGoal(goalId, {
       status: 'active',
@@ -380,7 +417,12 @@ function composeExecutionControlPrompt(
 
 export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
   const store = useAppStore.getState()
-  const provider = store.providerConfigs[store.activeProviderId]
+  const classification = classifySecretaryTask(prompt, {
+    activeGoal: Boolean(store.activeSecretaryGoal),
+    writeIntent: shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt),
+  })
+  const plannerModel = selectModelForRole('planning', { complexity: classification.complexity })
+  const provider = plannerModel.provider
   const reviewMode = store.flowReviewMode
   const agentCatalog = getStudioAgentCatalogForPrompt(
     store.customStudioAgents,
@@ -392,14 +434,22 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
       type: 'plan',
       title: 'Plan agent run',
       status: 'running',
-      details: 'Deciding tools, sub agents, document write intent, and web search needs.',
+      details: [
+        'Deciding tools, sub agents, document write intent, and web search needs.',
+        `任务复杂度：${classification.complexity}（${Math.round(classification.confidence * 100)}%）`,
+        describeModelRouting(plannerModel),
+      ].join('\n'),
       isExpanded: true,
       agentId: 'writer',
     })
     const trace = store.addFlowTrace({
       kind: 'plan',
       title: '秘书长自主规划',
-      detail: '正在判断是否需要联网、工作室 Agent、项目上下文或文稿写入。',
+      detail: [
+        '正在判断是否需要联网、工作室 Agent、项目上下文或文稿写入。',
+        `复杂度：${classification.complexity}`,
+        describeModelRouting(plannerModel),
+      ].join('\n'),
       status: 'running',
       agentId: 'writer',
     })
@@ -411,13 +461,16 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
           content: composeSystemPrompt(
             [
               sharedAgentRules,
-              '当前日期是 2026-05-23，时区 Asia/Shanghai。',
+              '当前日期是 2026-06-20，时区 Asia/Shanghai。',
               '你只输出严格 JSON，不要 Markdown，不要解释。',
               '字段必须是：needsWebSearch, subAgents, toolCalls, writeIntent, documentPatchOperation, replyMode, conversationGoal。',
+              '简单任务必须避免多 Agent 协作；标准任务最多 2 个执行 Agent；复杂任务最多 3 个主力 + 2 个审查/顾问。',
+              '所有子 Agent 后续会按结构化协议输出，不要安排寒暄、复述背景或重复审查。',
               'subAgents 必须从下方启用的工作室 Agent id 中选择，不能调用已禁用或不存在的 Agent。',
               '先判断任务类别，再选择最多 3 个主力 Agent；如有必要再选择最多 2 个审查/顾问 Agent。复杂 /goal 可分阶段增加，但单阶段仍要克制。',
               '事实争议优先资料核查/研究类 Agent；表达争议优先文风师/出版编辑；结构争议优先结构编辑；平台策略争议优先对应平台运营专家；法律/政策/投资/财务风险必须加入合规或专业审查。',
               `启用的工作室 Agent：\n${agentCatalog}`,
+              formatSkillPacksForPrompt(prompt),
               'toolCalls 中 name 只能是 web_search, project_context, document_patch。',
               '当任务涉及今天、最近、新闻、实时事实、外部材料、引用、来源、趋势、人物/公司/政策/产品变动、事实核验时，needsWebSearch 必须为 true，并添加 web_search toolCall。',
               '当任务只是解释、闲聊、建议或审查，不要写入文稿。只有正文创作、续写、润色替换、插入、补写、改写才 writeIntent=true。',
@@ -433,6 +486,9 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
           role: 'user',
           content: [
             `用户请求：${prompt}`,
+            `本地复杂度分类：${classification.complexity}`,
+            `分类理由：${classification.reasons.join('；') || '无'}`,
+            `建议 Agent 数量：${classification.suggestedAgentCount}`,
             `执行模式：${reviewMode === 'auto' ? '自动执行' : '人工审阅'}`,
             `当前文稿摘录：${store.editorText.slice(0, 1600)}`,
             `可用资源：${store.resources
@@ -443,7 +499,7 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
           ].join('\n\n'),
         },
       ])
-      const plan = sanitizePlan(parseJsonPlan(rawPlan), prompt)
+      const plan = sanitizePlan(parseJsonPlan(rawPlan), prompt, classification, [describeModelRouting(plannerModel)])
 
       useAppStore.getState().updateFlowTrace(trace.id, {
         detail: formatPlanDetail(plan),
@@ -473,7 +529,7 @@ export async function planAgentRun(prompt: string): Promise<AgentRunPlan> {
     }
   }
 
-  const fallbackPlan = createFallbackPlan(prompt)
+  const fallbackPlan = createFallbackPlan(prompt, classification, [describeModelRouting(plannerModel)])
   useAppStore.getState().addAgentStep({
     type: 'plan',
     title: 'Local fallback plan',
@@ -517,8 +573,24 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
       subAgentStepIds.set(todo.agentId, step.id)
     })
 
-  const sources = await executeToolCalls(prompt, plan)
+  const semanticCacheHit = findSemanticCacheHit(prompt, plan.taskType ?? 'general')
+  if (semanticCacheHit) {
+    plan.semanticCacheHitId = semanticCacheHit.id
+    useAppStore.getState().addFlowTrace({
+      kind: 'tool',
+      title: '命中语义缓存',
+      detail: `复用本地缓存：${semanticCacheHit.summary.slice(0, 360)}`,
+      status: 'completed',
+      sources: semanticCacheHit.sources,
+      agentId: firstEnabledAgent(['citation-checker', 'archivist']) ?? 'writer',
+      toolName: 'project_context',
+      endedAt: Date.now(),
+    })
+  }
+
+  const sources = semanticCacheHit?.sources?.length ? semanticCacheHit.sources : await executeToolCalls(prompt, plan)
   const outputs: AgentOutput[] = []
+  const structuredOutputs: StructuredAgentOutput[] = []
 
   for (const todo of useAppStore.getState().agentTodos) {
     if (todo.agentId === 'writer' || todo.status === 'completed') {
@@ -538,7 +610,36 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
     try {
       const output = await runSubAgent(todo.agentId, prompt, plan, sources, stepId)
       outputs.push(output)
+      if (output.structured) {
+        structuredOutputs.push(output.structured)
+        const earlyStop = shouldEarlyStopAgentLoop(structuredOutputs)
+
+        if (earlyStop.stop) {
+          plan.earlyStopReason = earlyStop.reason
+          useAppStore.getState().addFlowTrace({
+            kind: 'plan',
+            title: '早停协作',
+            detail: earlyStop.reason ?? '秘书长判断后续协作不会带来新增价值。',
+            status: 'completed',
+            agentId: 'writer',
+            endedAt: Date.now(),
+          })
+        }
+      }
       useAppStore.getState().updateAgentTodo(todo.id, { status: 'completed' })
+
+      if (plan.earlyStopReason) {
+        useAppStore
+          .getState()
+          .agentTodos.filter((item) => item.agentId !== 'writer' && item.status === 'pending')
+          .forEach((item) => {
+            useAppStore.getState().updateAgentTodo(item.id, {
+              status: 'skipped',
+              detail: plan.earlyStopReason,
+            })
+          })
+        break
+      }
     } catch (error) {
       useAppStore.getState().updateAgentTodo(todo.id, {
         status: 'blocked',
@@ -581,6 +682,11 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan): Promi
   }
 
   const response = plan.writeIntent ? stripDraftSection(writerText) : writerText
+  if (plan.needsWebSearch || plan.toolCalls.some((toolCall) => toolCall.name === 'project_context')) {
+    if (!semanticCacheHit) {
+      rememberSemanticResult(prompt, plan.taskType ?? 'general', response || patchContent || writerText, sources)
+    }
+  }
   useAppStore.getState().updateFlowMessage(assistantMessage.id, {
     content: response.trim() || '已完成正文补丁，等待写入文稿。',
   })
@@ -651,8 +757,8 @@ async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchC
       isExpanded: true,
       agentId: 'writer',
     })
-    const store = useAppStore.getState()
-    const provider = store.providerConfigs[store.activeProviderId]
+    const repairRouting = selectModelForRole('repair', { complexity: 'complex', writeIntent: true })
+    const provider = repairRouting.provider
 
     if (canCallProvider(provider)) {
       const fixed = await callOpenAICompatible(provider, [
@@ -667,6 +773,7 @@ async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchC
             `用户请求:\n${prompt}`,
             `章节任务书:\n${brief.briefText}`,
             `审查问题:\n${issues.map((item) => `${item.evidence}: ${item.fixHint}`).join('\n')}`,
+            `模型路由:\n${describeModelRouting(repairRouting)}。${repairRouting.reason}`,
             `初稿:\n${patchContent}`,
           ].join('\n\n'),
         },
@@ -882,16 +989,30 @@ async function runSubAgent(
     })
     throw error
   }
+  const structured = parseStructuredAgentOutput(content)
+  const outputEntry = useAppStore.getState().putAgentOutputCache({
+    agentRunId: useAppStore.getState().activeAgentRunId,
+    agentId,
+    outputType: getRuntimeAgent(agentId).outputType,
+    summary: structured.summary,
+    keyPoints: structured.keyPoints,
+    risks: structured.risks,
+    handoff: structured.handoff,
+    confidence: structured.confidence,
+    newInformation: structured.newInformation,
+    rawLength: content.length,
+  })
+  const compactContent = formatStructuredOutputForHandoff(outputEntry.id, structured)
 
   useAppStore.getState().updateFlowTrace(trace.id, {
-    detail: content.slice(0, 420),
+    detail: compactContent.slice(0, 420),
     status: 'completed',
     sources,
     endedAt: Date.now(),
   })
   useAppStore.getState().updateAgentStep(stepId, {
     status: 'completed',
-    content,
+    content: compactContent,
     sources,
     endedAt: Date.now(),
   })
@@ -899,7 +1020,9 @@ async function runSubAgent(
   return {
     agentId,
     label: profile.name,
-    content,
+    content: compactContent,
+    outputId: outputEntry.id,
+    structured,
     sources,
   }
 }
@@ -911,7 +1034,11 @@ async function callAgent(
   sources?: FlowTrace['sources'],
 ) {
   const store = useAppStore.getState()
-  const provider = store.providerConfigs[store.activeProviderId]
+  const routing = selectModelForRole('agent', {
+    complexity: plan.taskComplexity,
+    writeIntent: plan.writeIntent,
+  })
+  const provider = routing.provider
   const profile = getRuntimeAgent(agentId)
 
   if (!canCallProvider(provider)) {
@@ -922,6 +1049,7 @@ async function callAgent(
     [
       sharedAgentRules,
       profile.systemPrompt,
+      agentProtocolInstruction(),
       profile.outputRules.length ? `输出规则：\n${profile.outputRules.map((rule) => `- ${rule}`).join('\n')}` : '',
       composeSkillPrompt(agentId, prompt),
     ]
@@ -935,12 +1063,13 @@ async function callAgent(
       role: 'user',
       content: [
         `秘书长计划：\n${JSON.stringify(plan, null, 2)}`,
+        `模型路由：${describeModelRouting(routing)}。${routing.reason}`,
         composeWritingTaskPrompt(prompt),
         `用户任务：\n${prompt}`,
         sources?.length ? `联网来源：\n${formatSources(sources)}` : '',
         contextResources(store.resources),
         `当前文稿：\n${store.editorText.slice(0, 5000)}`,
-        '只输出与你的专业角色相关的结论、风险、素材或建议。不要写最终用户答复。',
+        '只输出与你的专业角色相关的结构化结论、风险、素材或建议。不要写最终用户答复。',
       ]
         .filter(Boolean)
         .join('\n\n'),
@@ -957,7 +1086,11 @@ async function runWriter(
   storyBrief?: StoryBrief,
 ) {
   const store = useAppStore.getState()
-  const provider = store.providerConfigs[store.activeProviderId]
+  const writerRouting = selectModelForRole('writer', {
+    complexity: plan.taskComplexity,
+    writeIntent: plan.writeIntent,
+  })
+  const provider = writerRouting.provider
   const reviewMode = store.flowReviewMode
   const step = useAppStore.getState().addAgentStep({
     type: 'generation',
@@ -973,8 +1106,8 @@ async function runWriter(
     kind: 'agent',
     title: '秘书长整合结果',
     detail: plan.writeIntent
-      ? '整合工具、来源、项目上下文和工作室 Agent 结论，准备正文补丁。'
-      : '整合工具、来源、项目上下文和工作室 Agent 结论，准备对话回复。',
+      ? `整合工具、来源、项目上下文和工作室 Agent 结论，准备正文补丁。\n${describeModelRouting(writerRouting)}`
+      : `整合工具、来源、项目上下文和工作室 Agent 结论，准备对话回复。\n${describeModelRouting(writerRouting)}`,
     status: 'running',
     agentId: 'writer',
   })
@@ -986,6 +1119,7 @@ async function runWriter(
             [
               sharedAgentRules,
               getRuntimeAgent('writer').systemPrompt,
+              '整合工作室 Agent 结论时只使用其 summary/keyPoints/risks/handoff 和 outputId，不要复述完整上游内容。',
               composeSkillPrompt('writer', prompt),
             ]
               .filter(Boolean)
@@ -996,6 +1130,7 @@ async function runWriter(
           role: 'user',
           content: [
             `执行计划：\n${JSON.stringify(plan, null, 2)}`,
+            `模型路由：${describeModelRouting(writerRouting)}。${writerRouting.reason}`,
             composeWritingTaskPrompt(prompt),
             store.compressedSummary ? `压缩摘要：\n${store.compressedSummary}` : '',
             store.mentionContextItems.length
@@ -1006,7 +1141,7 @@ async function runWriter(
             sources?.length ? `联网来源：\n${formatSources(sources)}` : '',
             outputs.length
               ? `工作室 Agent 结论：\n${outputs
-                  .map((output) => `${output.label}:\n${output.content}`)
+                  .map((output) => `${output.label}${output.outputId ? ` (${output.outputId})` : ''}:\n${output.content}`)
                   .join('\n\n')}`
               : '',
             `当前文稿：\n${store.editorText.slice(0, 7000)}`,
@@ -1074,8 +1209,11 @@ async function repairDraft(
   previousText: string,
   onText?: (text: string) => void,
 ) {
-  const store = useAppStore.getState()
-  const provider = store.providerConfigs[store.activeProviderId]
+  const repairRouting = selectModelForRole('repair', {
+    complexity: plan.taskComplexity,
+    writeIntent: true,
+  })
+  const provider = repairRouting.provider
   const step = useAppStore.getState().addAgentStep({
     type: 'generation',
     title: 'Repair manuscript draft',
@@ -1087,7 +1225,7 @@ async function repairDraft(
   const trace = useAppStore.getState().addFlowTrace({
     kind: 'agent',
     title: '秘书长补写正文',
-    detail: '检测到上一次输出更像策略或过短，正在强制生成可写入文稿的正文。',
+    detail: `检测到上一次输出更像策略或过短，正在强制生成可写入文稿的正文。\n${describeModelRouting(repairRouting)}`,
     status: 'running',
     agentId: 'writer',
   })
@@ -1126,6 +1264,7 @@ async function repairDraft(
         outputs.length
           ? `工作室 Agent 结论：\n${outputs.map((output) => `${output.label}:\n${output.content}`).join('\n\n')}`
           : '',
+        `模型路由：${describeModelRouting(repairRouting)}。${repairRouting.reason}`,
         sources?.length ? `来源：\n${formatSources(sources)}` : '',
         `上一次输出：\n${previousText}`,
         '请不要再总结策略。请直接写“正文:”，输出至少 1800 字的完整样章或完整第一节；如果用户要求中篇，先给出可继续扩展的第一大节。',
@@ -1231,15 +1370,24 @@ function isInsufficientDraft(draft: string | undefined, prompt: string) {
   return tooShort || strategyLike
 }
 
-function sanitizePlan(input: Partial<AgentRunPlan>, prompt: string): AgentRunPlan {
-  const fallback = createFallbackPlan(prompt)
+function sanitizePlan(
+  input: Partial<AgentRunPlan>,
+  prompt: string,
+  classification = classifySecretaryTask(prompt),
+  modelRoutingSummary: string[] = [],
+): AgentRunPlan {
+  const fallback = createFallbackPlan(prompt, classification, modelRoutingSummary)
   const routing = routeForPrompt(prompt)
   const routedAgents = [
     ...routing.primaryAgents,
     ...routing.reviewerAgents,
     ...routing.advisorAgents,
   ]
-  const subAgents = uniqueAgents([...(input.subAgents ?? []), ...routedAgents, ...fallback.subAgents])
+  const maxAgentCount = maxAgentsForClassification(classification)
+  const subAgents = uniqueAgents(
+    [...(input.subAgents ?? []), ...routedAgents, ...fallback.subAgents],
+    maxAgentCount,
+  )
   const toolCalls = normalizeToolCalls(input.toolCalls ?? [])
   const needsWebSearch = Boolean(input.needsWebSearch || toolCalls.some((call) => call.name === 'web_search'))
   const localWriteIntent = shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt)
@@ -1304,6 +1452,11 @@ function sanitizePlan(input: Partial<AgentRunPlan>, prompt: string): AgentRunPla
     replyMode: writeIntent ? 'conversation_with_patch' : 'conversation_only',
     conversationGoal: input.conversationGoal?.trim() || fallback.conversationGoal,
     routingRationale: routing.rationale,
+    taskComplexity: classification.complexity,
+    taskType: classification.taskType,
+    classificationConfidence: classification.confidence,
+    maxAgentCount,
+    modelRoutingSummary,
   }
 }
 
@@ -1343,7 +1496,7 @@ function normalizePatchOperation(operation: unknown, prompt: string) {
     : inferPatchOperation(prompt)
 }
 
-function uniqueAgents(agents: FlowAgentId[]) {
+function uniqueAgents(agents: FlowAgentId[], maxCount = 5) {
   const enabled = new Set(
     getEnabledStudioAgents(
       useAppStore.getState().customStudioAgents,
@@ -1353,11 +1506,15 @@ function uniqueAgents(agents: FlowAgentId[]) {
 
   return Array.from(new Set(agents.filter((agentId) => enabled.has(agentId) && agentId !== 'writer'))).slice(
     0,
-    5,
+    maxCount,
   )
 }
 
-function createFallbackPlan(prompt: string): AgentRunPlan {
+function createFallbackPlan(
+  prompt: string,
+  classification = classifySecretaryTask(prompt),
+  modelRoutingSummary: string[] = [],
+): AgentRunPlan {
   const routing = routeForPrompt(prompt)
   const subAgents = new Set<FlowAgentId>([
     ...routing.primaryAgents,
@@ -1425,16 +1582,35 @@ function createFallbackPlan(prompt: string): AgentRunPlan {
     })
   }
 
+  const maxAgentCount = maxAgentsForClassification(classification)
+
   return {
     needsWebSearch,
-    subAgents: uniqueAgents(Array.from(subAgents)),
+    subAgents: uniqueAgents(Array.from(subAgents), maxAgentCount),
     toolCalls,
     writeIntent,
     documentPatchOperation: inferPatchOperation(prompt),
     replyMode: writeIntent ? 'conversation_with_patch' : 'conversation_only',
     conversationGoal: routing.rationale || (writeIntent ? '生成可写入文稿的正文' : '在对话中回答用户问题'),
     routingRationale: routing.rationale,
+    taskComplexity: classification.complexity,
+    taskType: classification.taskType,
+    classificationConfidence: classification.confidence,
+    maxAgentCount,
+    modelRoutingSummary,
   }
+}
+
+function maxAgentsForClassification(classification: SecretaryTaskClassification) {
+  if (classification.complexity === 'simple') {
+    return Math.min(1, classification.suggestedAgentCount)
+  }
+
+  if (classification.complexity === 'standard') {
+    return Math.min(2, classification.suggestedAgentCount)
+  }
+
+  return Math.min(5, classification.suggestedAgentCount || 5)
 }
 
 function hasRealtimeOrExternalIntent(prompt: string) {
@@ -1525,9 +1701,15 @@ function buildSearchQuery(prompt: string, plan?: Pick<AgentRunPlan, 'conversatio
 function formatPlanDetail(plan: AgentRunPlan) {
   return [
     `目标：${plan.conversationGoal}`,
+    plan.taskComplexity
+      ? `复杂度：${plan.taskComplexity} · 置信度 ${Math.round((plan.classificationConfidence ?? 0) * 100)}% · 上限 ${plan.maxAgentCount ?? 5} 个 Agent`
+      : '',
+    plan.modelRoutingSummary?.length ? `模型：${plan.modelRoutingSummary.join('；')}` : '',
     `联网：${plan.needsWebSearch ? '需要' : '不需要'}`,
     `Agent：${plan.subAgents.map((agentId) => getRuntimeAgent(agentId).shortName).join(' / ') || '无'}`,
     plan.routingRationale ? `调度理由：${plan.routingRationale}` : '',
+    plan.semanticCacheHitId ? `语义缓存：命中 ${plan.semanticCacheHitId}` : '',
+    plan.earlyStopReason ? `早停：${plan.earlyStopReason}` : '',
     `工具：${plan.toolCalls.map((call) => call.name).join(' / ') || '无'}`,
     `写入文稿：${plan.writeIntent ? plan.documentPatchOperation : '否'}`,
   ]

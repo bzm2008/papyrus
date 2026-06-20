@@ -1,8 +1,10 @@
 import { composeSystemPrompt } from './agentPromptContext'
 import { callOpenAICompatible, canCallProvider } from './llmClient'
+import { describeModelRouting, selectModelForRole } from './modelRouterService'
 import {
   type FlowThinkingEffort,
   type GoalJudgeResult,
+  type GoalJudgeVerdict,
   type SecretaryGoal,
   useAppStore,
 } from '../stores/useAppStore'
@@ -30,7 +32,7 @@ export function createSecretaryGoalFromRequest(request: string): SecretaryGoal {
     phasePlan: [
       '明确目标、范围和当前材料',
       '拆分阶段任务并逐步写作或研究',
-      '每阶段结束后总结进度和缺口',
+      '每个阶段结束后总结进度和缺口',
       '由裁判 Agent 检查是否满足验收标准',
       '未完成时继续下一阶段，完成后收束本轮目标',
     ],
@@ -64,7 +66,7 @@ export function composeGoalExecutionPrompt(
       ? ['用户运行中引导：', ...guidanceNotes.map((note, index) => `${index + 1}. ${note}`)].join('\n')
       : '',
     '',
-    '请推进当前目标的一小到中等阶段。若需要写正文，请生成文稿补丁；若暂不写正文，请给出明确的阶段产出。完成后必须提供给裁判检查的摘要、证据和剩余缺口。',
+    '请推进当前目标的一个小到中等阶段。若需要写正文，请生成文稿补丁；若暂不写正文，请给出明确的阶段产出。完成后必须提供给裁判检查的摘要、证据和剩余缺口。',
   ]
     .filter(Boolean)
     .join('\n')
@@ -75,8 +77,8 @@ export async function judgeSecretaryGoal(
   stageResult: string,
   effort: FlowThinkingEffort,
 ): Promise<GoalJudgeResult> {
-  const store = useAppStore.getState()
-  const provider = store.providerConfigs[store.activeProviderId]
+  const routing = selectModelForRole('judge', { complexity: 'goal' })
+  const provider = routing.provider
 
   if (!canCallProvider(provider)) {
     return fallbackJudge(goal, stageResult)
@@ -90,10 +92,13 @@ export async function judgeSecretaryGoal(
           [
             '你是 Papyrus 的裁判 Agent，只负责判断长程目标是否满足验收标准。',
             '不要写正文，不要替秘书长完成任务。只输出严格 JSON。',
-            'JSON 字段：verdict, summary, evidence, nextStep。verdict 只能是 continue、complete、blocked。',
+            'JSON 字段：verdict, summary, evidence, nextStep。',
+            'verdict 只能是 continue、complete、blocked、early_stop。',
+            'early_stop 用于阶段结果已高置信满足当前阶段且继续协作没有新增价值，但整个目标未必完全结束。',
             effort === 'max'
               ? '当前是最高思考强度：只有验收标准全部被证据覆盖时才能 verdict=complete。'
-              : '如果主要验收标准还没有充分证据，请 verdict=continue。',
+              : '如果主要验收标准缺乏充分证据，请 verdict=continue；如果继续协作会重复，请 verdict=early_stop。',
+            describeModelRouting(routing),
           ].join('\n'),
         ),
       },
@@ -141,8 +146,12 @@ function effortInstruction(effort: FlowThinkingEffort) {
 }
 
 function sanitizeJudgeResult(value: Partial<GoalJudgeResult>): GoalJudgeResult {
-  const verdict =
-    value.verdict === 'complete' || value.verdict === 'blocked' ? value.verdict : 'continue'
+  const verdict: GoalJudgeVerdict =
+    value.verdict === 'complete' ||
+    value.verdict === 'blocked' ||
+    value.verdict === 'early_stop'
+      ? value.verdict
+      : 'continue'
 
   return {
     verdict,
@@ -161,14 +170,24 @@ function fallbackJudge(goal: SecretaryGoal, stageResult: string): GoalJudgeResul
     normalized.length > 1800 &&
     /(完成|已满足|终稿|全文|验收|收束|无剩余缺口)/.test(stageResult) &&
     goal.acceptanceCriteria.length > 0
+  const likelyEarlyStop =
+    !likelyComplete &&
+    normalized.length > 800 &&
+    /(无新增|重复|高置信|当前阶段完成|可以停止协作)/.test(stageResult)
 
   return {
-    verdict: likelyComplete ? 'complete' : 'continue',
+    verdict: likelyComplete ? 'complete' : likelyEarlyStop ? 'early_stop' : 'continue',
     summary: likelyComplete
       ? '本地裁判认为主要目标已有较充分产出，可以收束。'
-      : '本地裁判认为目标还需要继续推进，至少再完成一个阶段。',
+      : likelyEarlyStop
+        ? '本地裁判认为当前阶段继续协作收益较低，可早停并进入整合。'
+        : '本地裁判认为目标仍需要继续推进，至少再完成一个阶段。',
     evidence: [stageResult.slice(0, 160)].filter(Boolean),
-    nextStep: likelyComplete ? '整理最终结果并结束目标。' : '继续补齐剩余章节、论点、资料或审校缺口。',
+    nextStep: likelyComplete
+      ? '整理最终结果并结束目标。'
+      : likelyEarlyStop
+        ? '停止重复协作，由秘书长整合当前阶段结果。'
+        : '继续补齐剩余章节、论点、资料或审校缺口。',
     checkedAt: Date.now(),
   }
 }

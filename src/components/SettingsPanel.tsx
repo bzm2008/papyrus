@@ -780,6 +780,7 @@ function MemorySettingsSection() {
   const globalTowriteMarkdown = useAppStore((state) => state.globalTowriteMarkdown)
   const projectTowriteMarkdown = useAppStore((state) => state.projectTowriteMarkdown)
   const towriteSuggestions = useAppStore((state) => state.towriteSuggestions)
+  const semanticTaskCache = useAppStore((state) => state.semanticTaskCache)
   const setUserMemoryProfile = useAppStore((state) => state.setUserMemoryProfile)
   const upsertUserMemoryRecord = useAppStore((state) => state.upsertUserMemoryRecord)
   const deleteUserMemoryRecord = useAppStore((state) => state.deleteUserMemoryRecord)
@@ -787,6 +788,7 @@ function MemorySettingsSection() {
   const clearUserMemoryRecords = useAppStore((state) => state.clearUserMemoryRecords)
   const deleteProjectWritingMemory = useAppStore((state) => state.deleteProjectWritingMemory)
   const clearProjectWritingMemories = useAppStore((state) => state.clearProjectWritingMemories)
+  const clearSemanticTaskCache = useAppStore((state) => state.clearSemanticTaskCache)
   const setGlobalTowriteMarkdown = useAppStore((state) => state.setGlobalTowriteMarkdown)
   const setProjectTowriteMarkdown = useAppStore((state) => state.setProjectTowriteMarkdown)
   const [manualMemory, setManualMemory] = useState('')
@@ -989,6 +991,18 @@ function MemorySettingsSection() {
             ))}
           </div>
         </details>
+
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">
+          <div>
+            <div className="text-xs font-medium text-[#2f2b22]">本地语义缓存</div>
+            <div className="mt-1 text-xs text-[#8f897a]">
+              用于复用重复资料核查和跨文档检索结果，仅保存在本机。当前 {semanticTaskCache.length} 条。
+            </div>
+          </div>
+          <button type="button" onClick={clearSemanticTaskCache} className="text-xs text-[#9b3d30]">
+            清空缓存
+          </button>
+        </div>
       </div>
     </SectionShell>
   )

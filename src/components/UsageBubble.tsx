@@ -3,6 +3,7 @@ import { useAppStore } from '../stores/useAppStore'
 
 export function UsageBubble() {
   const activeProviderId = useAppStore((state) => state.activeProviderId)
+  const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const contextUsedTokens = useAppStore((state) => state.contextUsedTokens)
   const effectiveContextLimitTokens = useAppStore((state) => state.effectiveContextLimitTokens)
@@ -31,7 +32,9 @@ export function UsageBubble() {
         >
           <Activity size={13} className={isRunning ? 'text-[#31a96b]' : 'text-[#315d39]'} />
           <span>上下文 {contextPercent}%</span>
-          <span className="max-w-24 truncate text-[#8f897a]">{activeProvider.label}</span>
+          <span className="max-w-24 truncate text-[#8f897a]">
+            {modelRoutingMode === 'auto' ? 'Auto 调度' : activeProvider.label}
+          </span>
           <ChevronUp size={13} />
         </button>
       </aside>
@@ -69,7 +72,9 @@ export function UsageBubble() {
         <Metric icon={Database} label="资料" value={String(resources.length)} />
       </div>
       <div className="mt-3 truncate border-t border-[#ebe5d7] pt-2 text-[#6f7168]">
-        {activeProvider.label} · {activeProvider.modelName || '未设置模型'} · {contextPercent}%
+        {modelRoutingMode === 'auto'
+          ? `Auto 调度 · ${activeProvider.label} 兜底 · ${contextPercent}%`
+          : `${activeProvider.label} · ${activeProvider.modelName || '未设置模型'} · ${contextPercent}%`}
       </div>
     </aside>
   )

@@ -24,6 +24,7 @@ export type StudioAgentId = string
 export type FlowAgentId = StudioAgentId
 export type FlowReviewMode = 'auto' | 'review'
 export type FlowThinkingEffort = 'low' | 'medium' | 'high' | 'max'
+export type ModelRoutingMode = 'manual' | 'auto'
 export type ChatRole = 'user' | 'assistant' | 'system'
 export type LlmRunState = 'idle' | 'running' | 'error'
 export type CompressionState = 'idle' | 'running' | 'error'
@@ -499,7 +500,7 @@ export type QueuedUserInput = {
   guidedAt?: number
 }
 
-export type GoalJudgeVerdict = 'continue' | 'complete' | 'blocked'
+export type GoalJudgeVerdict = 'continue' | 'complete' | 'blocked' | 'early_stop'
 
 export type GoalJudgeResult = {
   verdict: GoalJudgeVerdict
@@ -641,6 +642,33 @@ export type DocumentChangeStat = {
   createdAt: number
 }
 
+export type AgentOutputCacheEntry = {
+  id: string
+  agentRunId?: string
+  agentId: FlowAgentId
+  outputType: 'draft' | 'research' | 'critique' | 'strategy' | 'compliance' | 'summary'
+  summary: string
+  keyPoints: string[]
+  risks: string[]
+  handoff: string
+  confidence: number
+  newInformation: boolean
+  rawLength: number
+  createdAt: number
+}
+
+export type SemanticTaskCacheEntry = {
+  id: string
+  taskType: string
+  promptFingerprint: string
+  promptExcerpt: string
+  summary: string
+  sources?: FlowTrace['sources']
+  hitCount: number
+  createdAt: number
+  updatedAt: number
+}
+
 type CustomAgentSkillInput = Omit<CustomAgentSkill, 'id' | 'createdAt' | 'updatedAt'> & {
   id?: string
 }
@@ -683,6 +711,18 @@ type DocumentChangeStatInput = Omit<DocumentChangeStat, 'id' | 'createdAt'> & {
   createdAt?: number
 }
 
+type AgentOutputCacheInput = Omit<AgentOutputCacheEntry, 'id' | 'createdAt'> & {
+  id?: string
+  createdAt?: number
+}
+
+type SemanticTaskCacheInput = Omit<SemanticTaskCacheEntry, 'id' | 'createdAt' | 'updatedAt' | 'hitCount'> & {
+  id?: string
+  createdAt?: number
+  updatedAt?: number
+  hitCount?: number
+}
+
 type SecretaryGoalInput = Omit<SecretaryGoal, 'id' | 'createdAt' | 'updatedAt' | 'status'> & {
   id?: string
   status?: SecretaryGoalStatus
@@ -720,6 +760,7 @@ type AppState = TokenSnapshot & {
   isLeftCollapsed: boolean
   isSettingsOpen: boolean
   activeProviderId: ProviderId
+  modelRoutingMode: ModelRoutingMode
   activeAgentId: FlowAgentId
   flowReviewMode: FlowReviewMode
   flowThinkingEffort: FlowThinkingEffort
@@ -796,6 +837,8 @@ type AppState = TokenSnapshot & {
   projectTowriteMarkdown: string
   towriteSuggestions: TowriteSuggestion[]
   documentChangeStats: DocumentChangeStat[]
+  agentOutputCache: AgentOutputCacheEntry[]
+  semanticTaskCache: SemanticTaskCacheEntry[]
   storyProjects: StoryProject[]
   activeStoryProjectId?: string
   storyContracts: StoryContract[]
@@ -813,6 +856,7 @@ type AppState = TokenSnapshot & {
   toggleLeftCollapsed: () => void
   setSettingsOpen: (open: boolean) => void
   setActiveProviderId: (providerId: ProviderId) => void
+  setModelRoutingMode: (mode: ModelRoutingMode) => void
   setActiveAgentId: (agentId: FlowAgentId) => void
   setFlowReviewMode: (reviewMode: FlowReviewMode) => void
   setFlowThinkingEffort: (effort: FlowThinkingEffort) => void
@@ -933,6 +977,10 @@ type AppState = TokenSnapshot & {
   clearTowriteSuggestions: () => void
   recordDocumentChangeStat: (stat: DocumentChangeStatInput) => DocumentChangeStat
   clearDocumentChangeStats: (chatId?: string) => void
+  putAgentOutputCache: (entry: AgentOutputCacheInput) => AgentOutputCacheEntry
+  clearAgentOutputCache: (agentRunId?: string) => void
+  putSemanticTaskCache: (entry: SemanticTaskCacheInput) => SemanticTaskCacheEntry
+  clearSemanticTaskCache: () => void
   addResources: (resources: ImportedResource[]) => void
   updateResource: (id: string, patch: Partial<ImportedResource>) => void
   deleteResource: (id: string) => void
@@ -1057,6 +1105,7 @@ export const useAppStore = create<AppState>()(
       isLeftCollapsed: false,
       isSettingsOpen: false,
       activeProviderId: defaultActiveProviderId,
+      modelRoutingMode: 'manual',
       activeAgentId: 'writer',
       flowReviewMode: 'auto',
       flowThinkingEffort: 'medium',
@@ -1167,6 +1216,8 @@ export const useAppStore = create<AppState>()(
         '# project-towrite.md\n\n## 项目规则\n\n- 在这里记录人物、术语、风格规则、来源资料和写作决策。\n\n## 待解决问题\n\n- 未确认的设定和问题要明确标注。\n',
       towriteSuggestions: [],
       documentChangeStats: [],
+      agentOutputCache: [],
+      semanticTaskCache: [],
       storyProjects: [],
       activeStoryProjectId: undefined,
       storyContracts: [],
@@ -1184,6 +1235,7 @@ export const useAppStore = create<AppState>()(
       setColumnMode: (columnMode) => set({ columnMode }),
       toggleLeftCollapsed: () => set((state) => ({ isLeftCollapsed: !state.isLeftCollapsed })),
       setSettingsOpen: (isSettingsOpen) => set({ isSettingsOpen }),
+      setModelRoutingMode: (modelRoutingMode) => set({ modelRoutingMode }),
       setActiveProviderId: (activeProviderId) =>
         set((state) => {
           const provider = state.providerConfigs[activeProviderId] ?? state.providerConfigs.qwen36
@@ -2298,6 +2350,63 @@ export const useAppStore = create<AppState>()(
             ? state.documentChangeStats.filter((stat) => stat.chatId !== chatId)
             : [],
         })),
+      putAgentOutputCache: (input) => {
+        const now = Date.now()
+        const entry: AgentOutputCacheEntry = {
+          ...input,
+          id: input.id ?? globalThis.crypto?.randomUUID?.() ?? `agent-output-${now}`,
+          keyPoints: normalizeStringList(input.keyPoints).slice(0, 8),
+          risks: normalizeStringList(input.risks).slice(0, 6),
+          confidence: clampNumber(input.confidence, 0, 1),
+          createdAt: input.createdAt ?? now,
+        }
+
+        set((state) => ({
+          agentOutputCache: [
+            entry,
+            ...state.agentOutputCache.filter((item) => item.id !== entry.id),
+          ].slice(0, 160),
+        }))
+
+        return entry
+      },
+      clearAgentOutputCache: (agentRunId) =>
+        set((state) => ({
+          agentOutputCache: agentRunId
+            ? state.agentOutputCache.filter((entry) => entry.agentRunId !== agentRunId)
+            : [],
+        })),
+      putSemanticTaskCache: (input) => {
+        const now = Date.now()
+        const existing = get().semanticTaskCache.find(
+          (entry) =>
+            entry.taskType === input.taskType &&
+            entry.promptFingerprint === input.promptFingerprint,
+        )
+        const entry: SemanticTaskCacheEntry = {
+          ...input,
+          id: existing?.id ?? input.id ?? globalThis.crypto?.randomUUID?.() ?? `semantic-cache-${now}`,
+          promptExcerpt: input.promptExcerpt.trim().slice(0, 260),
+          summary: input.summary.trim(),
+          hitCount: input.hitCount ?? existing?.hitCount ?? 0,
+          createdAt: existing?.createdAt ?? input.createdAt ?? now,
+          updatedAt: input.updatedAt ?? now,
+        }
+
+        if (!entry.summary) {
+          return entry
+        }
+
+        set((state) => ({
+          semanticTaskCache: [
+            entry,
+            ...state.semanticTaskCache.filter((item) => item.id !== entry.id),
+          ].slice(0, 120),
+        }))
+
+        return entry
+      },
+      clearSemanticTaskCache: () => set({ semanticTaskCache: [] }),
       addResources: (resources) =>
         set((state) => {
           const merged = [
@@ -2885,6 +2994,7 @@ export const useAppStore = create<AppState>()(
         columnMode: state.columnMode,
         isLeftCollapsed: state.isLeftCollapsed,
         activeProviderId: state.activeProviderId,
+        modelRoutingMode: state.modelRoutingMode,
         activeAgentId: state.activeAgentId,
         flowReviewMode: 'auto' as const,
         flowThinkingEffort: state.flowThinkingEffort,
@@ -2941,6 +3051,8 @@ export const useAppStore = create<AppState>()(
         projectTowriteMarkdown: state.projectTowriteMarkdown,
         towriteSuggestions: state.towriteSuggestions,
         documentChangeStats: state.documentChangeStats,
+        agentOutputCache: state.agentOutputCache,
+        semanticTaskCache: state.semanticTaskCache,
         storyProjects: state.storyProjects,
         activeStoryProjectId: state.activeStoryProjectId,
         storyContracts: state.storyContracts,
@@ -2992,6 +3104,7 @@ export const useAppStore = create<AppState>()(
           ...current,
           ...persistedState,
           activeProviderId,
+          modelRoutingMode: normalizeModelRoutingMode(persistedState.modelRoutingMode),
           activeArticleId,
           activeChatId,
           flowReviewMode: 'auto' as const,
@@ -3063,6 +3176,8 @@ export const useAppStore = create<AppState>()(
               : current.projectTowriteMarkdown,
           towriteSuggestions: sanitizeTowriteSuggestions(persistedState.towriteSuggestions),
           documentChangeStats: sanitizeDocumentChangeStats(persistedState.documentChangeStats),
+          agentOutputCache: sanitizeAgentOutputCache(persistedState.agentOutputCache),
+          semanticTaskCache: sanitizeSemanticTaskCache(persistedState.semanticTaskCache),
           secretaryPlanDraft: undefined,
           storyProjects: persistedState.storyProjects ?? current.storyProjects,
           activeStoryProjectId: persistedState.activeStoryProjectId ?? current.activeStoryProjectId,
@@ -3465,13 +3580,108 @@ function sanitizeDocumentChangeStats(value: unknown): DocumentChangeStat[] {
     .slice(0, 400)
 }
 
+function normalizeModelRoutingMode(value: unknown): ModelRoutingMode {
+  return value === 'auto' ? 'auto' : 'manual'
+}
+
+function sanitizeAgentOutputCache(value: unknown): AgentOutputCacheEntry[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<AgentOutputCacheEntry> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const summary = typeof item.summary === 'string' ? item.summary.trim() : ''
+
+      if (!summary) {
+        return undefined
+      }
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `agent-output-${now}-${index}`,
+        agentRunId: typeof item.agentRunId === 'string' ? item.agentRunId : undefined,
+        agentId: typeof item.agentId === 'string' && item.agentId.trim() ? item.agentId : 'writer',
+        outputType: normalizeAgentOutputType(item.outputType),
+        summary: summary.slice(0, 1200),
+        keyPoints: normalizeStringList(item.keyPoints).slice(0, 8),
+        risks: normalizeStringList(item.risks).slice(0, 6),
+        handoff: typeof item.handoff === 'string' ? item.handoff.trim().slice(0, 800) : '',
+        confidence: clampNumber(Number(item.confidence ?? 0.65), 0, 1),
+        newInformation: item.newInformation !== false,
+        rawLength: Math.max(0, Math.round(Number(item.rawLength ?? summary.length))),
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+      } satisfies AgentOutputCacheEntry
+    })
+    .filter(Boolean)
+    .slice(0, 160) as AgentOutputCacheEntry[]
+}
+
+function sanitizeSemanticTaskCache(value: unknown): SemanticTaskCacheEntry[] {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .filter((item): item is Partial<SemanticTaskCacheEntry> => Boolean(item && typeof item === 'object'))
+    .map((item, index) => {
+      const now = Date.now()
+      const taskType = typeof item.taskType === 'string' ? item.taskType.trim() : ''
+      const promptFingerprint =
+        typeof item.promptFingerprint === 'string' ? item.promptFingerprint.trim() : ''
+      const summary = typeof item.summary === 'string' ? item.summary.trim() : ''
+
+      if (!taskType || !promptFingerprint || !summary) {
+        return undefined
+      }
+
+      return {
+        id:
+          typeof item.id === 'string' && item.id.trim()
+            ? item.id
+            : `semantic-cache-${now}-${index}`,
+        taskType: taskType.slice(0, 80),
+        promptFingerprint: promptFingerprint.slice(0, 220),
+        promptExcerpt:
+          typeof item.promptExcerpt === 'string'
+            ? item.promptExcerpt.trim().slice(0, 260)
+            : '',
+        summary: summary.slice(0, 1400),
+        sources: Array.isArray(item.sources) ? item.sources.slice(0, 8) : undefined,
+        hitCount: Math.max(0, Math.round(Number(item.hitCount ?? 0))),
+        createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
+        updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
+      } satisfies SemanticTaskCacheEntry
+    })
+    .filter(Boolean)
+    .slice(0, 120) as SemanticTaskCacheEntry[]
+}
+
+function normalizeAgentOutputType(value: unknown): AgentOutputCacheEntry['outputType'] {
+  const allowed: AgentOutputCacheEntry['outputType'][] = [
+    'draft',
+    'research',
+    'critique',
+    'strategy',
+    'compliance',
+    'summary',
+  ]
+  return allowed.includes(value as AgentOutputCacheEntry['outputType'])
+    ? (value as AgentOutputCacheEntry['outputType'])
+    : 'summary'
+}
+
 function normalizeFlowThinkingEffort(value: unknown): FlowThinkingEffort {
   const allowed: FlowThinkingEffort[] = ['low', 'medium', 'high', 'max']
   return allowed.includes(value as FlowThinkingEffort) ? (value as FlowThinkingEffort) : 'medium'
 }
 
 function normalizeGoalVerdict(value: unknown): GoalJudgeVerdict {
-  const allowed: GoalJudgeVerdict[] = ['continue', 'complete', 'blocked']
+  const allowed: GoalJudgeVerdict[] = ['continue', 'complete', 'blocked', 'early_stop']
   return allowed.includes(value as GoalJudgeVerdict) ? (value as GoalJudgeVerdict) : 'continue'
 }
 

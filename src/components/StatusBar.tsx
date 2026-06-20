@@ -17,6 +17,7 @@ export function StatusBar() {
   const setColumnMode = useAppStore((state) => state.setColumnMode)
   const mode = useAppStore((state) => state.mode)
   const activeProviderId = useAppStore((state) => state.activeProviderId)
+  const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const contextUsedTokens = useAppStore((state) => state.contextUsedTokens)
   const effectiveContextLimitTokens = useAppStore((state) => state.effectiveContextLimitTokens)
@@ -73,8 +74,11 @@ export function StatusBar() {
       <div className="flex min-w-0 flex-1 items-center justify-end gap-3 overflow-hidden">
         <span className="truncate">模式: {mode === 'companion' ? '写作' : '秘书'}</span>
         <span className="truncate">
-          {activeProvider.label} ·{' '}
-          {activeProvider.type === 'scallion_proxy' ? '代理' : activeProvider.modelName || '未设置'}
+          {modelRoutingMode === 'auto'
+            ? `Auto 调度 · ${activeProvider.label} 兜底`
+            : `${activeProvider.label} · ${
+                activeProvider.type === 'scallion_proxy' ? '代理' : activeProvider.modelName || '未设置'
+              }`}
         </span>
         <span className="truncate tabular-nums">
           上下文 {contextPercent}% · {Math.round(effectiveContextLimitTokens / 1024)}K ·{' '}

@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Cpu, Settings2, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { Check, ChevronDown, Cpu, Route, Settings2, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { useMemo } from 'react'
 import { canCallProvider } from '../services/llmClient'
 import { isProviderValidated } from '../services/modelCatalog'
@@ -7,6 +7,8 @@ import { providerOrder, useAppStore, type ProviderId } from '../stores/useAppSto
 export function ModelSelector({ compact = false }: { compact?: boolean }) {
   const activeProviderId = useAppStore((state) => state.activeProviderId)
   const setActiveProviderId = useAppStore((state) => state.setActiveProviderId)
+  const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
+  const setModelRoutingMode = useAppStore((state) => state.setModelRoutingMode)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const activeProvider = providerConfigs[activeProviderId]
@@ -45,7 +47,13 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
       return
     }
 
+    setModelRoutingMode('manual')
     setActiveProviderId(providerId)
+    closeOpenDetails()
+  }
+
+  const selectAuto = () => {
+    setModelRoutingMode('auto')
     closeOpenDetails()
   }
 
@@ -60,11 +68,15 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
         <Cpu size={14} className="text-[#3f5845]" />
         <span className="min-w-0">
           <span className="block max-w-36 truncate font-medium text-[#2f2b22]">
-            {activeProvider.label}
+            {modelRoutingMode === 'auto' ? 'Auto 推荐' : activeProvider.label}
           </span>
           {!compact ? (
             <span className="block max-w-40 truncate text-[11px] text-[#8f897a]">
-              {activeProvider.type === 'scallion_proxy' ? '内置代理' : activeProvider.modelName}
+              {modelRoutingMode === 'auto'
+                ? '秘书长自动选择模型'
+                : activeProvider.type === 'scallion_proxy'
+                  ? '内置代理'
+                  : activeProvider.modelName}
             </span>
           ) : null}
         </span>
@@ -88,6 +100,29 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
         </div>
 
         <div className="max-h-[min(420px,calc(100vh-120px))] space-y-3 overflow-y-auto p-1">
+          <section>
+            <button
+              type="button"
+              onClick={selectAuto}
+              className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition ${
+                modelRoutingMode === 'auto'
+                  ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
+                  : 'border-[#d7aa4f]/45 bg-[#fff9ed] text-[#4f4a3d] hover:border-[#d7aa4f]/80'
+              }`}
+            >
+              <span className="flex min-w-0 items-start gap-2">
+                <Route size={15} className="mt-0.5 shrink-0" />
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-semibold">Auto 推荐</span>
+                  <span className={`block truncate text-xs ${modelRoutingMode === 'auto' ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
+                    推荐开启：规划、执行、审查自动匹配可用模型
+                  </span>
+                </span>
+              </span>
+              {modelRoutingMode === 'auto' ? <Check size={15} /> : <ShieldCheck size={15} />}
+            </button>
+          </section>
+
           {groups.map((group) => (
             <section key={group.title}>
               <div className="mb-1 px-1 text-[11px] font-medium uppercase text-[#9d988a]">
@@ -95,7 +130,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
               </div>
               <div className="space-y-1">
                 {group.providers.map((provider) => {
-                  const active = provider.id === activeProviderId
+                  const active = modelRoutingMode === 'manual' && provider.id === activeProviderId
                   const usable =
                     provider.type === 'scallion_proxy' ||
                     (canCallProvider(provider) && isProviderValidated(provider))
