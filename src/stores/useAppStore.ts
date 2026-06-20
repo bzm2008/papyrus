@@ -719,15 +719,54 @@ export type SemanticTaskCacheEntry = {
 
 export type HiveSwarmPhase = 'router' | 'research' | 'draft' | 'review' | 'judge' | 'aggregate'
 
+export type HiveBlackboardEntryKind =
+  | 'routing'
+  | 'agent_started'
+  | 'agent_completed'
+  | 'agent_retry'
+  | 'agent_failed'
+  | 'early_stop'
+  | 'circuit_breaker'
+  | 'timeout'
+  | 'summary'
+
+export type HiveBlackboardEntry = {
+  id: string
+  traceId: string
+  runId?: string
+  agentId?: FlowAgentId
+  phase?: HiveSwarmPhase
+  kind: HiveBlackboardEntryKind
+  title: string
+  detail: string
+  attempt?: number
+  elapsedMs?: number
+  createdAt: number
+}
+
+export type HiveCircuitBreakerState = {
+  open: boolean
+  failureCount: number
+  openedAt?: number
+  reason?: string
+}
+
 export type HiveTelemetry = {
   enabled: boolean
   runId?: string
   topologyId?: string
+  traceId?: string
+  startedAt?: number
+  deadlineAt?: number
   plannedAgents: number
   activeAgents: number
   completedAgents: number
   skippedAgents: number
   failedAgents: number
+  retryCount?: number
+  timedOut?: boolean
+  circuitBreaker?: HiveCircuitBreakerState
+  blackboard: HiveBlackboardEntry[]
   currentPhase?: HiveSwarmPhase
   stageLabel?: string
   updatedAt?: number
@@ -798,6 +837,8 @@ type SemanticTaskCacheInput = Omit<SemanticTaskCacheEntry, 'id' | 'createdAt' | 
 }
 
 type HiveTelemetryInput = Partial<HiveTelemetry>
+
+type HiveBlackboardEntryInput = Omit<HiveBlackboardEntry, 'id' | 'createdAt'>
 
 type ModelCallCacheMetricInput = Omit<ModelCallCacheMetric, 'id' | 'createdAt'> & {
   id?: string
@@ -1077,6 +1118,7 @@ type AppState = TokenSnapshot & {
   recordModelCallCacheMetric: (metric: ModelCallCacheMetricInput) => ModelCallCacheMetric
   clearModelCallCacheMetrics: () => void
   setHiveTelemetry: (telemetry: HiveTelemetryInput) => void
+  addHiveBlackboardEntry: (entry: HiveBlackboardEntryInput) => HiveBlackboardEntry
   clearHiveTelemetry: () => void
   addResources: (resources: ImportedResource[]) => void
   updateResource: (id: string, patch: Partial<ImportedResource>) => void
@@ -2561,9 +2603,33 @@ export const useAppStore = create<AppState>()(
           hiveTelemetry: {
             ...state.hiveTelemetry,
             ...telemetry,
+            blackboard: telemetry.blackboard ?? state.hiveTelemetry.blackboard,
             updatedAt: Date.now(),
           },
         })),
+      addHiveBlackboardEntry: (input) => {
+        const now = Date.now()
+        const entry: HiveBlackboardEntry = {
+          ...input,
+          id: globalThis.crypto?.randomUUID?.() ?? `hive-blackboard-${now}`,
+          detail: input.detail.trim().slice(0, 600),
+          createdAt: now,
+        }
+
+        set((state) => ({
+          hiveTelemetry: {
+            ...state.hiveTelemetry,
+            blackboard: [entry, ...state.hiveTelemetry.blackboard].slice(0, 60),
+            retryCount:
+              entry.kind === 'agent_retry'
+                ? (state.hiveTelemetry.retryCount ?? 0) + 1
+                : state.hiveTelemetry.retryCount,
+            updatedAt: now,
+          },
+        }))
+
+        return entry
+      },
       clearHiveTelemetry: () => set({ hiveTelemetry: emptyHiveTelemetry() }),
       addResources: (resources) =>
         set((state) => {
@@ -3225,16 +3291,9 @@ export const useAppStore = create<AppState>()(
         companionMessages: state.companionMessages,
         chatSessions: state.chatSessions,
         activeChatId: state.activeChatId,
-        agentTodos: state.agentTodos,
-        flowTraces: state.flowTraces,
-        agentSteps: state.agentSteps,
         agentMemoryRecords: state.agentMemoryRecords,
         agentRuns: state.agentRuns,
         resources: state.resources,
-        pendingDocumentPatch: state.pendingDocumentPatch,
-        queuedUserInputs: state.queuedUserInputs,
-        activeSecretaryGoal: state.activeSecretaryGoal,
-        goalCheckpoints: state.goalCheckpoints,
         scallionUser: state.scallionUser,
         scallionToken: state.scallionToken,
         scallionModels: state.scallionModels,
@@ -3261,7 +3320,6 @@ export const useAppStore = create<AppState>()(
         projectTowriteMarkdown: state.projectTowriteMarkdown,
         towriteSuggestions: state.towriteSuggestions,
         documentChangeStats: state.documentChangeStats,
-        agentOutputCache: state.agentOutputCache,
         semanticTaskCache: state.semanticTaskCache,
         modelCallCacheMetrics: state.modelCallCacheMetrics,
         storyProjects: state.storyProjects,
@@ -3936,6 +3994,13 @@ function emptyHiveTelemetry(): HiveTelemetry {
     completedAgents: 0,
     skippedAgents: 0,
     failedAgents: 0,
+    retryCount: 0,
+    timedOut: false,
+    circuitBreaker: {
+      open: false,
+      failureCount: 0,
+    },
+    blackboard: [],
   }
 }
 

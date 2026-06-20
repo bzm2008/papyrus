@@ -109,15 +109,74 @@ function HiveTelemetryStrip() {
   ]
 
   return (
-    <div className="mb-2 grid grid-cols-5 gap-1 rounded-lg border border-[#d7aa4f]/35 bg-[#fff6df]/82 p-1.5">
-      {items.map(([label, value]) => (
-        <div key={label} className="rounded-md bg-[#fffefa]/76 px-1.5 py-1 text-center">
-          <div className="text-[10px] text-[#8f897a]">{label}</div>
-          <div className="text-xs font-semibold tabular-nums text-[#2f2b22]">{value}</div>
-        </div>
-      ))}
+    <div className="mb-2 rounded-lg border border-[#d7aa4f]/35 bg-[#fff6df]/82 p-1.5">
+      <div className="grid grid-cols-5 gap-1">
+        {items.map(([label, value]) => (
+          <div key={label} className="rounded-md bg-[#fffefa]/76 px-1.5 py-1 text-center">
+            <div className="text-[10px] text-[#8f897a]">{label}</div>
+            <div className="text-xs font-semibold tabular-nums text-[#2f2b22]">{value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px] text-[#6f7168]">
+        {telemetry.traceId ? (
+          <span className="rounded-md bg-[#fffefa]/76 px-1.5 py-0.5 font-mono">
+            {telemetry.traceId}
+          </span>
+        ) : null}
+        {telemetry.retryCount ? (
+          <span className="rounded-md bg-[#fffefa]/76 px-1.5 py-0.5">
+            重试 {telemetry.retryCount}
+          </span>
+        ) : null}
+        {telemetry.timedOut ? (
+          <span className="rounded-md bg-[#fff7f4] px-1.5 py-0.5 text-[#9b3d30]">已超时降级</span>
+        ) : null}
+        {telemetry.circuitBreaker?.open ? (
+          <span className="rounded-md bg-[#fff7f4] px-1.5 py-0.5 text-[#9b3d30]">
+            断路器开启
+          </span>
+        ) : null}
+      </div>
+      {telemetry.blackboard.length ? <HiveBlackboard entries={telemetry.blackboard.slice(0, 5)} /> : null}
     </div>
   )
+}
+
+function HiveBlackboard({ entries }: { entries: ReturnType<typeof useAppStore.getState>['hiveTelemetry']['blackboard'] }) {
+  return (
+    <div className="mt-1.5 rounded-md bg-[#fffefa]/72 p-1.5">
+      <div className="mb-1 text-[10px] font-semibold text-[#5b4a24]">共享黑板</div>
+      <div className="space-y-1">
+        {entries.map((entry) => (
+          <div key={entry.id} className="grid grid-cols-[64px_1fr] gap-2 text-[10px] leading-4">
+            <span className="truncate text-[#8f897a]">{entryKindLabel(entry.kind)}</span>
+            <span className="min-w-0 text-[#5f6159]">
+              <span className="font-medium text-[#2f2b22]">{entry.title}</span>
+              {entry.agentId ? <span className="ml-1 text-[#8f897a]">@{entry.agentId}</span> : null}
+              <span className="ml-1 break-words">{entry.detail}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function entryKindLabel(kind: ReturnType<typeof useAppStore.getState>['hiveTelemetry']['blackboard'][number]['kind']) {
+  const labels = {
+    routing: '路由',
+    agent_started: '启动',
+    agent_completed: '完成',
+    agent_retry: '重试',
+    agent_failed: '失败',
+    early_stop: '早停',
+    circuit_breaker: '断路',
+    timeout: '超时',
+    summary: '汇总',
+  }
+
+  return labels[kind] ?? kind
 }
 
 function AgentStepRow({ step }: { step: AgentStep }) {

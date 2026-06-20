@@ -11,6 +11,7 @@ import {
 } from './agentProtocolService'
 import { composeWritingContext } from './contextComposer'
 import { buildHiveSwarmTopology, formatHiveTopology, shouldUseHiveSwarm, type HiveSwarmTopology } from './hiveSwarmService'
+import { addHiveRuntimeSummary, runHiveAgentWithGuards, startHiveRuntime } from './hiveRuntimeService'
 import {
   extractDraftText,
   inferPatchOperation,
@@ -567,6 +568,7 @@ export async function planAgentRun(prompt: string, thinkingEffort = useAppStore.
 
 export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinkingEffort = useAppStore.getState().flowThinkingEffort): Promise<AgentRunResult> {
   useAppStore.getState().setAgentTodos(createTodos(prompt, plan))
+  const hiveRuntime = startHiveRuntime(plan)
   if (plan.hiveTopology?.enabled) {
     useAppStore.getState().setHiveTelemetry({
       enabled: true,
@@ -637,7 +639,13 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
     }
 
     try {
-      const output = await runSubAgent(todo.agentId, prompt, plan, sources, stepId)
+      const outputText = await runHiveAgentWithGuards(hiveRuntime, {
+        agentId: todo.agentId,
+        phase: plan.hiveTopology?.nodes.find((node) => node.agentId === todo.agentId)?.phase,
+        run: () => callAgent(todo.agentId, prompt, plan, sources),
+        fallback: (reason) => createMockAgentOutput(todo.agentId, `${prompt}\n\nFallback reason: ${reason}`, sources),
+      })
+      const output = persistSubAgentOutput(todo.agentId, outputText, stepId, sources)
       outputs.push(output)
       if (output.structured) {
         structuredOutputs.push(output.structured)
@@ -653,6 +661,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
             agentId: 'writer',
             endedAt: Date.now(),
           })
+          addHiveRuntimeSummary(hiveRuntime, earlyStop.reason ?? '早停协作')
         }
       }
       useAppStore.getState().updateAgentTodo(todo.id, { status: 'completed' })
@@ -669,6 +678,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
             })
           })
         updateHiveFromTodos(plan)
+        addHiveRuntimeSummary(hiveRuntime, plan.earlyStopReason)
         break
       }
     } catch (error) {
@@ -730,6 +740,10 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
     useAppStore.getState().updateAgentTodo(writerTodo.id, { status: 'completed' })
     updateHiveFromTodos(plan)
   }
+  addHiveRuntimeSummary(
+    hiveRuntime,
+    `完成整合：${outputs.length} 个 Agent 输出，${sources?.length ?? 0} 个来源，${patchContent ? '已生成文稿补丁' : '仅对话答复'}。`,
+  )
 
   return {
     response: response.trim() || '已完成正文补丁，等待写入文稿。',
@@ -992,16 +1006,16 @@ async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
   return dedupeSources(sources)
 }
 
-async function runSubAgent(
+function persistSubAgentOutput(
   agentId: FlowAgentId,
-  prompt: string,
-  plan: AgentRunPlan,
-  sources: FlowTrace['sources'],
-  existingStepId?: string,
-): Promise<AgentOutput> {
+  content: string,
+  stepId?: string,
+  sources?: FlowTrace['sources'],
+  existingTraceId?: string,
+): AgentOutput {
   const profile = getRuntimeAgent(agentId)
-  const stepId =
-    existingStepId ??
+  const ensuredStepId =
+    stepId ??
     useAppStore.getState().addAgentStep({
       type: 'sub_agent',
       title: `调用 Agent：${profile.name}`,
@@ -1010,30 +1024,20 @@ async function runSubAgent(
       isExpanded: true,
       agentId,
     }).id
-  const trace = useAppStore.getState().addFlowTrace({
-    kind: 'agent',
-    title: `调用 Agent：${profile.name}`,
-    detail: taskDetailForAgent(agentId),
-    status: 'running',
-    agentId,
-  })
-  let content: string
-
-  try {
-    content = await callAgent(agentId, prompt, plan, sources)
-  } catch (error) {
-    useAppStore.getState().updateAgentStep(stepId, {
-      status: 'error',
-      details: error instanceof Error ? error.message : 'Sub agent failed',
-      endedAt: Date.now(),
-    })
-    throw error
-  }
+  const traceId =
+    existingTraceId ??
+    useAppStore.getState().addFlowTrace({
+      kind: 'agent',
+      title: `调用 Agent：${profile.name}`,
+      detail: taskDetailForAgent(agentId),
+      status: 'running',
+      agentId,
+    }).id
   const structured = parseStructuredAgentOutput(content)
   const outputEntry = useAppStore.getState().putAgentOutputCache({
     agentRunId: useAppStore.getState().activeAgentRunId,
     agentId,
-    outputType: getRuntimeAgent(agentId).outputType,
+    outputType: profile.outputType,
     summary: structured.summary,
     keyPoints: structured.keyPoints,
     risks: structured.risks,
@@ -1044,13 +1048,13 @@ async function runSubAgent(
   })
   const compactContent = formatStructuredOutputForHandoff(outputEntry.id, structured)
 
-  useAppStore.getState().updateFlowTrace(trace.id, {
+  useAppStore.getState().updateFlowTrace(traceId, {
     detail: compactContent.slice(0, 420),
     status: 'completed',
     sources,
     endedAt: Date.now(),
   })
-  useAppStore.getState().updateAgentStep(stepId, {
+  useAppStore.getState().updateAgentStep(ensuredStepId, {
     status: 'completed',
     content: compactContent,
     sources,

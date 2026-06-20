@@ -58,7 +58,7 @@ export function composeWritingContext(options: { includeFullCurrentArticle?: boo
   const userMemoryContext = composeUserMemoryContext()
   const towriteContext = composeTowriteContext()
   const writingKnowledgeContext = composeWritingKnowledgeContext(memoryQuery, 8)
-  const sections = [
+  const longTermSections = [
     userMemoryContext ? `User Memory:\n${userMemoryContext}` : '',
     towriteContext ? `towrite.md:\n${towriteContext}` : '',
     state.projectGuidance.style ? `STYLE.md:\n${state.projectGuidance.style}` : '',
@@ -66,16 +66,22 @@ export function composeWritingContext(options: { includeFullCurrentArticle?: boo
     state.negativeMemories.length ? `负向记忆:\n${state.negativeMemories.join('\n')}` : '',
     writingKnowledgeContext.text ? `Writing Knowledge:\n${writingKnowledgeContext.text}` : '',
     memoryContext.text ? `Agent Memory:\n${memoryContext.text}` : '',
+    storyContext ? `Story System:\n${storyContext}` : '',
+  ].filter(Boolean)
+  const shortTermSections = [
     currentArticle
       ? `当前文章:\n${
           options.includeFullCurrentArticle ? currentArticle.text : currentArticle.text.slice(0, 7000)
         }`
       : `当前文稿:\n${state.editorText.slice(0, 7000)}`,
     articleSummaries ? `同一对话下的其他文章:\n${articleSummaries}` : '',
-    storyContext ? `Story System:\n${storyContext}` : '',
     resources ? `导入资料:\n${resources}` : '',
     recentMessages ? `最近对话:\n${recentMessages}` : '',
     state.compressedSummary ? `压缩摘要:\n${state.compressedSummary}` : '',
+  ].filter(Boolean)
+  const sections = [
+    longTermSections.length ? `长期记忆与项目规则\n${longTermSections.join('\n\n---\n\n')}` : '',
+    shortTermSections.length ? `短期工作现场\n${shortTermSections.join('\n\n---\n\n')}` : '',
   ].filter(Boolean)
   const text = sections.join('\n\n---\n\n')
 

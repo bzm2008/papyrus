@@ -417,7 +417,7 @@ function ModelCard({
           label="Model Name"
           value={provider.modelName}
           readOnly={readonly}
-          placeholder="qwen3.6 或 llama3.1"
+          placeholder="deepseek-v4-flash 或 llama3.1"
           onChange={(value) => updateProviderConfig(providerId, { modelName: value })}
         />
         {!readonly ? (
