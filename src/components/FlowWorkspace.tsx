@@ -88,6 +88,9 @@ export function FlowWorkspace() {
   const updateSecretaryGoal = useAppStore((state) => state.updateSecretaryGoal)
   const clearSecretaryGoal = useAppStore((state) => state.clearSecretaryGoal)
   const goalCheckpoints = useAppStore((state) => state.goalCheckpoints)
+  const activeGoalCheckpoints = activeSecretaryGoal
+    ? goalCheckpoints.filter((checkpoint) => checkpoint.goalId === activeSecretaryGoal.id)
+    : []
   useAgentStream()
 
   const visibleMessages = flowMessages.filter(
@@ -99,6 +102,10 @@ export function FlowWorkspace() {
   const latestAssistantMessage = latestAssistantId
     ? visibleMessages.find((message) => message.id === latestAssistantId)
     : undefined
+  const latestUserMessage = [...visibleMessages].reverse().find((message) => message.role === 'user')
+  const shouldShowPendingThinking =
+    (llmRunState === 'running' || llmRunState === 'reconnecting') &&
+    (!latestAssistantMessage || (latestUserMessage?.createdAt ?? 0) > latestAssistantMessage.createdAt)
   const latestChangeStat = documentChangeStats[0]
   const latestRunChangeStat =
     latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
@@ -108,12 +115,15 @@ export function FlowWorkspace() {
   useEffect(() => {
     const previousRunState = previousRunStateRef.current
 
-    if (llmRunState === 'running' && previousRunState !== 'running') {
+    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
+    const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
+
+    if (isBusy && !wasBusy) {
       setRightPanelOpen(true)
       setRightPanelView('workbench')
     }
 
-    if (previousRunState === 'running' && llmRunState !== 'running' && !rightPanelPinned && rightPanelView === 'workbench') {
+    if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'workbench') {
       setRightPanelOpen(false)
     }
 
@@ -124,7 +134,10 @@ export function FlowWorkspace() {
     const previousRunState = receiptRunStateRef.current
     const hasRunData = agentTodos.length > 0 || agentSteps.length > 0 || flowTraces.length > 0
 
-    if (previousRunState === 'running' && llmRunState !== 'running' && latestAssistantId && hasRunData) {
+    const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
+    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
+
+    if (wasBusy && !isBusy && latestAssistantId && hasRunData) {
       setReceiptSnapshots((current) => {
         const nextEntries = Object.entries({
           ...current,
@@ -143,6 +156,54 @@ export function FlowWorkspace() {
     receiptRunStateRef.current = llmRunState
   }, [agentSteps, agentTodos, flowTraces, latestAssistantId, latestRunChangeStat, llmRunState])
 
+  const runGoalCycle = useCallback(async (
+    goal: SecretaryGoal,
+    request: string,
+    displayPrompt: string,
+    queuedInputId?: string,
+  ) => {
+    const startedAt = Date.now()
+    const maxRounds = flowThinkingEffort === 'ultra_hive' ? 8 : flowThinkingEffort === 'high' ? 6 : 4
+    const maxMs = flowThinkingEffort === 'ultra_hive' ? 16 * 60 * 1000 : 9 * 60 * 1000
+    let round = 0
+    let currentRequest = request
+    let currentDisplay = displayPrompt
+    let currentQueuedInputId = queuedInputId
+
+    while (round < maxRounds && Date.now() - startedAt < maxMs) {
+      const latestGoal = useAppStore.getState().activeSecretaryGoal
+
+      if (!latestGoal || latestGoal.id !== goal.id || latestGoal.status !== 'active') {
+        break
+      }
+
+      round += 1
+      await sendFlowMessage(currentRequest, {
+        displayPrompt: currentDisplay,
+        thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
+        goalId: goal.id,
+        queuedInputId: currentQueuedInputId,
+      })
+
+      const afterRunGoal = useAppStore.getState().activeSecretaryGoal
+
+      if (!afterRunGoal || afterRunGoal.id !== goal.id || afterRunGoal.status !== 'active') {
+        break
+      }
+
+      currentRequest = `继续推进目标：${afterRunGoal.currentProgress || afterRunGoal.request}`
+      currentDisplay = `/goal 自动推进 ${afterRunGoal.title}`
+      currentQueuedInputId = undefined
+    }
+
+    const finalGoal = useAppStore.getState().activeSecretaryGoal
+    if (finalGoal?.id === goal.id && finalGoal.status === 'active' && round >= maxRounds) {
+      updateSecretaryGoal(goal.id, {
+        currentProgress: `${finalGoal.currentProgress}\n\n已达到本轮自动推进上限，可继续输入引导或稍后再推进。`,
+      })
+    }
+  }, [flowThinkingEffort, updateSecretaryGoal])
+
   const dispatchPrompt = useCallback(async (rawPrompt: string, options: { queuedInputId?: string } = {}) => {
     const cleanPrompt = rawPrompt.trim()
 
@@ -159,31 +220,21 @@ export function FlowWorkspace() {
 
     if (resolved.isPlanCommand) {
       const request = resolved.argumentsText || '请先写出需要规划的任务'
-      await createSecretaryPlanDraft(resolved.displayPrompt || '/plan', request)
+      await createSecretaryPlanDraft(resolved.displayPrompt || '/plan', resolved.executionPrompt || request)
       return
     }
 
     if (resolved.isGoalCommand) {
       const request = resolved.argumentsText || '请描述长程写作目标'
       const goal = createSecretaryGoalFromRequest(request)
-      await sendFlowMessage(request, {
-        displayPrompt: resolved.displayPrompt || `/goal ${request}`,
-        thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
-        goalId: goal.id,
-        queuedInputId: options.queuedInputId,
-      })
+      await runGoalCycle(goal, resolved.executionPrompt || request, resolved.displayPrompt || `/goal ${request}`, options.queuedInputId)
       return
     }
 
     if (!activeSecretaryGoal && shouldAutoCreateSecretaryGoal(resolved.displayPrompt || resolved.executionPrompt)) {
       const request = resolved.displayPrompt || resolved.executionPrompt
       const goal = createSecretaryGoalFromRequest(request)
-      await sendFlowMessage(resolved.executionPrompt, {
-        displayPrompt: request,
-        thinkingEffort: flowThinkingEffort,
-        goalId: goal.id,
-        queuedInputId: options.queuedInputId,
-      })
+      await runGoalCycle(goal, resolved.executionPrompt, request, options.queuedInputId)
       return
     }
 
@@ -193,7 +244,7 @@ export function FlowWorkspace() {
       goalId: activeSecretaryGoal?.status === 'active' ? activeSecretaryGoal.id : undefined,
       queuedInputId: options.queuedInputId,
     })
-  }, [activeSecretaryGoal, flowThinkingEffort, secretaryPlanDraft])
+  }, [activeSecretaryGoal, flowThinkingEffort, runGoalCycle, secretaryPlanDraft])
 
   useEffect(() => {
     if (llmRunState !== 'idle' || processingQueuedIdRef.current) {
@@ -224,7 +275,7 @@ export function FlowWorkspace() {
 
     setPrompt('')
 
-    if (llmRunState === 'running') {
+    if (llmRunState === 'running' || llmRunState === 'reconnecting') {
       enqueueUserInput(cleanPrompt)
       return
     }
@@ -240,7 +291,7 @@ export function FlowWorkspace() {
   }
 
   const regenerateLast = () => {
-    if (llmRunState === 'running') {
+    if (llmRunState === 'running' || llmRunState === 'reconnecting') {
       return
     }
 
@@ -260,7 +311,7 @@ export function FlowWorkspace() {
   }
 
   const rollbackLast = () => {
-    if (llmRunState === 'running') {
+    if (llmRunState === 'running' || llmRunState === 'reconnecting') {
       return
     }
 
@@ -275,7 +326,7 @@ export function FlowWorkspace() {
   const executePlan = () => {
     const draft = useAppStore.getState().secretaryPlanDraft
 
-    if (!draft || llmRunState === 'running') {
+    if (!draft || llmRunState === 'running' || llmRunState === 'reconnecting') {
       return
     }
 
@@ -291,16 +342,16 @@ export function FlowWorkspace() {
   }
 
   const continueGoal = (goal: SecretaryGoal) => {
-    if (llmRunState === 'running') {
+    if (llmRunState === 'running' || llmRunState === 'reconnecting') {
       enqueueUserInput(`继续推进目标：${goal.title}`)
       return
     }
 
-    void sendFlowMessage(`继续推进目标：${goal.request}`, {
-      displayPrompt: `/goal 继续 ${goal.title}`,
-      thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
-      goalId: goal.id,
-    })
+    if (goal.status === 'paused') {
+      updateSecretaryGoal(goal.id, { status: 'active' })
+    }
+
+    void runGoalCycle(goal, `继续推进目标：${goal.request}`, `/goal 继续 ${goal.title}`)
   }
 
   return (
@@ -367,22 +418,6 @@ export function FlowWorkspace() {
                 onCancel={clearSecretaryPlanDraft}
               />
             ) : null}
-            {activeSecretaryGoal ? (
-              <SecretaryGoalCard
-                goal={activeSecretaryGoal}
-                checkpoints={goalCheckpoints.filter(
-                  (checkpoint) => checkpoint.goalId === activeSecretaryGoal.id,
-                )}
-                running={llmRunState === 'running'}
-                onContinue={() => continueGoal(activeSecretaryGoal)}
-                onPause={() =>
-                  updateSecretaryGoal(activeSecretaryGoal.id, {
-                    status: activeSecretaryGoal.status === 'paused' ? 'active' : 'paused',
-                  })
-                }
-                onCancel={clearSecretaryGoal}
-              />
-            ) : null}
             {pendingDocumentPatch ? <PendingPatchReview /> : null}
             <SecretaryUsageOverview
               collapsed={isUsageCollapsed}
@@ -406,14 +441,14 @@ export function FlowWorkspace() {
                       runState={isLatest ? llmRunState : 'idle'}
                       changeStat={receiptSnapshot?.changeStat ?? (isLatest ? latestRunChangeStat : undefined)}
                       isLatestAssistant={isLatest}
-                      actionsDisabled={llmRunState === 'running'}
+                      actionsDisabled={llmRunState === 'running' || llmRunState === 'reconnecting'}
                       onRegenerate={regenerateLast}
                       onRollback={rollbackLast}
                     />
                   )
                 })}
-                {llmRunState === 'running' && !latestAssistantId ? (
-                  <ThinkingBubble key="thinking" todos={agentTodos} steps={agentSteps} />
+                {shouldShowPendingThinking ? (
+                  <ThinkingBubble key="thinking" todos={agentTodos} steps={agentSteps} runState={llmRunState} />
                 ) : null}
               </AnimatePresence>
             </div>
@@ -421,6 +456,22 @@ export function FlowWorkspace() {
         </div>
 
         <div className="shrink-0 border-t border-[#e1dccf] bg-[#fffefa]/70 px-4 py-3 backdrop-blur">
+          {activeSecretaryGoal ? (
+            <div className="mx-auto mb-2 max-w-[920px]">
+              <SecretaryGoalActiveBar
+                goal={activeSecretaryGoal}
+                checkpoints={activeGoalCheckpoints}
+                running={llmRunState === 'running' || llmRunState === 'reconnecting'}
+                onContinue={() => continueGoal(activeSecretaryGoal)}
+                onPause={() =>
+                  updateSecretaryGoal(activeSecretaryGoal.id, {
+                    status: activeSecretaryGoal.status === 'paused' ? 'active' : 'paused',
+                  })
+                }
+                onCancel={clearSecretaryGoal}
+              />
+            </div>
+          ) : null}
           {queuedUserInputs.length ? (
             <QueuedInputBar
               inputs={queuedUserInputs}
@@ -443,8 +494,10 @@ export function FlowWorkspace() {
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder={
-                  llmRunState === 'running'
-                    ? 'AI 工作中，输入后按 Enter 加入队列...'
+                  llmRunState === 'running' || llmRunState === 'reconnecting'
+                    ? llmRunState === 'reconnecting'
+                      ? '连接恢复中，输入后按 Enter 加入队列...'
+                      : 'AI 工作中，输入后按 Enter 加入队列...'
                     : '写章节、改作文、查资料，或输入 /plan、/goal...'
                 }
                 rows={1}
@@ -458,7 +511,7 @@ export function FlowWorkspace() {
               />
               <button
                 type="submit"
-                title={llmRunState === 'running' ? '加入队列' : '发送给秘书长'}
+                title={llmRunState === 'running' || llmRunState === 'reconnecting' ? '加入队列' : '发送给秘书长'}
                 disabled={!prompt.trim()}
                 className="papyrus-primary-button grid size-9 shrink-0 place-items-center rounded-lg disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -561,7 +614,7 @@ function SecretaryPlanCard({
   )
 }
 
-function SecretaryGoalCard({
+function SecretaryGoalActiveBar({
   goal,
   checkpoints,
   running,
@@ -577,59 +630,31 @@ function SecretaryGoalCard({
   onCancel: () => void
 }) {
   const latestJudge = checkpoints.at(-1)?.judge
+  const completedPhases = checkpoints.filter((checkpoint) =>
+    ['continue', 'complete', 'early_stop'].includes(checkpoint.judge.verdict),
+  ).length
 
   return (
-    <section className="papyrus-panel mb-4 overflow-hidden rounded-xl">
-      <div className="flex items-start justify-between gap-3 border-b border-[#eee4d3] px-4 py-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 text-sm font-semibold text-[#20201d]">
-            <Sparkles size={14} className="text-[#d7aa4f]" />
-            {goal.title || '长程目标'}
-          </div>
-          <div className="mt-1 line-clamp-2 text-xs leading-5 text-[#8f897a]">{goal.request}</div>
-        </div>
-        <span className="shrink-0 rounded-md bg-[#fff6df] px-2 py-1 text-[11px] text-[#5b4a24]">
+    <section className="overflow-hidden rounded-xl border border-[#d7aa4f]/45 bg-[#fff7e3]/92 shadow-[0_10px_28px_rgba(43,34,19,0.08)]">
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2">
+        <span className="inline-flex items-center gap-1.5 rounded-lg bg-[#20201d] px-2 py-1 text-[11px] font-semibold text-[#fffefa]">
+          <Sparkles size={12} className={running ? 'animate-pulse text-[#d7aa4f]' : 'text-[#d7aa4f]'} />
           /goal · {goal.status}
         </span>
-      </div>
-      <div className="grid gap-3 px-4 py-3 text-xs text-[#6f7168]">
-        <div>
-          <div className="mb-1 font-medium text-[#2f2b22]">验收标准</div>
-          <div className="space-y-1">
-            {(goal.acceptanceCriteria.length ? goal.acceptanceCriteria : ['等待秘书长补全验收标准']).map((item) => (
-              <div key={item} className="flex gap-2">
-                <span className="mt-2 size-1 rounded-full bg-[#d7aa4f]" />
-                <span>{item}</span>
-              </div>
-            ))}
+        <div className="min-w-[160px] flex-1">
+          <div className="truncate text-sm font-semibold text-[#20201d]">{goal.title || '长程目标'}</div>
+          <div className="truncate text-xs text-[#6f7168]">
+            {running ? '自动推进中' : goal.status === 'paused' ? '已暂停' : '等待继续'}
+            {' · '}
+            阶段 {completedPhases}/{goal.phasePlan.length || Math.max(1, completedPhases)}
+            {latestJudge ? ` · 裁判 ${latestJudge.verdict}` : ''}
           </div>
         </div>
-        <div>
-          <div className="mb-1 font-medium text-[#2f2b22]">阶段计划</div>
-          <div className="space-y-1">
-            {(goal.phasePlan.length ? goal.phasePlan : ['等待秘书长生成下一阶段计划']).map((item, index) => (
-              <div key={`${item}-${index}`} className="flex gap-2">
-                <span className="tabular-nums text-[#9d988a]">{index + 1}.</span>
-                <span>{item}</span>
-              </div>
-            ))}
-          </div>
+        <div className="hidden min-w-0 max-w-[320px] flex-1 text-xs leading-5 text-[#6f7168] md:block">
+          <span className="line-clamp-2">
+            {latestJudge?.summary || goal.currentProgress || goal.request}
+          </span>
         </div>
-        <div className="rounded-lg bg-[#fffdf7] p-2">
-          <div className="font-medium text-[#2f2b22]">当前进度</div>
-          <div className="mt-1 leading-5">{goal.currentProgress}</div>
-          {latestJudge ? (
-            <div className="mt-2 rounded-md border border-[#e8ddc7] bg-[#fffefa] p-2">
-              <div className="font-medium text-[#2f2b22]">裁判检查：{latestJudge.verdict}</div>
-              <div className="mt-1 leading-5">{latestJudge.summary}</div>
-            </div>
-          ) : null}
-        </div>
-      </div>
-      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#eee4d3] bg-[#fffdf7]/76 px-4 py-3">
-        <button type="button" onClick={onCancel} className="papyrus-control h-8 rounded-md px-3 text-xs">
-          取消目标
-        </button>
         <button type="button" onClick={onPause} className="papyrus-control h-8 rounded-md px-3 text-xs">
           {goal.status === 'paused' ? '继续' : '暂停'}
         </button>
@@ -639,7 +664,10 @@ function SecretaryGoalCard({
           disabled={running || goal.status === 'completed' || goal.status === 'cancelled'}
           className="papyrus-primary-button h-8 rounded-md px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
         >
-          推进下一步
+          自动推进
+        </button>
+        <button type="button" onClick={onCancel} className="papyrus-control h-8 rounded-md px-3 text-xs">
+          取消
         </button>
       </div>
     </section>
@@ -716,6 +744,11 @@ function SecretaryUsageOverview({
   const chatSessions = useAppStore((state) => state.chatSessions)
   const flowMessages = useAppStore((state) => state.flowMessages)
   const contextUsedTokens = useAppStore((state) => state.contextUsedTokens)
+  const editorTokens = useAppStore((state) => state.editorTokens)
+  const conversationTokens = useAppStore((state) => state.conversationTokens)
+  const summaryTokens = useAppStore((state) => state.summaryTokens)
+  const resourceTokens = useAppStore((state) => state.resourceTokens)
+  const chatArticleTokens = useAppStore((state) => state.chatArticleTokens)
   const effectiveContextLimitTokens = useAppStore((state) => state.effectiveContextLimitTokens)
   const activeProviderId = useAppStore((state) => state.activeProviderId)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
@@ -737,6 +770,14 @@ function SecretaryUsageOverview({
   const quotaValue =
     scallionQuota?.remaining ?? scallionUser?.points ?? scallionUser?.balance ?? 0
   const quotaUnit = scallionQuota?.unit ?? '积分'
+  const contextTitle = [
+    `已用 ${formatCompactNumber(contextUsedTokens)} / 上限 ${formatCompactNumber(effectiveContextLimitTokens)} tokens`,
+    `正文 ${formatCompactNumber(editorTokens)}`,
+    `对话 ${formatCompactNumber(conversationTokens)}`,
+    `摘要 ${formatCompactNumber(summaryTokens)}`,
+    `资源 ${formatCompactNumber(resourceTokens)}`,
+    `关联文稿 ${formatCompactNumber(chatArticleTokens)}`,
+  ].join('\n')
 
   return (
     <section className="mb-4 overflow-hidden rounded-xl border border-[#e8ddc7] bg-[#fffdf7]/88 shadow-[0_10px_26px_rgba(43,34,19,0.04)]">
@@ -771,7 +812,7 @@ function SecretaryUsageOverview({
               <UsageMetric label="会话" value={String(chatSessions.length)} />
               <UsageMetric label="消息" value={String(flowMessages.length)} />
               <UsageMetric label="本轮 Token" value={formatCompactNumber(contextUsedTokens)} />
-              <UsageMetric label="上下文" value={`${contextPercent}%`} />
+              <UsageMetric label="上下文" value={`${contextPercent}%`} title={contextTitle} />
               <UsageMetric label="当前模型" value={modelLabel} />
               <UsageMetric label="内置额度" value={`${quotaValue} ${quotaUnit}`} />
               <UsageMetric label="缓存命中" value={`${cacheStats.hitRate}%`} />
@@ -779,7 +820,7 @@ function SecretaryUsageOverview({
             </div>
             <div className="mx-3 mb-3 overflow-hidden rounded-lg border border-[#eee4d3] bg-[#fffefa] p-2">
               <div className="mb-1 flex items-center justify-between text-[11px] text-[#8f897a]">
-                <span>上下文窗口</span>
+                <span title={contextTitle}>上下文窗口</span>
                 <span>{formatCompactNumber(contextUsedTokens)} / {formatCompactNumber(effectiveContextLimitTokens)}</span>
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-[#f0e6d2]">
@@ -798,9 +839,9 @@ function SecretaryUsageOverview({
   )
 }
 
-function UsageMetric({ label, value }: { label: string; value: string }) {
+function UsageMetric({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="min-w-0 rounded-lg bg-[#f0eee7] px-2.5 py-2">
+    <div className="min-w-0 rounded-lg bg-[#f0eee7] px-2.5 py-2" title={title}>
       <div className="truncate text-[11px] text-[#8f897a]">{label}</div>
       <div className="mt-1 truncate text-[15px] font-semibold tabular-nums text-[#20201d]">{value}</div>
     </div>
@@ -1079,7 +1120,15 @@ function MessageActionBar({
     </div>
   )
 }
-function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[] }) {
+function ThinkingBubble({
+  todos,
+  steps,
+  runState,
+}: {
+  todos: AgentTodos
+  steps: AgentStep[]
+  runState: ReturnType<typeof useAppStore.getState>['llmRunState']
+}) {
   const [elapsed, setElapsed] = useState(0)
   const [stageIndex, setStageIndex] = useState(0)
   const activeTodo = todos.find((todo) => todo.status === 'running') ?? todos.find((todo) => todo.status === 'pending')
@@ -1113,7 +1162,7 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
         <div className="flex items-start justify-between gap-4">
           <span className="inline-flex items-center gap-2 text-[#2f2b22]">
             <Sparkles size={14} className="animate-pulse text-[#31a96b]" />
-            秘书长正在执行
+            {runState === 'reconnecting' ? '连接中断，正在重连' : '秘书长正在思考'}
             <TypingDots />
           </span>
           <span className="shrink-0 rounded-md bg-[#f5f2ea] px-2 py-0.5 text-[11px] tabular-nums text-[#8f897a]">
@@ -1136,11 +1185,13 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
                 exit={{ opacity: 0, y: -5 }}
                 className="text-xs font-semibold text-[#20201d]"
               >
-                {stages[stageIndex]}
+                {runState === 'reconnecting' ? '恢复连接' : stages[stageIndex]}
               </motion.div>
             </AnimatePresence>
             <div className="text-xs leading-5 text-[#6f7168]">
-              {activeTodo?.title || latestStep?.title || '正在生成可用结果'}
+              {runState === 'reconnecting'
+                ? '已保留当前任务与排队输入，连接恢复后继续。'
+                : activeTodo?.title || latestStep?.title || '正在生成可用结果'}
             </div>
             {latestStep?.details || latestStep?.content ? (
               <div className="line-clamp-2 text-[11px] leading-5 text-[#8f897a]">

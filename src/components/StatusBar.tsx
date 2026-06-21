@@ -20,6 +20,11 @@ export function StatusBar() {
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const contextUsedTokens = useAppStore((state) => state.contextUsedTokens)
+  const editorTokens = useAppStore((state) => state.editorTokens)
+  const conversationTokens = useAppStore((state) => state.conversationTokens)
+  const summaryTokens = useAppStore((state) => state.summaryTokens)
+  const resourceTokens = useAppStore((state) => state.resourceTokens)
+  const chatArticleTokens = useAppStore((state) => state.chatArticleTokens)
   const effectiveContextLimitTokens = useAppStore((state) => state.effectiveContextLimitTokens)
   const modelContextSource = useAppStore((state) => state.modelContextSource)
   const updateStatus = useAppStore((state) => state.updateStatus)
@@ -43,6 +48,14 @@ export function StatusBar() {
       : modelContextSource === 'custom_tier'
         ? '自定义'
         : '预设'
+  const contextTitle = [
+    `已用 ${(contextUsedTokens / 1000).toFixed(1)}K / 上限 ${Math.round(effectiveContextLimitTokens / 1024)}K tokens`,
+    `正文 ${(editorTokens / 1000).toFixed(1)}K`,
+    `对话 ${(conversationTokens / 1000).toFixed(1)}K`,
+    `摘要 ${(summaryTokens / 1000).toFixed(1)}K`,
+    `资源 ${(resourceTokens / 1000).toFixed(1)}K`,
+    `关联文稿 ${(chatArticleTokens / 1000).toFixed(1)}K`,
+  ].join('\n')
 
   return (
     <footer className="papyrus-toolbar flex h-8 shrink-0 items-center justify-between gap-3 border-t px-2.5 text-[11px] text-[#6f7168]">
@@ -80,7 +93,10 @@ export function StatusBar() {
                 activeProvider.type === 'scallion_proxy' ? '代理' : activeProvider.modelName || '未设置'
               }`}
         </span>
-        <span className="truncate tabular-nums">
+        <span
+          className="truncate tabular-nums"
+          title={contextTitle}
+        >
           上下文 {contextPercent}% · {Math.round(effectiveContextLimitTokens / 1024)}K ·{' '}
           {contextSourceLabel}
         </span>
@@ -95,7 +111,13 @@ export function StatusBar() {
             className="papyrus-control inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-2"
           >
             <LogIn size={12} />
-            {authStatus === 'polling' ? '等待主站授权' : '登录'}
+            {authStatus === 'polling'
+              ? '等待主站授权'
+              : authStatus === 'reconnecting'
+                ? '正在重连'
+                : authStatus === 'expired'
+                  ? '登录过期'
+                  : '登录'}
           </button>
         )}
         <span className="hidden items-center gap-1 text-[#315d39] md:flex">

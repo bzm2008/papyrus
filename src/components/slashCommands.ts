@@ -22,6 +22,8 @@ export type SlashCommand = {
   prompt: string
   icon: LucideIcon
   scopes: SlashCommandScope[]
+  priority?: number
+  mode?: 'primary' | 'modifier'
 }
 
 export const slashCommands: SlashCommand[] = [
@@ -33,6 +35,7 @@ export const slashCommands: SlashCommand[] = [
       '请用文学秘书模式回答：先直接解释这个文学或写作概念，再给出例子、常见误区和可迁移到写作中的方法。',
     icon: MessageSquareText,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'research',
@@ -42,6 +45,8 @@ export const slashCommands: SlashCommand[] = [
       '请在需要时联网搜索资料，区分可靠信息、待核实线索、可写材料和引用风险，并给出适合写入文章的素材摘要。',
     icon: Globe2,
     scopes: ['companion', 'flow'],
+    priority: 30,
+    mode: 'modifier',
   },
   {
     id: 'continue',
@@ -51,6 +56,7 @@ export const slashCommands: SlashCommand[] = [
       '续写当前文稿，保持已有语气、节奏和信息密度。需要写入文稿时，请把正文作为文稿补丁输出。',
     icon: FilePenLine,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'rewrite-selection',
@@ -59,6 +65,7 @@ export const slashCommands: SlashCommand[] = [
     prompt: '改写选中文本，保留原意和作者声音，让句子更清楚、更有节奏。',
     icon: Sparkles,
     scopes: ['companion'],
+    mode: 'modifier',
   },
   {
     id: 'essay-upgrade',
@@ -68,6 +75,7 @@ export const slashCommands: SlashCommand[] = [
       '请对当前作文进行升格：保留原意，优化立意、结构、细节、论证或说明顺序，并列出修改依据。',
     icon: Wand2,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'narrative',
@@ -77,6 +85,7 @@ export const slashCommands: SlashCommand[] = [
       '请为记叙文准备素材：给出可写事件、细节描写、人物动作、环境烘托、转折位置和首尾照应方式。',
     icon: Sparkles,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'expository',
@@ -86,6 +95,7 @@ export const slashCommands: SlashCommand[] = [
       '请为说明文建立结构：明确说明对象、核心特征、说明顺序、说明方法、生活案例和语言准确性注意点。',
     icon: BookOpenText,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'argument',
@@ -95,6 +105,7 @@ export const slashCommands: SlashCommand[] = [
       '请为议论文锻造论证：给出中心命题、递进分论点、事实论据、道理论据、反方观点与回应方式。',
     icon: SearchCheck,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'commentary',
@@ -104,6 +115,7 @@ export const slashCommands: SlashCommand[] = [
       '请按评论写作处理：区分事实、判断和价值尺度，给出核心观点、材料分析、反例风险和可写段落。',
     icon: SearchCheck,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'story-init',
@@ -113,6 +125,7 @@ export const slashCommands: SlashCommand[] = [
       '请为这个作品执行深度初始化：建立作品圣经、题材类型、目标规模、主角欲望与缺陷、核心冲突、世界观规则、读者承诺，并给出第一卷规划。',
     icon: BookOpenText,
     scopes: ['flow'],
+    mode: 'modifier',
   },
   {
     id: 'write-chapter',
@@ -122,6 +135,7 @@ export const slashCommands: SlashCommand[] = [
       '请按 Papyrus Story System 写下一章：先建立章节合同和写作任务书，再起草、审查、二稿，最后生成可写入文稿的正文。',
     icon: FilePenLine,
     scopes: ['flow'],
+    mode: 'modifier',
   },
   {
     id: 'story-health',
@@ -131,6 +145,7 @@ export const slashCommands: SlashCommand[] = [
       '请打开或总结连载控制台：章节提交链、开放式伏笔、读者承诺、角色状态、节奏风险和发布准备度。',
     icon: Gauge,
     scopes: ['flow'],
+    mode: 'modifier',
   },
   {
     id: 'outline',
@@ -140,6 +155,7 @@ export const slashCommands: SlashCommand[] = [
       '请诊断当前文稿结构：指出目标、阻力、转折、后果或论证闭环中的问题，并给出可执行改法。',
     icon: ListChecks,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'polish',
@@ -149,6 +165,7 @@ export const slashCommands: SlashCommand[] = [
       '润色这段文字：保留作者原意和声音，让表达更自然、克制、有文学质感，并减少模板感。',
     icon: Wand2,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'final-pass',
@@ -158,6 +175,7 @@ export const slashCommands: SlashCommand[] = [
       '请做终校清稿：检查错别字、病句、标点、术语一致性、重复表达和可能的误读，并给出清稿版本。',
     icon: SearchCheck,
     scopes: ['companion', 'flow'],
+    mode: 'modifier',
   },
   {
     id: 'advice',
@@ -167,6 +185,7 @@ export const slashCommands: SlashCommand[] = [
       '只给我写作建议，不要写入文稿。请指出最值得修改的问题，并给出下一步做法。',
     icon: MessageSquareText,
     scopes: ['companion'],
+    mode: 'modifier',
   },
   {
     id: 'plan',
@@ -176,6 +195,8 @@ export const slashCommands: SlashCommand[] = [
       '请先生成一份可协商的执行规划书，等待用户确认后再开始执行。规划应包含目标、步骤、风险和需要用户确认的点。',
     icon: NotebookPen,
     scopes: ['flow'],
+    priority: 10,
+    mode: 'primary',
   },
   {
     id: 'goal',
@@ -185,6 +206,8 @@ export const slashCommands: SlashCommand[] = [
       '进入目标模式：请建立长程写作目标、验收标准、阶段计划和裁判检查机制。裁判确认完成前，不要把任务视为结束。',
     icon: Flag,
     scopes: ['flow'],
+    priority: 5,
+    mode: 'primary',
   },
   {
     id: 'solo',
@@ -194,8 +217,21 @@ export const slashCommands: SlashCommand[] = [
       '进入秘书模式自动执行：请自主规划、调查、立大纲、初稿、审查、再稿，并给出完整可用结果。',
     icon: ListChecks,
     scopes: ['flow'],
+    priority: 40,
+    mode: 'modifier',
   },
 ]
+
+export type ResolvedSlashCommandPrompt = {
+  displayPrompt: string
+  executionPrompt: string
+  command?: SlashCommand
+  commands: SlashCommand[]
+  modifiers: SlashCommand[]
+  isPlanCommand: boolean
+  isGoalCommand: boolean
+  argumentsText: string
+}
 
 export function applySlashCommand(value: string, command: SlashCommand) {
   const query = getSlashQuery(value)
@@ -205,58 +241,90 @@ export function applySlashCommand(value: string, command: SlashCommand) {
     return token
   }
 
-  const index = value.lastIndexOf('/')
-  const prefix = value.slice(0, index)
-  const suffix = value.slice(index + query.length + 1)
-  const glue = prefix && !prefix.endsWith('\n') ? '\n' : ''
+  const index = value.search(/(?:^|\s)\/[\p{L}\p{N}_-]*$/u)
+  const slashIndex = index >= 0 ? value.indexOf('/', index) : value.lastIndexOf('/')
+  const prefix = value.slice(0, slashIndex)
+  const suffix = value.slice(slashIndex + query.length + 1)
+  const glue = prefix && !/\s$/.test(prefix) ? ' ' : ''
 
   return `${prefix}${glue}${token}${suffix.trimStart()}`.trimStart()
 }
 
 export function getSlashQuery(value: string) {
-  const match = value.match(/(?:^|\n)\/([\p{L}\p{N}_-]*)$/u)
+  const match = value.match(/(?:^|\s)\/([\p{L}\p{N}_-]*)$/u)
   return match ? match[1] : null
 }
 
-export function resolveSlashCommandPrompt(value: string) {
+export function resolveSlashCommandPrompt(value: string): ResolvedSlashCommandPrompt {
   const trimmed = value.trim()
-  const match = trimmed.match(/^\/([\p{L}\p{N}_-]+)(?:\s+([\s\S]*))?$/u)
+  const parsed = parseLeadingSlashCommands(trimmed)
+  const commands = parsed.commandIds
+    .map((id) => slashCommands.find((item) => item.id === id))
+    .filter((command): command is SlashCommand => Boolean(command))
+  const primary = commands.find((command) => command.mode === 'primary')
+  const modifiers = commands.filter((command) => command !== primary)
 
-  if (!match) {
+  if (!commands.length) {
     return {
       displayPrompt: trimmed,
       executionPrompt: trimmed,
       command: undefined,
+      commands: [],
+      modifiers: [],
       isPlanCommand: false,
       isGoalCommand: false,
-      argumentsText: '',
+      argumentsText: parsed.argumentsText || trimmed,
     }
   }
 
-  const command = slashCommands.find((item) => item.id === match[1])
-  const argumentsText = match[2]?.trim() ?? ''
-
-  if (!command) {
-    return {
-      displayPrompt: trimmed,
-      executionPrompt: trimmed,
-      command: undefined,
-      isPlanCommand: false,
-      isGoalCommand: false,
-      argumentsText,
-    }
-  }
-
-  const executionPrompt = [command.prompt, argumentsText]
+  const command = primary ?? commands[0]
+  const argumentsText = parsed.argumentsText
+  const executionPrompt = [
+    command.prompt,
+    modifiers.length
+      ? `附加执行约束：\n${modifiers.map((item) => `- /${item.id} ${item.label}：${item.prompt}`).join('\n')}`
+      : '',
+    argumentsText ? `用户补充：${argumentsText}` : '',
+  ]
     .filter(Boolean)
-    .join('\n\n用户补充：')
+    .join('\n\n')
 
   return {
     displayPrompt: trimmed,
     executionPrompt,
     command,
+    commands,
+    modifiers,
     isPlanCommand: command.id === 'plan',
     isGoalCommand: command.id === 'goal',
     argumentsText,
+  }
+}
+
+function parseLeadingSlashCommands(value: string) {
+  let rest = value.trim()
+  const commandIds: string[] = []
+
+  while (rest.startsWith('/')) {
+    const match = rest.match(/^\/([\p{L}\p{N}_-]+)(?:\s+|$)/u)
+
+    if (!match) {
+      break
+    }
+
+    const id = match[1]
+    const known = slashCommands.some((command) => command.id === id)
+
+    if (!known) {
+      break
+    }
+
+    commandIds.push(id)
+    rest = rest.slice(match[0].length).trimStart()
+  }
+
+  return {
+    commandIds,
+    argumentsText: rest.trim(),
   }
 }

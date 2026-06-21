@@ -253,6 +253,8 @@ export function SettingsPanel() {
                       <div className="text-xs leading-5 text-[#8f897a]">
                         {authStatus === 'polling'
                           ? `已打开授权页，等待确认${authUserCode ? ` · ${authUserCode}` : ''}`
+                          : authStatus === 'reconnecting'
+                            ? '正在重新连接主站，授权窗口可以保持打开。'
                           : authStatus === 'error'
                             ? '登录失败，请稍后重试。'
                             : authStatus === 'expired'
@@ -262,11 +264,15 @@ export function SettingsPanel() {
                       <button
                         type="button"
                         onClick={() => void startScallionLogin()}
-                        disabled={authStatus === 'starting' || authStatus === 'polling'}
+                        disabled={authStatus === 'starting' || authStatus === 'polling' || authStatus === 'reconnecting'}
                         className="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg bg-[#171714] px-3 text-sm font-medium text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-wait disabled:opacity-50"
                       >
                         <ExternalLink size={14} />
-                        {authStatus === 'starting' || authStatus === 'polling' ? '等待授权' : '登录主站'}
+                        {authStatus === 'starting' || authStatus === 'polling'
+                          ? '等待授权'
+                          : authStatus === 'reconnecting'
+                            ? '正在重连'
+                            : '登录主站'}
                       </button>
                     </div>
                   )}

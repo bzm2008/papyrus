@@ -27,7 +27,7 @@ export type FlowThinkingEffort = 'low' | 'medium' | 'high' | 'ultra_hive'
 export type ModelRoutingMode = 'manual' | 'auto'
 export type ModelCapabilityTier = 'T1' | 'T2' | 'T3'
 export type ChatRole = 'user' | 'assistant' | 'system'
-export type LlmRunState = 'idle' | 'running' | 'error'
+export type LlmRunState = 'idle' | 'running' | 'reconnecting' | 'error'
 export type CompressionState = 'idle' | 'running' | 'error'
 export type AgentTodoStatus = 'pending' | 'running' | 'completed' | 'blocked' | 'skipped'
 export type FlowTraceStatus = 'pending' | 'running' | 'completed' | 'error'
@@ -115,6 +115,7 @@ export type ScallionAuthStatus =
   | 'idle'
   | 'starting'
   | 'polling'
+  | 'reconnecting'
   | 'approved'
   | 'expired'
   | 'denied'
@@ -861,6 +862,8 @@ type TokenSnapshot = {
   editorTokens: number
   conversationTokens: number
   summaryTokens: number
+  resourceTokens: number
+  chatArticleTokens: number
   contextUsedTokens: number
 }
 
@@ -4562,6 +4565,8 @@ function calculateTokenSnapshot(
     editorTokens,
     conversationTokens,
     summaryTokens,
+    resourceTokens,
+    chatArticleTokens,
     contextUsedTokens,
   }
 }

@@ -419,7 +419,13 @@ function WorkbenchTodoList({ todos, compact = false }: { todos: AgentTodo[]; com
           <motion.div
             key={todo.id}
             layout
-            className={`flex items-start gap-2 rounded-lg px-2 py-1.5 text-xs ${
+            animate={
+              shouldReduceMotion || todo.status !== 'running'
+                ? undefined
+                : { boxShadow: ['0 0 0 rgba(49,93,57,0)', '0 0 0 1px rgba(49,93,57,0.14)', '0 0 0 rgba(49,93,57,0)'] }
+            }
+            transition={{ duration: 1.4, repeat: shouldReduceMotion || todo.status !== 'running' ? 0 : Infinity }}
+            className={`relative flex items-start gap-2 overflow-hidden rounded-lg px-2 py-1.5 text-xs ${
               todo.status === 'running'
                 ? 'bg-[#edf6eb] text-[#20201d]'
                 : todo.status === 'blocked'
@@ -429,6 +435,15 @@ function WorkbenchTodoList({ todos, compact = false }: { todos: AgentTodo[]; com
                     : 'text-[#6f7168]'
             }`}
           >
+            {todo.status === 'running' && !shouldReduceMotion ? (
+              <motion.span
+                aria-hidden="true"
+                className="absolute inset-y-0 left-0 w-10 bg-gradient-to-r from-transparent via-white/45 to-transparent"
+                initial={{ x: '-120%' }}
+                animate={{ x: '520%' }}
+                transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
+              />
+            ) : null}
             <TodoStatusIcon status={todo.status} />
             <div className="min-w-0 flex-1">
               <div className="truncate font-medium">{todo.title}</div>
@@ -446,6 +461,7 @@ function WorkbenchTodoList({ todos, compact = false }: { todos: AgentTodo[]; com
 function ToolCallCapsules({ items, compact = false }: { items: ToolItem[]; compact?: boolean }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = items.find((item) => item.id === selectedId)
+  const shouldReduceMotion = useReducedMotion()
 
   return (
     <section className={`mt-3 rounded-xl border border-[#e8ddc7]/72 bg-[#fffdf7]/72 ${compact ? 'p-2' : 'p-3'}`}>
@@ -456,10 +472,16 @@ function ToolCallCapsules({ items, compact = false }: { items: ToolItem[]; compa
       <div className="mt-2 flex flex-wrap gap-1.5">
         {items.length ? (
           items.map((item) => (
-            <button
+            <motion.button
               key={item.id}
               type="button"
               onClick={() => setSelectedId((value) => (value === item.id ? null : item.id))}
+              animate={
+                shouldReduceMotion || item.status !== 'running'
+                  ? undefined
+                  : { scale: [1, 1.015, 1] }
+              }
+              transition={{ duration: 1.2, repeat: shouldReduceMotion || item.status !== 'running' ? 0 : Infinity }}
               className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2 py-1 text-[11px] ${
                 item.status === 'running'
                   ? 'border-[#d7aa4f]/45 bg-[#fff6df] text-[#5b4a24]'
@@ -475,7 +497,7 @@ function ToolCallCapsules({ items, compact = false }: { items: ToolItem[]; compa
                   {statusLabels[item.status]}
                 </span>
               ) : null}
-            </button>
+            </motion.button>
           ))
         ) : (
           <div className="text-xs text-[#8f897a]">本轮暂未调用工具。</div>
@@ -525,6 +547,7 @@ function ToolCallCapsules({ items, compact = false }: { items: ToolItem[]; compa
 
 function AgentActivityList({ activities, compact = false }: { activities: AgentActivity[]; compact?: boolean }) {
   const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
+  const shouldReduceMotion = useReducedMotion()
 
   return (
     <section className={`mt-3 rounded-xl border border-[#e8ddc7]/72 bg-[#fffdf7]/72 ${compact ? 'p-2' : 'p-3'}`}>
@@ -551,8 +574,26 @@ function AgentActivityList({ activities, compact = false }: { activities: AgentA
       <div className="mt-2 grid gap-1.5">
         {activities.length ? (
           activities.map((activity) => (
-            <div key={activity.id} className="flex items-start gap-2 rounded-lg bg-[#fffefa]/70 px-2 py-1.5 text-xs">
-              <span className={`mt-1 h-4 w-1 rounded-full ${activity.colorClass}`} />
+            <motion.div
+              key={activity.id}
+              layout
+              animate={
+                shouldReduceMotion || activity.status !== 'running'
+                  ? undefined
+                  : { backgroundColor: ['rgba(255,254,250,0.7)', 'rgba(237,246,235,0.86)', 'rgba(255,254,250,0.7)'] }
+              }
+              transition={{ duration: 1.6, repeat: shouldReduceMotion || activity.status !== 'running' ? 0 : Infinity }}
+              className="flex items-start gap-2 rounded-lg bg-[#fffefa]/70 px-2 py-1.5 text-xs"
+            >
+              <motion.span
+                className={`mt-1 h-4 w-1 rounded-full ${activity.colorClass}`}
+                animate={
+                  shouldReduceMotion || activity.status !== 'running'
+                    ? undefined
+                    : { opacity: [0.55, 1, 0.55], scaleY: [0.75, 1.15, 0.75] }
+                }
+                transition={{ duration: 1, repeat: shouldReduceMotion || activity.status !== 'running' ? 0 : Infinity }}
+              />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="min-w-0 flex-1 truncate font-medium text-[#2f2b22]">{activity.name}</span>
@@ -562,7 +603,7 @@ function AgentActivityList({ activities, compact = false }: { activities: AgentA
                   <div className="line-clamp-2 text-[11px] leading-4 text-[#8f897a]">{activity.detail}</div>
                 ) : null}
               </div>
-            </div>
+            </motion.div>
           ))
         ) : (
           <div className="text-xs text-[#8f897a]">本轮暂未委派子 Agent。</div>

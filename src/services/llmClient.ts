@@ -74,6 +74,15 @@ export async function callOpenAICompatible(
   signal?: AbortSignal,
   sampling?: LlmSamplingOptions,
 ) {
+  return withLlmRetry(() => callOpenAICompatibleOnce(provider, messages, signal, sampling))
+}
+
+async function callOpenAICompatibleOnce(
+  provider: LlmProviderConfig,
+  messages: ChatMessage[],
+  signal?: AbortSignal,
+  sampling?: LlmSamplingOptions,
+) {
   const modelName = resolveProviderModelName(provider)
 
   if (!modelName) {
@@ -137,6 +146,14 @@ export async function callOpenAICompatible(
 }
 
 export async function callOpenAICompatibleStream(
+  provider: LlmProviderConfig,
+  messages: ChatMessage[],
+  { signal, onToken, sampling }: StreamOptions,
+) {
+  return withLlmRetry(() => callOpenAICompatibleStreamOnce(provider, messages, { signal, onToken, sampling }))
+}
+
+async function callOpenAICompatibleStreamOnce(
   provider: LlmProviderConfig,
   messages: ChatMessage[],
   { signal, onToken, sampling }: StreamOptions,
@@ -366,4 +383,54 @@ function parseStreamLine(line: string) {
   } catch {
     return ''
   }
+}
+
+async function withLlmRetry<T>(run: () => Promise<T>, maxAttempts = 3): Promise<T> {
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (attempt > 1) {
+        useAppStore
+          .getState()
+          .setLlmRunState('reconnecting', `模型连接中断，正在第 ${attempt} 次重连`)
+      }
+
+      const result = await run()
+
+      if (attempt > 1) {
+        useAppStore.getState().setLlmRunState('running', '连接已恢复，继续生成')
+      }
+
+      return result
+    } catch (error) {
+      lastError = error
+
+      if (!isTransientLlmError(error) || attempt >= maxAttempts) {
+        break
+      }
+
+      await delay(650 * attempt ** 2)
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('LLM 请求失败')
+}
+
+function isTransientLlmError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return true
+  }
+
+  const message = error.message.toLowerCase()
+
+  if (/401|403|unauthorized|forbidden|api key|model name/.test(message)) {
+    return false
+  }
+
+  return /network|failed to fetch|timeout|timed out|429|408|500|502|503|504|connection|reset|暂时|重试/.test(message)
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }

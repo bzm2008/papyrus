@@ -22,7 +22,13 @@ export function SlashCommandMenu({
       const haystack = `${command.label} ${command.description} ${command.id}`.toLowerCase()
       return haystack.includes(query.toLowerCase())
     })
-    .slice(0, 7)
+    .sort((left, right) => {
+      const leftScore = left.priority ?? (left.mode === 'primary' ? 20 : 100)
+      const rightScore = right.priority ?? (right.mode === 'primary' ? 20 : 100)
+
+      return leftScore - rightScore || left.label.localeCompare(right.label, 'zh-Hans-CN')
+    })
+    .slice(0, query ? 8 : 10)
 
   return (
     <AnimatePresence>
@@ -34,7 +40,10 @@ export function SlashCommandMenu({
           transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
           className="absolute bottom-full left-0 right-0 z-40 mb-2 overflow-hidden rounded-xl border border-[#dfe4d6] bg-[#fffefa] p-1.5 shadow-[0_18px_50px_rgba(43,34,19,0.14)]"
         >
-          <div className="px-2 py-1 text-[11px] font-medium text-[#6f7168]">/ 命令</div>
+          <div className="px-2 py-1 text-[11px] font-medium text-[#6f7168]">
+            / 命令
+            {!query ? <span className="ml-1 text-[#9d988a]">核心指令优先，技能用 @</span> : null}
+          </div>
           <div className="space-y-1">
             {filtered.map((command) => {
               const Icon = command.icon
@@ -52,6 +61,7 @@ export function SlashCommandMenu({
                   <span className="min-w-0">
                     <span className="block truncate text-sm font-medium text-[#20201d]">
                       {command.label}
+                      <span className="ml-1 text-[11px] text-[#8f897a]">/{command.id}</span>
                     </span>
                     <span className="block truncate text-xs text-[#6f7168]">
                       {command.description}

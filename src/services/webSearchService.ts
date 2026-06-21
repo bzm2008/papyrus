@@ -15,19 +15,26 @@ export async function searchWeb(query: string) {
     return []
   }
 
+  const errors: string[] = []
+
   try {
-    return await invoke<WebSearchResult[]>('web_search', { query: normalized })
+    return await retrySearch(() => invoke<WebSearchResult[]>('web_search', { query: normalized }))
   } catch (tauriError) {
-    const proxyResults = await searchViaScallionProxy(normalized)
+    errors.push(errorMessage(tauriError, '本机搜索失败'))
+  }
+
+  try {
+    const proxyResults = await retrySearch(() => searchViaScallionProxy(normalized))
 
     if (proxyResults.length) {
       return proxyResults
     }
-
-    throw tauriError instanceof Error
-      ? tauriError
-      : new Error('联网搜索暂不可用，且代理没有返回可用结果。')
+    errors.push('主站搜索代理没有返回可用结果')
+  } catch (proxyError) {
+    errors.push(errorMessage(proxyError, '主站搜索代理失败'))
   }
+
+  throw new Error(`联网搜索暂不可用：${errors.join('；')}`)
 }
 
 async function searchViaScallionProxy(query: string) {
@@ -47,4 +54,29 @@ async function searchViaScallionProxy(query: string) {
   }
 
   return Array.isArray(payload) ? payload : (payload.results ?? [])
+}
+
+async function retrySearch<T>(run: () => Promise<T>, attempts = 2): Promise<T> {
+  let lastError: unknown
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await run()
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts) {
+        await delay(500 * attempt)
+      }
+    }
+  }
+
+  throw lastError
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }

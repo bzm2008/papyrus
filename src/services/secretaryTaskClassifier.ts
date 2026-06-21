@@ -12,10 +12,10 @@ export type SecretaryTaskClassification = {
 }
 
 const robustLongformScalePattern =
-  /(?:\u767e\u4e07(?:\u5b57|\u7ea7)?|\u767e\u4e07\u7ea7|\u957f\u7bc7\u5c0f\u8bf4|\u957f\u7bc7|\u591a\u5377|\u591a\u90e8|\u6574\u672c|\u6210\u4e66|\u8fde\u8f7d|\u8fde\u7eed\u7ae0\u8282|\u591a\u7ae0\u8282|million|long[-\s]?form|novel\s+series)/i
+  /(?:百万(?:字|级)?|百万级|长篇小说|长篇|多卷|多部|整本|成书|连载|连续章节|多章节|章节规模|长程|长期|系列|million|long[-\s]?form|novel\s+series)/i
 
 const robustLongformFictionPattern =
-  /(?:\u5c0f\u8bf4|\u7eed\u5199|\u7ae0\u8282|\u5377\u7eb2|\u5927\u7eb2|\u4eba\u7269|\u5267\u60c5|\u53d9\u4e8b|\u4e16\u754c\u89c2|\u4f0f\u7b14|\u5bf9\u767d|\u5386\u53f2|\u660e\u671d|\u5357\u660e|\u7384\u5e7b|\u79d1\u5e7b|\u53e4\u8a00|\u60ac\u7591|fiction|story|chapter|plot)/i
+  /(?:小说|续写|章节|卷纲|大纲|人物|剧情|叙事|世界观|伏笔|对白|兄弟|历史|明朝|明代|南明|史实|玄幻|科幻|古言|悬疑|fiction|story|chapter|plot)/i
 
 const simplePatterns = [
   /润色/,
@@ -32,9 +32,13 @@ const simplePatterns = [
 
 const complexPatterns = [
   /长篇/,
+  /长程/,
+  /百万/,
   /多章节/,
+  /连续章节/,
   /整本/,
   /小说/,
+  /续写/,
   /研究报告/,
   /论文/,
   /资料核查/,
@@ -82,7 +86,10 @@ export function classifySecretaryTask(
     }
   }
 
-  if (robustLongformScalePattern.test(text) && robustLongformFictionPattern.test(text)) {
+  const longformScaleHit = robustLongformScalePattern.test(text)
+  const fictionHit = robustLongformFictionPattern.test(text)
+
+  if (longformScaleHit && fictionHit) {
     return {
       complexity: 'complex',
       confidence: 0.92,
@@ -95,7 +102,7 @@ export function classifySecretaryTask(
     }
   }
 
-  if (robustLongformScalePattern.test(text)) {
+  if (longformScaleHit) {
     return {
       complexity: 'complex',
       confidence: 0.88,
@@ -113,7 +120,20 @@ export function classifySecretaryTask(
   const complexHits = complexPatterns.filter((pattern) => pattern.test(text)).length
   const platformHit = platformPatterns.find((pattern) => pattern.test(text))
 
-  if (simpleHit && isShort && complexHits === 0 && !options.writeIntent) {
+  if (fictionHit && /续写|章节|小说|兄弟/.test(text) && (options.writeIntent || normalized.length > 24)) {
+    return {
+      complexity: 'complex',
+      confidence: 0.84,
+      suggestedAgentCount: 5,
+      expectedAgentCount: 7,
+      hiveRecommended: longformScaleHit || normalized.length > 180,
+      cacheability: 'medium',
+      reasons: ['检测到小说续写或章节创作任务，需要多 Agent 写作链路'],
+      taskType: 'longform-fiction',
+    }
+  }
+
+  if (simpleHit && isShort && complexHits === 0 && !options.writeIntent && !fictionHit) {
     return {
       complexity: 'simple',
       confidence: 0.9,

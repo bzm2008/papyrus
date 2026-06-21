@@ -569,6 +569,14 @@ export async function planAgentRun(prompt: string, thinkingEffort = useAppStore.
 
 export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinkingEffort = useAppStore.getState().flowThinkingEffort): Promise<AgentRunResult> {
   useAppStore.getState().setAgentTodos(createTodos(prompt, plan))
+  useAppStore.getState().addFlowTrace({
+    kind: 'plan',
+    title: '本轮调度复盘',
+    detail: formatDispatchReview(plan),
+    status: 'completed',
+    agentId: 'writer',
+    endedAt: Date.now(),
+  })
   const hiveRuntime = startHiveRuntime(plan)
   if (plan.hiveTopology?.enabled) {
     useAppStore.getState().setHiveTelemetry({
@@ -941,7 +949,7 @@ async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
     const trace = useAppStore.getState().addFlowTrace({
       kind: 'tool',
       title: '正在联网搜索',
-      detail: `${toolCall.reason || '秘书长判断需要外部资料'}\n查询：${query}`,
+      detail: `${toolCall.reason || '秘书长判断需要外部资料'}\n查询：${query}\n策略：本机搜索失败时自动重试，并降级到主站搜索代理。`,
       status: 'running',
       agentId: researchAgentId,
       toolName: 'web_search',
@@ -1503,6 +1511,13 @@ function sanitizePlan(
     subAgents = uniqueAgents([...longformAgents, ...subAgents], maxAgentCount)
   }
 
+  if (
+    classification.taskType === 'longform-fiction' &&
+    subAgents.length < Math.min(maxAgentCount, thinkingEffort === 'low' ? 3 : 5)
+  ) {
+    subAgents = uniqueAgents([...subAgents, ...longformAgents], maxAgentCount)
+  }
+
   const plan: AgentRunPlan = {
     needsWebSearch,
     subAgents,
@@ -1917,6 +1932,19 @@ function formatPlanDetail(plan: AgentRunPlan) {
     plan.earlyStopReason ? `早停：${plan.earlyStopReason}` : '',
     `工具：${plan.toolCalls.map((call) => call.name).join(' / ') || '无'}`,
     `写入文稿：${plan.writeIntent ? plan.documentPatchOperation : '否'}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
+
+function formatDispatchReview(plan: AgentRunPlan) {
+  return [
+    `复杂度：${plan.taskComplexity ?? 'unknown'} · 任务类型：${plan.taskType ?? 'general'}`,
+    `Agent 上限：${plan.maxAgentCount ?? plan.subAgents.length}`,
+    `已选 Agent：${plan.subAgents.map((agentId) => getRuntimeAgent(agentId).shortName).join(' / ') || '无'}`,
+    `工具：${plan.toolCalls.map((call) => `${call.name}${call.query ? `(${call.query})` : ''}`).join(' / ') || '无'}`,
+    plan.routingRationale ? `理由：${plan.routingRationale}` : '',
+    plan.hiveTopology?.enabled ? formatHiveTopology(plan.hiveTopology) : '',
   ]
     .filter(Boolean)
     .join('\n')
