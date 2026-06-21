@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import type { LlmProviderConfig } from '../stores/useAppStore'
+import { useAppStore, type LlmProviderConfig } from '../stores/useAppStore'
 
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant'
@@ -288,7 +288,7 @@ export function canCallProvider(provider: LlmProviderConfig) {
   const modelName = resolveProviderModelName(provider)
 
   if (provider.type === 'scallion_proxy') {
-    return Boolean(provider.baseUrl.trim() && modelName)
+    return Boolean(provider.baseUrl.trim() && modelName && resolveProviderApiKey(provider))
   }
 
   if (provider.type === 'custom') {
@@ -307,6 +307,10 @@ function resolveProviderModelName(provider: LlmProviderConfig) {
 }
 
 function resolveProviderApiKey(provider: LlmProviderConfig) {
+  if (provider.type === 'scallion_proxy') {
+    return useAppStore.getState().scallionToken?.trim() ?? ''
+  }
+
   const configuredKey = provider.apiKey.trim()
 
   if (configuredKey) {
