@@ -4,7 +4,6 @@ import {
   Copy,
   FileText,
   MessageSquare,
-  PanelRightClose,
   PanelRightOpen,
   PenLine,
   Play,
@@ -24,6 +23,7 @@ import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '.
 import {
   type AgentStep,
   type AgentTodo,
+  type FlowTrace,
   type FlowMessage,
   type FlowThinkingEffort,
   type GoalCheckpoint,
@@ -32,23 +32,42 @@ import {
   type SecretaryPlanDraft,
   useAppStore,
 } from '../stores/useAppStore'
-import { AgentTodoList, AgentTraceRenderer } from './AgentTraceRenderer'
 import { EditorPane } from './EditorPane'
 import { ModelSelector } from './ModelSelector'
 import { PromptAssistMenu } from './PromptAssistMenu'
+import {
+  DelegationPreview,
+  ExecutionReceipt,
+  MarkdownMessage,
+  SecretaryWorkbenchPanel,
+  ThoughtSummaryBlock,
+} from './SecretaryWorkbenchPanel'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
 
 type AgentTodos = AgentTodo[]
+type WorkbenchView = 'workbench' | 'manuscript'
+type ReceiptSnapshot = {
+  todos: AgentTodo[]
+  steps: AgentStep[]
+  traces: FlowTrace[]
+  changeStat?: ReturnType<typeof useAppStore.getState>['documentChangeStats'][number]
+}
 
 export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
-  const [sidebarVisible, setSidebarVisible] = useState(true)
+  const [rightPanelOpen, setRightPanelOpen] = useState(false)
+  const [rightPanelPinned, setRightPanelPinned] = useState(false)
+  const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('workbench')
+  const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
+  const previousRunStateRef = useRef(useAppStore.getState().llmRunState)
+  const receiptRunStateRef = useRef(useAppStore.getState().llmRunState)
   const flowMessages = useAppStore((state) => state.flowMessages)
   const setFlowMessages = useAppStore((state) => state.setFlowMessages)
   const agentTodos = useAppStore((state) => state.agentTodos)
   const agentSteps = useAppStore((state) => state.agentSteps)
+  const flowTraces = useAppStore((state) => state.flowTraces)
   const llmRunState = useAppStore((state) => state.llmRunState)
   const pendingDocumentPatch = useAppStore((state) => state.pendingDocumentPatch)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
@@ -77,7 +96,52 @@ export function FlowWorkspace() {
   const latestAssistantId = [...visibleMessages]
     .reverse()
     .find((message) => message.role === 'assistant')?.id
+  const latestAssistantMessage = latestAssistantId
+    ? visibleMessages.find((message) => message.id === latestAssistantId)
+    : undefined
   const latestChangeStat = documentChangeStats[0]
+  const latestRunChangeStat =
+    latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
+      ? latestChangeStat
+      : undefined
+
+  useEffect(() => {
+    const previousRunState = previousRunStateRef.current
+
+    if (llmRunState === 'running' && previousRunState !== 'running') {
+      setRightPanelOpen(true)
+      setRightPanelView('workbench')
+    }
+
+    if (previousRunState === 'running' && llmRunState !== 'running' && !rightPanelPinned && rightPanelView === 'workbench') {
+      setRightPanelOpen(false)
+    }
+
+    previousRunStateRef.current = llmRunState
+  }, [llmRunState, rightPanelPinned, rightPanelView])
+
+  useEffect(() => {
+    const previousRunState = receiptRunStateRef.current
+    const hasRunData = agentTodos.length > 0 || agentSteps.length > 0 || flowTraces.length > 0
+
+    if (previousRunState === 'running' && llmRunState !== 'running' && latestAssistantId && hasRunData) {
+      setReceiptSnapshots((current) => {
+        const nextEntries = Object.entries({
+          ...current,
+          [latestAssistantId]: {
+            todos: agentTodos,
+            steps: agentSteps,
+            traces: flowTraces,
+            changeStat: latestRunChangeStat,
+          },
+        }).slice(-20)
+
+        return Object.fromEntries(nextEntries)
+      })
+    }
+
+    receiptRunStateRef.current = llmRunState
+  }, [agentSteps, agentTodos, flowTraces, latestAssistantId, latestRunChangeStat, llmRunState])
 
   const dispatchPrompt = useCallback(async (rawPrompt: string, options: { queuedInputId?: string } = {}) => {
     const cleanPrompt = rawPrompt.trim()
@@ -255,15 +319,43 @@ export function FlowWorkspace() {
             </div>
           </div>
 
-          <button
-            type="button"
-            title={sidebarVisible ? '隐藏文稿' : '显示文稿'}
-            onClick={() => setSidebarVisible((visible) => !visible)}
-            className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
-          >
-            {sidebarVisible ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
-            <span>{sidebarVisible ? '隐藏文稿' : '显示文稿'}</span>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              title={rightPanelOpen && rightPanelView === 'workbench' ? '隐藏工作台' : '显示工作台'}
+              onClick={() => {
+                if (rightPanelOpen && rightPanelView === 'workbench') {
+                  setRightPanelOpen(false)
+                  setRightPanelPinned(false)
+                  return
+                }
+
+                setRightPanelOpen(true)
+                setRightPanelView('workbench')
+              }}
+              className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
+            >
+              <PanelRightOpen size={14} />
+              <span>工作台</span>
+            </button>
+            <button
+              type="button"
+              title={rightPanelOpen && rightPanelView === 'manuscript' ? '隐藏文稿' : '显示文稿'}
+              onClick={() => {
+                if (rightPanelOpen && rightPanelView === 'manuscript') {
+                  setRightPanelOpen(false)
+                  return
+                }
+
+                setRightPanelOpen(true)
+                setRightPanelView('manuscript')
+              }}
+              className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
+            >
+              <FileText size={14} />
+              <span>文稿</span>
+            </button>
+          </div>
         </header>
 
         <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -299,23 +391,27 @@ export function FlowWorkspace() {
 
             <div className="flex-1 space-y-3">
               <AnimatePresence initial={false}>
-                {visibleMessages.map((message) => (
-                  <ChatBubble
-                    key={message.id}
-                    message={message}
-                    showTrace={message.id === latestAssistantId}
-                    steps={agentSteps}
-                    changeStat={
-                      message.id === latestAssistantId && latestChangeStat?.createdAt >= message.createdAt
-                        ? latestChangeStat
-                        : undefined
-                    }
-                    isLatestAssistant={message.id === latestAssistantId}
-                    actionsDisabled={llmRunState === 'running'}
-                    onRegenerate={regenerateLast}
-                    onRollback={rollbackLast}
-                  />
-                ))}
+                {visibleMessages.map((message) => {
+                  const isLatest = message.id === latestAssistantId
+                  const receiptSnapshot = receiptSnapshots[message.id]
+
+                  return (
+                    <ChatBubble
+                      key={message.id}
+                      message={message}
+                      showReceipt={isLatest || Boolean(receiptSnapshot)}
+                      todos={receiptSnapshot?.todos ?? (isLatest ? agentTodos : [])}
+                      steps={receiptSnapshot?.steps ?? (isLatest ? agentSteps : [])}
+                      traces={receiptSnapshot?.traces ?? (isLatest ? flowTraces : [])}
+                      runState={isLatest ? llmRunState : 'idle'}
+                      changeStat={receiptSnapshot?.changeStat ?? (isLatest ? latestRunChangeStat : undefined)}
+                      isLatestAssistant={isLatest}
+                      actionsDisabled={llmRunState === 'running'}
+                      onRegenerate={regenerateLast}
+                      onRollback={rollbackLast}
+                    />
+                  )
+                })}
                 {llmRunState === 'running' && !latestAssistantId ? (
                   <ThinkingBubble key="thinking" todos={agentTodos} steps={agentSteps} />
                 ) : null}
@@ -374,23 +470,23 @@ export function FlowWorkspace() {
       </div>
 
       <AnimatePresence initial={false}>
-        {sidebarVisible ? (
-          <motion.aside
-            key="flow-manuscript-sidebar"
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 440, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 420, damping: 42, mass: 0.8 }}
-            className="min-h-0 shrink-0 overflow-hidden border-l border-[#e1dccf] bg-[#fffefa]/86 backdrop-blur"
-          >
-            <div className="papyrus-toolbar flex h-11 items-center gap-2 border-b px-3 text-[13px] font-semibold text-[#20201d]">
-              <FileText size={15} className="text-[#315d39]" />
-              文稿
-            </div>
-            <div className="h-[calc(100%-2.75rem)] min-h-0">
-              <EditorPane />
-            </div>
-          </motion.aside>
+        {rightPanelOpen ? (
+          <SecretaryWorkbenchPanel
+            todos={agentTodos}
+            steps={agentSteps}
+            traces={flowTraces}
+            runState={llmRunState}
+            pinned={rightPanelPinned}
+            activeView={rightPanelView}
+            onViewChange={setRightPanelView}
+            onPinnedChange={setRightPanelPinned}
+            onClose={() => {
+              setRightPanelOpen(false)
+              setRightPanelPinned(false)
+            }}
+            changeStat={latestRunChangeStat}
+            manuscript={<EditorPane />}
+          />
         ) : null}
       </AnimatePresence>
     </section>
@@ -841,8 +937,11 @@ function ThinkingEffortControl({
 }
 function ChatBubble({
   message,
-  showTrace,
+  showReceipt,
+  todos,
   steps,
+  traces,
+  runState,
   changeStat,
   isLatestAssistant,
   actionsDisabled,
@@ -850,8 +949,11 @@ function ChatBubble({
   onRollback,
 }: {
   message: FlowMessage
-  showTrace: boolean
+  showReceipt: boolean
+  todos: AgentTodo[]
   steps: AgentStep[]
+  traces: FlowTrace[]
+  runState: ReturnType<typeof useAppStore.getState>['llmRunState']
   changeStat?: ReturnType<typeof useAppStore.getState>['documentChangeStats'][number]
   isLatestAssistant: boolean
   actionsDisabled: boolean
@@ -859,7 +961,9 @@ function ChatBubble({
   onRollback: () => void
 }) {
   const isUser = message.role === 'user'
-  const shouldShowTrace = !isUser && showTrace && steps.length > 0
+  const hasRunData = !isUser && showReceipt && (steps.length > 0 || todos.length > 0 || traces.length > 0)
+  const shouldShowRunPreview = hasRunData && isLatestAssistant
+  const shouldShowReceipt = hasRunData && runState !== 'running'
 
   return (
     <motion.div
@@ -897,14 +1001,28 @@ function ChatBubble({
             <Clipboard size={12} />
           </button>
         </div>
-        <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{message.content}</p>
+        <MarkdownMessage text={message.content} inverted={isUser} />
+        {shouldShowRunPreview ? (
+          <>
+            <ThoughtSummaryBlock steps={steps} running={runState === 'running'} />
+            <DelegationPreview steps={steps} />
+          </>
+        ) : null}
         {!isUser && changeStat ? (
           <div className="mt-2 inline-flex rounded-md bg-[#edf6eb] px-2 py-1 text-[11px] font-medium text-[#315d39]">
             本轮修改 {changeStat.changedChars} 字 ·{' '}
             {formatChangeStat(changeStat.insertedChars, changeStat.deletedChars)}
           </div>
         ) : null}
-        {shouldShowTrace ? <AgentTraceRenderer steps={steps} /> : null}
+        {shouldShowReceipt ? (
+          <ExecutionReceipt
+            todos={todos}
+            steps={steps}
+            traces={traces}
+            runState={runState}
+            changeStat={changeStat}
+          />
+        ) : null}
         {!isUser && isLatestAssistant ? (
           <MessageActionBar
             disabled={actionsDisabled}
@@ -957,7 +1075,7 @@ function MessageActionBar({
         <Copy size={13} />
         复制
       </button>
-      <span className="ml-auto text-[11px] text-[#8f897a]">查看轨迹在本轮回复内展开</span>
+      <span className="ml-auto text-[11px] text-[#8f897a]">执行回执可展开查看细节</span>
     </div>
   )
 }
@@ -966,6 +1084,8 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
   const [stageIndex, setStageIndex] = useState(0)
   const activeTodo = todos.find((todo) => todo.status === 'running') ?? todos.find((todo) => todo.status === 'pending')
   const latestStep = [...steps].reverse().find((step) => step.status === 'running') ?? steps.at(-1)
+  const completedTodos = todos.filter((todo) => todo.status === 'completed').length
+  const actionableTodos = todos.filter((todo) => todo.status !== 'skipped').length
   const stages = useMemo(() => ['规划', '检索', '结构', '起草', '审阅', '清稿'], [])
 
   useEffect(() => {
@@ -1027,10 +1147,14 @@ function ThinkingBubble({ todos, steps }: { todos: AgentTodos; steps: AgentStep[
                 {latestStep.details || latestStep.content}
               </div>
             ) : null}
+            {actionableTodos ? (
+              <div className="mt-1 flex items-center justify-between gap-3 text-[11px] text-[#8f897a]">
+                <span>任务进度</span>
+                <span className="tabular-nums">{completedTodos}/{actionableTodos}</span>
+              </div>
+            ) : null}
           </div>
         </div>
-        <AgentTodoList todos={todos} />
-        {steps.length ? <AgentTraceRenderer steps={steps} /> : null}
       </div>
     </motion.div>
   )
