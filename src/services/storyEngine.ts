@@ -384,9 +384,12 @@ export const genrePacks: GenrePack[] = [
 export function shouldUseStoryPipeline(prompt: string, writeIntent: boolean) {
   return (
     writeIntent &&
-    /(小说|中篇|长篇|章节|第一章|第\d+章|连载|卷纲|大纲|人物|设定|世界观|续写|历史|南明|修仙|悬疑|古言|科幻|作文|记叙文|说明文|议论文|大学写作|中学作文|素材|升格)/i.test(
+    (/(?:\u767e\u4e07(?:\u5b57|\u7ea7)?|\u591a\u5377|\u591a\u90e8|\u6574\u672c|\u6210\u4e66|\u8fde\u7eed\u7ae0\u8282|million|novel\s+series)/i.test(
       prompt,
-    )
+    ) ||
+      /(小说|中篇|长篇|章节|第一章|第\d+章|连载|卷纲|大纲|人物|设定|世界观|续写|历史|南明|修仙|悬疑|古言|科幻|作文|记叙文|说明文|议论文|大学写作|中学作文|素材|升格)/i.test(
+        prompt,
+      ))
   )
 }
 
@@ -456,6 +459,7 @@ export function createChapterBrief(prompt: string, project: StoryProject, genre:
     ],
   })
   const memory = composeMemoryPack(project.id)
+  const webnovelBriefText = buildWebnovelChapterBriefText(prompt, project, genre, chapter, review, memory)
   const briefText = [
     `作品: ${project.title}`,
     `题材: ${project.genre}`,
@@ -478,7 +482,65 @@ export function createChapterBrief(prompt: string, project: StoryProject, genre:
     .filter(Boolean)
     .join('\n')
 
-  return { project, chapter, briefText } satisfies StoryBrief
+  return { project, chapter, briefText: webnovelBriefText || briefText } satisfies StoryBrief
+}
+
+function buildWebnovelChapterBriefText(
+  prompt: string,
+  project: StoryProject,
+  genre: GenrePack,
+  chapter: ChapterContract,
+  review: { checks: string[] },
+  memory: string,
+) {
+  const strandTargets = describeStrandTargets(chapter.strand)
+  const longformRules = [
+    '大纲即法律：不得为了本章爽点推翻既有主线、卷纲、人物动机。',
+    '设定即物理：能力、制度、史实、世界规则必须稳定，破例要付出代价。',
+    '新实体需入库：新人物、地点、组织、器物、伏笔和承诺必须在章节提交后沉淀为记忆。',
+  ]
+  const contextRules = [
+    '写前先读项目记忆、开放伏笔、读者承诺和近章摘要。',
+    '本章只推进一到两个核心变化，避免同时展开太多新线。',
+    '正文里不要复述任务书；任务书只供 Agent 调度和写作约束使用。',
+  ]
+
+  return [
+    `作品：${project.title}`,
+    `题材：${project.genre}`,
+    `章节：第 ${chapter.chapterNumber} 章《${chapter.title}》`,
+    `目标：${chapter.goal}`,
+    '',
+    '一、开篇抓手',
+    `- 从具体压力、异常信息或人物选择开场：${genre.openingPatterns.join(' / ')}`,
+    `- 第一屏必须让读者知道本章要解决或加剧什么问题：${chapter.endingHook}`,
+    '',
+    '二、本章故事',
+    ...chapter.requiredBeats.map((beat, index) => `- ${index + 1}. ${beat}`),
+    `- Quest / Fire / Constellation 节奏：${strandTargets}`,
+    `- 禁区：${chapter.forbiddenZones.join(' / ')}`,
+    '',
+    '三、本章人物',
+    `- 出场人物：${chapter.activeCharacters.join(' / ') || '由秘书长按上下文补足'}`,
+    '- 人物每次行动都要有动机、代价和后果；不要只让人物替作者解释设定。',
+    '- 对白要包含潜台词、关系变化或信息差，避免所有角色同一种语气。',
+    '',
+    '四、怎么写更顺',
+    ...longformRules.map((rule) => `- ${rule}`),
+    ...contextRules.map((rule) => `- ${rule}`),
+    genre.structureTemplates?.length ? `- 可用结构：${genre.structureTemplates.join(' / ')}` : '',
+    `- 题材素材：${genre.materialBank.join(' / ')}`,
+    '',
+    '五、收在哪里',
+    `- 收束到一个明确动作、发现、代价或未兑现承诺：${chapter.endingHook}`,
+    '- 章节结尾要留下下一章自然动能，不用硬塞口号式悬念。',
+    '',
+    memory ? `长期记忆与伏笔：\n${memory}` : '',
+    `审查闸门：${review.checks.join(' / ')}`,
+    `原始请求：${prompt.slice(0, 600)}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 export function reviewDraft(draft: string, brief: StoryBrief) {
@@ -547,6 +609,93 @@ export function reviewDraft(draft: string, brief: StoryBrief) {
     }
   }
 
+  issues.push(...runWebnovelReviewChecks(normalized, brief))
+
+  return issues
+}
+
+function runWebnovelReviewChecks(draft: string, brief: StoryBrief): StoryReviewIssue[] {
+  const issues: StoryReviewIssue[] = []
+  const compact = draft.replace(/\s+/g, '')
+  const dialogueCount = (draft.match(/[“"「].{2,80}?[”"」]/g) ?? []).length
+  const paragraphCount = draft.split(/\n+/).filter((line) => line.trim().length > 0).length
+  const hasChoice = /(决定|选择|答应|拒绝|命令|退让|牺牲|承担|隐瞒|揭开|承认|放弃|夺回)/.test(draft)
+  const hasCost = /(代价|损失|受伤|失去|暴露|债|责罚|风险|后果|牵连|亏空|军心|民心|粮饷)/.test(draft)
+  const hasTimelineCue = /(清晨|午后|黄昏|夜里|次日|三日后|此时|此前|随后|先前|崇祯|弘光|隆武|永历|顺治|万历)/.test(draft)
+  const hasSettingCue = /(规矩|制度|军令|律法|朝廷|官职|粮道|边关|宗门|境界|能力|禁忌|世界|设定)/.test(draft)
+
+  if (paragraphCount < 4 && compact.length > 800) {
+    issues.push(
+      issue(
+        'medium',
+        'pacing',
+        '段落密度偏低，长章容易变成一整块叙述。',
+        '按场景目标、人物选择、后果和钩子拆分段落，让读者能喘气。',
+        false,
+      ),
+    )
+  }
+
+  if (!hasSettingCue && /(历史|南明|修仙|玄幻|科幻|规则|世界观)/.test(brief.project.genre + brief.briefText)) {
+    issues.push(
+      issue(
+        'high',
+        'setting',
+        '本章缺少可见的设定、制度、史实或世界规则承压点。',
+        '补入一条会影响人物选择的规则，并说明破例或利用规则的代价。',
+        false,
+      ),
+    )
+  }
+
+  if (!hasTimelineCue && compact.length > 1000) {
+    issues.push(
+      issue(
+        'medium',
+        'timeline',
+        '时间线锚点不足，长篇连载后续容易断档。',
+        '补一个明确时间、先后关系或阶段节点，便于后续章节索引。',
+        false,
+      ),
+    )
+  }
+
+  if (!hasChoice || !hasCost) {
+    issues.push(
+      issue(
+        'high',
+        'logic',
+        '人物选择和代价没有同时成立，剧情推进可能显得轻飘。',
+        '让至少一个关键人物做出选择，并立刻产生代价、债务、风险或关系变化。',
+        false,
+      ),
+    )
+  }
+
+  if (dialogueCount < 2 && compact.length > 1200) {
+    issues.push(
+      issue(
+        'medium',
+        'character',
+        '对白或直接互动偏少，人物容易被叙述压扁。',
+        '增加一段带潜台词的对白，让关系、信息差或立场变化显出来。',
+        false,
+      ),
+    )
+  }
+
+  if (!/(伏笔|约定|承诺|秘密|线索|疑点|未解|下一步|回收|钩子)/.test(draft + brief.chapter.endingHook)) {
+    issues.push(
+      issue(
+        'low',
+        'continuity',
+        '章节没有明确沉淀伏笔或读者承诺，连载牵引力偏弱。',
+        '在结尾或关键场景留下一个可回收的问题、承诺、秘密或行动债。',
+        false,
+      ),
+    )
+  }
+
   return issues
 }
 
@@ -566,7 +715,7 @@ export function commitChapter(draft: string, brief: StoryBrief, issues: StoryRev
   })
 
   if (!blocking) {
-    const events = extractStoryEvents(draft, brief, commit)
+    const events = [...extractStoryEvents(draft, brief, commit), ...extractWebnovelEvents(draft, brief)]
     store.addStoryEvents(events)
     store.upsertStoryMemories(eventsToMemories(events, brief.project.id, brief.chapter.id))
     const loops = events
@@ -584,14 +733,27 @@ export function commitChapter(draft: string, brief: StoryBrief, issues: StoryRev
       store.upsertOpenLoops(loops)
     }
 
-    store.upsertReaderPromises([
-      {
+    const promises = events
+      .filter((event) => event.type === 'reader_promise_created')
+      .map((event) => ({
         projectId: brief.project.id,
-        content: brief.chapter.endingHook,
+        content: event.content,
         sourceChapterId: brief.chapter.id,
-        status: 'active',
-      },
-    ])
+        status: 'active' as const,
+      }))
+
+    store.upsertReaderPromises(
+      promises.length
+        ? promises
+        : [
+            {
+              projectId: brief.project.id,
+              content: brief.chapter.endingHook,
+              sourceChapterId: brief.chapter.id,
+              status: 'active',
+            },
+          ],
+    )
   }
 
   return commit
@@ -662,6 +824,14 @@ export function composeStoryContext() {
           .map((loop) => `- ${loop.content} (${loop.status})`)
           .join('\n')}`
       : '',
+    dashboard.promises.length
+      ? `读者承诺:\n${dashboard.promises
+          .slice(0, 8)
+          .map((promise) => `- ${promise.content} (${promise.status})`)
+          .join('\n')}`
+      : '',
+    `节奏配比: Quest ${dashboard.strandCounts.quest} / Fire ${dashboard.strandCounts.fire} / Constellation ${dashboard.strandCounts.constellation}`,
+    '长篇写作规则: 大纲即法律；设定即物理；新实体、新伏笔、读者承诺和人物状态必须沉淀为记忆。',
   ].filter(Boolean)
 
   const text = sections.join('\n\n')
@@ -772,6 +942,18 @@ function inferStrand(prompt: string, chapterNumber: number): StoryStrand {
   return chapterNumber % 5 === 0 ? 'constellation' : chapterNumber % 3 === 0 ? 'fire' : 'quest'
 }
 
+function describeStrandTargets(strand: StoryStrand) {
+  const shared = '长篇默认配比 Quest 主线 60% / Fire 情感 20% / Constellation 世界观 20%。'
+  if (strand === 'fire') {
+    return `${shared} 本章偏 Fire：重点推进关系、情绪债、信任变化或人物内在选择。`
+  }
+  if (strand === 'constellation') {
+    return `${shared} 本章偏 Constellation：重点揭示世界规则、制度压力、势力结构或历史锚点。`
+  }
+
+  return `${shared} 本章偏 Quest：重点推进主线目标、冲突升级、行动代价和下一章动能。`
+}
+
 function nextChapterNumber(projectId: string) {
   return useAppStore.getState().chapterContracts.filter((chapter) => chapter.projectId === projectId).length + 1
 }
@@ -835,6 +1017,119 @@ function extractStoryEvents(
   }
 
   return events
+}
+
+function extractWebnovelEvents(draft: string, brief: StoryBrief): Array<Omit<StoryEvent, 'id' | 'createdAt'>> {
+  const events: Array<Omit<StoryEvent, 'id' | 'createdAt'>> = []
+  const projectId = brief.project.id
+  const chapterId = brief.chapter.id
+  const chapterTitle = brief.chapter.title
+  const promise = extractReaderPromise(draft, brief)
+  const worldRule = extractWorldRule(draft)
+  const characterDelta = extractCharacterDelta(draft, brief)
+  const openLoop = extractOpenLoop(draft, brief)
+  const timeline = extractTimelineAnchor(draft)
+
+  if (promise) {
+    events.push({
+      projectId,
+      chapterId,
+      type: 'reader_promise_created',
+      subject: chapterTitle,
+      content: promise,
+    })
+  }
+
+  if (worldRule) {
+    events.push({
+      projectId,
+      chapterId,
+      type: 'world_rule_revealed',
+      subject: brief.project.genre,
+      content: worldRule,
+    })
+  }
+
+  if (characterDelta) {
+    events.push({
+      projectId,
+      chapterId,
+      type: 'character_state_changed',
+      subject: characterDelta.subject,
+      content: characterDelta.content,
+    })
+  }
+
+  if (openLoop && openLoop !== brief.chapter.endingHook) {
+    events.push({
+      projectId,
+      chapterId,
+      type: 'open_loop_created',
+      subject: chapterTitle,
+      content: openLoop,
+    })
+  }
+
+  if (timeline) {
+    events.push({
+      projectId,
+      chapterId,
+      type: 'timeline_event',
+      subject: timeline.subject,
+      content: timeline.content,
+    })
+  }
+
+  return events
+}
+
+function extractReaderPromise(draft: string, brief: StoryBrief) {
+  const explicit = draft.match(/(?:承诺|约定|必须|迟早|总有一天|下一步|等到|待到)([^。！？\n]{8,80})/)?.[0]
+  if (explicit) {
+    return explicit.trim()
+  }
+
+  return brief.chapter.endingHook || undefined
+}
+
+function extractWorldRule(draft: string) {
+  const rule = draft.match(/(?:规矩|制度|军令|律法|规则|禁忌|境界|能力|史实|粮道|官职)([^。！？\n]{8,100})/)?.[0]
+  return rule?.trim()
+}
+
+function extractCharacterDelta(draft: string, brief: StoryBrief) {
+  const subject =
+    brief.chapter.activeCharacters.find((name) => name && draft.includes(name)) ||
+    draft.match(/([\u4e00-\u9fa5A-Za-z0-9]{2,12})(?:决定|选择|答应|拒绝|沉默|意识到|明白|失去|获得)/)?.[1] ||
+    brief.project.protagonist
+  const sentence = draft.match(/[^。！？\n]*(?:决定|选择|答应|拒绝|牺牲|失去|获得|暴露|隐瞒|意识到|明白|动摇|转向)[^。！？\n]*[。！？]?/)?.[0]
+
+  if (!subject || !sentence) {
+    return undefined
+  }
+
+  return {
+    subject,
+    content: sentence.trim().slice(0, 160),
+  }
+}
+
+function extractOpenLoop(draft: string, brief: StoryBrief) {
+  const loop = draft.match(/[^。！？\n]*(?:秘密|线索|疑点|伏笔|未解|没有说出口|尚未|还不能|等着|回收|债)[^。！？\n]*[。！？]?/)?.[0]
+  return loop?.trim().slice(0, 180) || brief.chapter.endingHook
+}
+
+function extractTimelineAnchor(draft: string) {
+  const anchor = draft.match(/(?:清晨|午后|黄昏|夜里|次日|三日后|此前|随后|崇祯|弘光|隆武|永历|顺治|万历)[^。！？\n]{0,80}/)?.[0]
+
+  if (!anchor) {
+    return undefined
+  }
+
+  return {
+    subject: anchor.slice(0, 24),
+    content: `本章时间线锚点：${anchor.trim()}`,
+  }
 }
 
 function eventsToMemories(

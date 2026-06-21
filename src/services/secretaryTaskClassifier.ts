@@ -11,6 +11,12 @@ export type SecretaryTaskClassification = {
   taskType: string
 }
 
+const robustLongformScalePattern =
+  /(?:\u767e\u4e07(?:\u5b57|\u7ea7)?|\u767e\u4e07\u7ea7|\u957f\u7bc7\u5c0f\u8bf4|\u957f\u7bc7|\u591a\u5377|\u591a\u90e8|\u6574\u672c|\u6210\u4e66|\u8fde\u8f7d|\u8fde\u7eed\u7ae0\u8282|\u591a\u7ae0\u8282|million|long[-\s]?form|novel\s+series)/i
+
+const robustLongformFictionPattern =
+  /(?:\u5c0f\u8bf4|\u7eed\u5199|\u7ae0\u8282|\u5377\u7eb2|\u5927\u7eb2|\u4eba\u7269|\u5267\u60c5|\u53d9\u4e8b|\u4e16\u754c\u89c2|\u4f0f\u7b14|\u5bf9\u767d|\u5386\u53f2|\u660e\u671d|\u5357\u660e|\u7384\u5e7b|\u79d1\u5e7b|\u53e4\u8a00|\u60ac\u7591|fiction|story|chapter|plot)/i
+
 const simplePatterns = [
   /润色/,
   /改写/,
@@ -73,6 +79,32 @@ export function classifySecretaryTask(
       cacheability: 'medium',
       reasons: ['检测到长程目标模式'],
       taskType: 'longform-goal',
+    }
+  }
+
+  if (robustLongformScalePattern.test(text) && robustLongformFictionPattern.test(text)) {
+    return {
+      complexity: 'complex',
+      confidence: 0.92,
+      suggestedAgentCount: 6,
+      expectedAgentCount: 8,
+      hiveRecommended: true,
+      cacheability: 'high',
+      reasons: ['detected longform fiction scale: multi-chapter or million-word writing project'],
+      taskType: 'longform-fiction',
+    }
+  }
+
+  if (robustLongformScalePattern.test(text)) {
+    return {
+      complexity: 'complex',
+      confidence: 0.88,
+      suggestedAgentCount: 5,
+      expectedAgentCount: 7,
+      hiveRecommended: true,
+      cacheability: 'high',
+      reasons: ['detected longform project scale'],
+      taskType: inferTaskType(text, 'longform-project'),
     }
   }
 

@@ -91,6 +91,7 @@ export type AgentRunPlan = {
   semanticCacheHitId?: string
   modelRoutingSummary?: string[]
   hiveTopology?: HiveSwarmTopology
+  agentBudgetLabel?: string
 }
 
 export type AgentRunResult = {
@@ -1451,11 +1452,10 @@ function sanitizePlan(
     ...routing.advisorAgents,
   ]
   const hiveEnabled = shouldUseHiveSwarm(thinkingEffort, classification)
-  const maxAgentCount = hiveEnabled
-    ? maxAgentsForClassification(classification, true)
-    : maxAgentsForClassification(classification)
-  const subAgents = uniqueAgents(
-    [...(input.subAgents ?? []), ...routedAgents, ...fallback.subAgents],
+  const maxAgentCount = maxAgentsForClassification(classification, hiveEnabled, thinkingEffort)
+  const longformAgents = selectLongformAgents(prompt, thinkingEffort)
+  let subAgents = uniqueAgents(
+    [...longformAgents, ...(input.subAgents ?? []), ...routedAgents, ...fallback.subAgents],
     maxAgentCount,
   )
   const toolCalls = normalizeToolCalls(input.toolCalls ?? [])
@@ -1477,7 +1477,7 @@ function sanitizePlan(
   ) {
     const researchAgent = firstEnabledAgent(['citation-checker', 'academic-historian', 'trend-researcher'])
     if (researchAgent) {
-      subAgents.unshift(researchAgent)
+      subAgents = uniqueAgents([researchAgent, ...subAgents], maxAgentCount)
     }
   }
 
@@ -1496,21 +1496,11 @@ function sanitizePlan(
   }
 
   if (shouldUseProjectContext(prompt, writeIntent) && !subAgents.includes('archivist')) {
-    subAgents.push('archivist')
+    subAgents = uniqueAgents([...subAgents, 'archivist'], maxAgentCount)
   }
 
   if (hasLongformIntent(prompt)) {
-    ;[
-      'draft-writer',
-      'narrative-designer',
-      'style-editor',
-      'humanities-arguer',
-      'proofreader',
-    ].forEach((agentId) => {
-      if (firstEnabledAgent([agentId]) && !subAgents.includes(agentId)) {
-        subAgents.push(agentId)
-      }
-    })
+    subAgents = uniqueAgents([...longformAgents, ...subAgents], maxAgentCount)
   }
 
   const plan: AgentRunPlan = {
@@ -1527,6 +1517,7 @@ function sanitizePlan(
     classificationConfidence: classification.confidence,
     maxAgentCount,
     modelRoutingSummary,
+    agentBudgetLabel: describeAgentBudget(classification, thinkingEffort, maxAgentCount),
   }
   const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification) : undefined
 
@@ -1603,6 +1594,7 @@ function createFallbackPlan(
   const needsWebSearch = hasRealtimeOrExternalIntent(prompt)
   const writeIntent = shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt)
   const complexLongform = hasLongformIntent(prompt)
+  const longformAgents = selectLongformAgents(prompt, thinkingEffort)
 
   if (needsWebSearch) {
     addFirstEnabled(subAgents, ['citation-checker', 'academic-historian', 'trend-researcher'])
@@ -1614,11 +1606,7 @@ function createFallbackPlan(
   }
 
   if (complexLongform) {
-    addFirstEnabled(subAgents, ['draft-writer'])
-    addFirstEnabled(subAgents, ['narrative-designer', 'structure-editor'])
-    addFirstEnabled(subAgents, ['style-editor'])
-    addFirstEnabled(subAgents, ['humanities-arguer'])
-    addFirstEnabled(subAgents, ['proofreader'])
+    addEnabledAgents(subAgents, longformAgents)
   }
 
   if (hasCritiqueIntent(prompt)) {
@@ -1661,7 +1649,7 @@ function createFallbackPlan(
   }
 
   const hiveEnabled = shouldUseHiveSwarm(thinkingEffort, classification)
-  const maxAgentCount = maxAgentsForClassification(classification, hiveEnabled)
+  const maxAgentCount = maxAgentsForClassification(classification, hiveEnabled, thinkingEffort)
 
   const plan: AgentRunPlan = {
     needsWebSearch,
@@ -1677,6 +1665,7 @@ function createFallbackPlan(
     classificationConfidence: classification.confidence,
     maxAgentCount,
     modelRoutingSummary,
+    agentBudgetLabel: describeAgentBudget(classification, thinkingEffort, maxAgentCount),
   }
   const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification) : undefined
 
@@ -1687,7 +1676,11 @@ function createFallbackPlan(
   }
 }
 
-function maxAgentsForClassification(classification: SecretaryTaskClassification, hiveEnabled = false) {
+function maxAgentsForClassification(
+  classification: SecretaryTaskClassification,
+  hiveEnabled = false,
+  thinkingEffort: FlowThinkingEffort = useAppStore.getState().flowThinkingEffort,
+) {
   if (hiveEnabled) {
     const hardwareLimit = useAppStore.getState().hardwareCapabilityProfile.maxHiveAgents
     return Math.max(4, Math.min(hardwareLimit, classification.expectedAgentCount || hardwareLimit))
@@ -1697,11 +1690,74 @@ function maxAgentsForClassification(classification: SecretaryTaskClassification,
     return Math.min(1, classification.suggestedAgentCount)
   }
 
+  const effort = thinkingEffort === 'ultra_hive' ? 'high' : thinkingEffort
+  const capByEffort = {
+    low: { standard: 1, complex: 3, goal: 4 },
+    medium: { standard: 2, complex: 5, goal: 6 },
+    high: { standard: 3, complex: 6, goal: 8 },
+  } as const
+
   if (classification.complexity === 'standard') {
-    return Math.min(2, classification.suggestedAgentCount)
+    return Math.min(capByEffort[effort].standard, classification.expectedAgentCount || 3)
   }
 
-  return Math.min(5, classification.suggestedAgentCount || 5)
+  if (classification.complexity === 'goal') {
+    return Math.min(capByEffort[effort].goal, classification.expectedAgentCount || 7)
+  }
+
+  if (classification.taskType === 'longform-fiction') {
+    const longformCaps = { low: 4, medium: 6, high: 8 } as const
+    return Math.min(longformCaps[effort], classification.expectedAgentCount || 8)
+  }
+
+  return Math.min(capByEffort[effort].complex, classification.expectedAgentCount || classification.suggestedAgentCount || 5)
+}
+
+function describeAgentBudget(
+  classification: SecretaryTaskClassification,
+  thinkingEffort: FlowThinkingEffort,
+  maxAgentCount: number,
+) {
+  return `${thinkingEffort}:${classification.complexity}:up-to-${maxAgentCount}-sub-agents`
+}
+
+function selectLongformAgents(prompt: string, thinkingEffort: FlowThinkingEffort): FlowAgentId[] {
+  if (!hasLongformIntent(prompt)) {
+    return []
+  }
+
+  const base: FlowAgentId[] = [
+    'archivist',
+    'narrative-designer',
+    'structure-editor',
+    'draft-writer',
+  ]
+  const research: FlowAgentId[] = hasHistoricalOrResearchLongformIntent(prompt)
+    ? ['academic-historian', 'citation-checker']
+    : []
+  const craft: FlowAgentId[] = ['style-editor', 'dialogue-specialist']
+  const review: FlowAgentId[] = ['proofreader', 'publication-editor']
+
+  if (thinkingEffort === 'low') {
+    return uniqueEnabledAgents([...research.slice(0, 1), ...base.slice(0, 3), 'style-editor'])
+  }
+
+  if (thinkingEffort === 'medium') {
+    return uniqueEnabledAgents([...research.slice(0, 1), ...base, ...craft.slice(0, 1), 'proofreader'])
+  }
+
+  return uniqueEnabledAgents([...research, ...base, ...craft, ...review])
+}
+
+function uniqueEnabledAgents(agents: FlowAgentId[]) {
+  const enabled = new Set(
+    getEnabledStudioAgents(
+      useAppStore.getState().customStudioAgents,
+      useAppStore.getState().disabledBuiltInStudioAgentIds,
+    ).map((agent) => agent.id),
+  )
+
+  return Array.from(new Set(agents.filter((agentId) => enabled.has(agentId) && agentId !== 'writer')))
 }
 
 function hasRealtimeOrExternalIntent(prompt: string) {
@@ -1742,7 +1798,18 @@ function hasProjectIntent(prompt: string) {
 }
 
 function hasLongformIntent(prompt: string) {
-  return /(完整|中篇|长篇|小说|历史|补全|补充完整|续写|成书|章节|大纲|初稿|再稿|全篇|完整结果|longform|novel)/i.test(
+  return (
+    /(?:\u767e\u4e07(?:\u5b57|\u7ea7)?|\u957f\u7bc7|\u4e2d\u7bc7|\u5c0f\u8bf4|\u7eed\u5199|\u6210\u4e66|\u591a\u7ae0\u8282|\u8fde\u8f7d|\u7ae0\u8282|\u5377\u7eb2|\u5927\u7eb2|\u521d\u7a3f|\u518d\u7a3f|\u5168\u7bc7|\u5b8c\u6574\u7ed3\u679c|longform|novel|chapter|series)/i.test(
+      prompt,
+    ) ||
+    /(完整|中篇|长篇|小说|历史|补全|补充完整|续写|成书|章节|大纲|初稿|再稿|全篇|完整结果|longform|novel)/i.test(
+      prompt,
+    )
+  )
+}
+
+function hasHistoricalOrResearchLongformIntent(prompt: string) {
+  return /(?:\u5386\u53f2|\u660e\u671d|\u660e\u4ee3|\u5357\u660e|\u53f2\u5b9e|\u53f2\u6599|\u671d\u4ee3|\u8003\u636e|\u8d44\u6599|\u7814\u7a76|\u5f15\u7528|history|historical|research)/i.test(
     prompt,
   )
 }
@@ -1752,7 +1819,7 @@ function routeForPrompt(prompt: string): AgentRoutingDecision {
   return routeStudioAgents(prompt, {
     customAgents: state.customStudioAgents,
     disabledBuiltInIds: state.disabledBuiltInStudioAgentIds,
-    allowMoreForGoal: Boolean(state.activeSecretaryGoal) || /\/goal|长篇|长期|连续|多章节/.test(prompt),
+    allowMoreForGoal: Boolean(state.activeSecretaryGoal) || /^\/goal\b/i.test(prompt) || hasLongformIntent(prompt),
   })
 }
 
@@ -1819,6 +1886,14 @@ function addFirstEnabled(target: Set<FlowAgentId>, ids: FlowAgentId[]) {
   }
 }
 
+function addEnabledAgents(target: Set<FlowAgentId>, ids: FlowAgentId[]) {
+  ids.forEach((agentId) => {
+    if (firstEnabledAgent([agentId])) {
+      target.add(agentId)
+    }
+  })
+}
+
 function buildSearchQuery(prompt: string, plan?: Pick<AgentRunPlan, 'conversationGoal'>) {
   const goal = plan?.conversationGoal?.trim()
   const query = goal && goal.length > 6 ? `${goal} ${prompt}` : prompt
@@ -1832,6 +1907,7 @@ function formatPlanDetail(plan: AgentRunPlan) {
     plan.taskComplexity
       ? `复杂度：${plan.taskComplexity} · 置信度 ${Math.round((plan.classificationConfidence ?? 0) * 100)}% · 上限 ${plan.maxAgentCount ?? 5} 个 Agent`
       : '',
+    plan.agentBudgetLabel ? `Agent 预算：${plan.agentBudgetLabel}` : '',
     plan.modelRoutingSummary?.length ? `模型：${plan.modelRoutingSummary.join('；')}` : '',
     plan.hiveTopology?.enabled ? formatHiveTopology(plan.hiveTopology) : '',
     `联网：${plan.needsWebSearch ? '需要' : '不需要'}`,

@@ -40,6 +40,20 @@ export function createSecretaryGoalFromRequest(request: string): SecretaryGoal {
   })
 }
 
+export function shouldAutoCreateSecretaryGoal(request: string) {
+  const text = request.trim()
+  const scaleHit =
+    /(?:\u767e\u4e07(?:\u5b57|\u7ea7)?|\u767e\u4e07\u7ea7|\u591a\u5377|\u591a\u90e8|\u6574\u672c|\u6210\u4e66|\u8fde\u7eed\u7ae0\u8282|\u957f\u7bc7\u5c0f\u8bf4\u89c4\u6a21|million|novel\s+series)/i.test(
+      text,
+    )
+  const writingHit =
+    /(?:\u5c0f\u8bf4|\u5199\u4f5c|\u7eed\u5199|\u7ae0\u8282|\u5377\u7eb2|\u5927\u7eb2|\u4eba\u7269|\u5267\u60c5|\u4e16\u754c\u89c2|fiction|novel|chapter|story)/i.test(
+      text,
+    )
+
+  return scaleHit && writingHit
+}
+
 export function composeGoalExecutionPrompt(
   goal: SecretaryGoal,
   request: string,

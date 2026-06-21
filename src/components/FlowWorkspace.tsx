@@ -20,7 +20,7 @@ import { createSecretaryPlanDraft, reviseSecretaryPlanDraft } from '../services/
 import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
-import { createSecretaryGoalFromRequest } from '../services/secretaryGoalService'
+import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
 import {
   type AgentStep,
   type AgentTodo,
@@ -105,6 +105,18 @@ export function FlowWorkspace() {
       await sendFlowMessage(request, {
         displayPrompt: resolved.displayPrompt || `/goal ${request}`,
         thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
+        goalId: goal.id,
+        queuedInputId: options.queuedInputId,
+      })
+      return
+    }
+
+    if (!activeSecretaryGoal && shouldAutoCreateSecretaryGoal(resolved.displayPrompt || resolved.executionPrompt)) {
+      const request = resolved.displayPrompt || resolved.executionPrompt
+      const goal = createSecretaryGoalFromRequest(request)
+      await sendFlowMessage(resolved.executionPrompt, {
+        displayPrompt: request,
+        thinkingEffort: flowThinkingEffort,
         goalId: goal.id,
         queuedInputId: options.queuedInputId,
       })
