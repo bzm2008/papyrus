@@ -2,9 +2,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { callOpenAICompatible, canCallProvider } from './llmClient'
 import type {
   LlmProviderConfig,
-  MaintenanceCheckStatus,
   MaintenanceCheckId,
+  MaintenanceCheckStatus,
 } from '../stores/useAppStore'
+import { useAppStore } from '../stores/useAppStore'
 
 export type MaintenanceProbeResult = {
   status: Exclude<MaintenanceCheckStatus, 'idle' | 'checking'>
@@ -24,16 +25,16 @@ type NativeMaintenancePayload = {
 const previewResults: Record<MaintenanceCheckId, MaintenanceProbeResult> = {
   tauri: {
     status: 'ok',
-    message: '浏览器预览模式：已使用前端降级检测',
+    message: '浏览器预览模式：已使用前端降级检查。',
     latencyMs: 0,
   },
   sqlite: {
     status: 'ok',
-    message: '浏览器预览模式：本地存储由桌面端接管',
+    message: '浏览器预览模式：本地存储由桌面端接管。',
   },
   llm: {
-    status: 'ok',
-    message: '浏览器预览模式：已跳过真实模型延迟测试',
+    status: 'warning',
+    message: '浏览器预览模式：已跳过真实模型延迟测试。',
   },
 }
 
@@ -49,15 +50,18 @@ export async function checkDefaultModelLatency(provider: LlmProviderConfig) {
   if (!canCallProvider(provider)) {
     return {
       status: 'error',
-      message: '默认模型配置不完整',
+      message: '当前模型配置不完整，请先填写 Base URL、模型名称和 API Key。',
     } satisfies MaintenanceProbeResult
   }
 
   if (!isTauriRuntime()) {
     try {
       return await testModelConnectionInBrowser(provider)
-    } catch {
-      return previewResults.llm
+    } catch (error) {
+      return {
+        status: 'error',
+        message: errorToMessage(error, '浏览器预览模式下模型测试失败。'),
+      } satisfies MaintenanceProbeResult
     }
   }
 
@@ -68,7 +72,7 @@ export async function testModelConnection(provider: LlmProviderConfig) {
   if (!canCallProvider(provider)) {
     return {
       status: 'error',
-      message: '请先填写 Base URL、Model Name 和 API Key',
+      message: '请先填写 Base URL、模型名称和 API Key。本地 OpenAI-compatible 服务可留空 API Key。',
     } satisfies MaintenanceProbeResult
   }
 
@@ -78,7 +82,7 @@ export async function testModelConnection(provider: LlmProviderConfig) {
       request: {
         baseUrl: provider.baseUrl,
         modelName: provider.modelName,
-        apiKey: provider.apiKey,
+        apiKey: resolveMaintenanceApiKey(provider),
         providerType: provider.type,
       },
     },
@@ -89,7 +93,7 @@ export async function testModelConnection(provider: LlmProviderConfig) {
 export async function getMemoryUsage() {
   return invokeMaintenance('get_memory_usage', undefined, {
     status: 'ok',
-    message: '浏览器预览模式：记忆目录将在桌面端统计',
+    message: '浏览器预览模式：记忆目录将在桌面端统计。',
     bytes: 0,
   })
 }
@@ -97,7 +101,7 @@ export async function getMemoryUsage() {
 export async function clearGlobalMemory() {
   return invokeMaintenance('clear_global_memory', undefined, {
     status: 'ok',
-    message: '浏览器预览模式：已跳过真实清理',
+    message: '浏览器预览模式：已跳过真实清理。',
     bytes: 0,
   })
 }
@@ -105,7 +109,7 @@ export async function clearGlobalMemory() {
 export async function rebuildProjectIndex() {
   return invokeMaintenance('rebuild_project_index', undefined, {
     status: 'warning',
-    message: '项目索引任务已加入预留队列，真实向量库接入后会执行重建',
+    message: '项目索引任务已加入预留队列，真实向量库接入后会执行重建。',
   })
 }
 
@@ -130,25 +134,36 @@ async function invokeMaintenance(
 
     return {
       status: 'error',
-      message: error instanceof Error ? error.message : `${command} 执行失败`,
+      message: errorToMessage(error, `${command} 执行失败。`),
     } satisfies MaintenanceProbeResult
   }
 }
 
 async function testModelConnectionInBrowser(provider: LlmProviderConfig) {
   const startedAt = performance.now()
+  const controller = new AbortController()
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), 15_000)
 
-  await callOpenAICompatible(provider, [
-    {
-      role: 'system',
-      content: 'You are a connectivity checker. Reply with exactly: OK',
-    },
-    { role: 'user', content: 'OK' },
-  ])
+  try {
+    await callOpenAICompatible(
+      provider,
+      [
+        {
+          role: 'system',
+          content: 'You are a connectivity checker. Reply with exactly: OK',
+        },
+        { role: 'user', content: 'OK' },
+      ],
+      controller.signal,
+      { temperature: 0, maxTokens: 8 },
+    )
+  } finally {
+    globalThis.clearTimeout(timeoutId)
+  }
 
   return {
     status: 'ok',
-    message: '模型连通性检测通过',
+    message: '模型连通性检测通过。',
     latencyMs: Math.round(performance.now() - startedAt),
   } satisfies MaintenanceProbeResult
 }
@@ -156,7 +171,7 @@ async function testModelConnectionInBrowser(provider: LlmProviderConfig) {
 function normalizeNativePayload(payload: NativeMaintenancePayload): MaintenanceProbeResult {
   return {
     status: payload.status ?? 'warning',
-    message: payload.message ?? '检测已完成',
+    message: payload.message ?? '检测已完成。',
     latencyMs: payload.latencyMs ?? payload.latency_ms,
     bytes: payload.bytes,
   }
@@ -167,4 +182,24 @@ function isTauriRuntime() {
     typeof window !== 'undefined' &&
       (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__,
   )
+}
+
+function errorToMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error
+  }
+
+  return fallback
+}
+
+function resolveMaintenanceApiKey(provider: LlmProviderConfig) {
+  if (provider.type === 'scallion_proxy') {
+    return useAppStore.getState().scallionToken?.trim() ?? ''
+  }
+
+  return provider.apiKey.trim()
 }

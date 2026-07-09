@@ -113,23 +113,31 @@ export function MaintenanceConsole() {
     const provider = useAppStore.getState().providerConfigs[providerId]
 
     setTestingProviderId(providerId)
-    setMaintenanceCheck('llm', { status: 'checking', message: '正在测试模型联通性...' })
+    setMaintenanceCheck('llm', { status: 'checking', message: '正在测试模型连通性...' })
 
-    const result = await testModelConnection(provider)
+    try {
+      const result = await testModelConnection(provider)
 
-    if (result.status === 'ok') {
-      updateProviderConfig(providerId, {
-        validatedAt: Date.now(),
-        lastValidatedSignature: providerValidationSignature(provider),
+      if (result.status === 'ok') {
+        updateProviderConfig(providerId, {
+          validatedAt: Date.now(),
+          lastValidatedSignature: providerValidationSignature(provider),
+        })
+      }
+
+      setMaintenanceCheck('llm', {
+        status: result.status,
+        message: result.message,
+        latencyMs: result.latencyMs,
       })
+    } catch (error) {
+      setMaintenanceCheck('llm', {
+        status: 'error',
+        message: error instanceof Error ? error.message : String(error || '模型连通性测试失败。'),
+      })
+    } finally {
+      setTestingProviderId(null)
     }
-
-    setMaintenanceCheck('llm', {
-      status: result.status,
-      message: result.message,
-      latencyMs: result.latencyMs,
-    })
-    setTestingProviderId(null)
   }
 
   const handleConfirmDanger = async () => {

@@ -19,7 +19,8 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { useState } from 'react'
 import { agentSkills } from '../services/agentSkillLibrary'
-import { callOpenAICompatible, canCallProvider } from '../services/llmClient'
+import { canCallProvider } from '../services/llmClient'
+import { testModelConnection } from '../services/maintenance'
 import { testMcpServer } from '../services/mcpClient'
 import { acceptTowriteSuggestion, rejectTowriteSuggestion, syncTowriteToMemory } from '../services/towriteService'
 import { modelTierDescriptions, refreshLocalModelTierAssessments } from '../services/modelGovernanceService'
@@ -97,19 +98,27 @@ export function SettingsPanel() {
     setCheckMessages((messages) => ({ ...messages, [providerId]: '正在检测模型连通性...' }))
 
     try {
-      await callOpenAICompatible(provider, [
-        {
-          role: 'system',
-          content: 'You are a connectivity checker. Reply with exactly: OK',
-        },
-        { role: 'user', content: 'OK' },
-      ])
+      const result = await testModelConnection(provider)
+
+      if (result.status !== 'ok') {
+        setCheckMessages((messages) => ({
+          ...messages,
+          [providerId]: result.message || '检测失败，请检查配置。',
+        }))
+        return
+      }
+
       updateProviderConfig(providerId, {
         validatedAt: Date.now(),
         lastValidatedSignature: providerValidationSignature(provider),
       })
       useAppStore.getState().setActiveProviderId(providerId)
-      setCheckMessages((messages) => ({ ...messages, [providerId]: '检测通过，可以使用。' }))
+      setCheckMessages((messages) => ({
+        ...messages,
+        [providerId]: result.latencyMs
+          ? `检测通过，可以使用。延迟 ${result.latencyMs}ms。`
+          : '检测通过，可以使用。',
+      }))
     } catch (error) {
       setCheckMessages((messages) => ({
         ...messages,

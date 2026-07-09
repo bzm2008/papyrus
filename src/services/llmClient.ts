@@ -68,6 +68,8 @@ type NativeLlmPayload = {
   }
 }
 
+type ProviderType = LlmProviderConfig['type']
+
 export async function callOpenAICompatible(
   provider: LlmProviderConfig,
   messages: ChatMessage[],
@@ -89,9 +91,7 @@ async function callOpenAICompatibleOnce(
     throw new Error('Model Name 不能为空')
   }
 
-  const baseUrl = provider.baseUrl.replace(/\/+$/, '')
-  const endpoint =
-    provider.type === 'scallion_proxy' ? `${baseUrl}/chat` : `${baseUrl}/chat/completions`
+  const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
@@ -164,9 +164,7 @@ async function callOpenAICompatibleStreamOnce(
     throw new Error('Model Name 不能为空')
   }
 
-  const baseUrl = provider.baseUrl.replace(/\/+$/, '')
-  const endpoint =
-    provider.type === 'scallion_proxy' ? `${baseUrl}/chat` : `${baseUrl}/chat/completions`
+  const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
@@ -277,7 +275,14 @@ export async function fetchScallionProxyModels(provider: LlmProviderConfig) {
   }
 
   const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models`
-  const response = await fetch(endpoint, { method: 'GET' })
+  const headers: Record<string, string> = {}
+  const apiKey = resolveProviderApiKey(provider)
+
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`
+  }
+
+  const response = await fetch(endpoint, { method: 'GET', headers })
   const payload = (await response.json().catch(() => ({}))) as ScallionModelPayload
 
   if (!response.ok) {
@@ -358,8 +363,22 @@ async function callViaTauri(
   try {
     return await invoke<string>('llm_chat', payload)
   } catch (error) {
-    throw error instanceof Error ? error : new Error('LLM request failed and Tauri fallback is unavailable')
+    throw error instanceof Error ? error : new Error(String(error || 'LLM 请求失败，Tauri 通道不可用'))
   }
+}
+
+export function resolveChatEndpoint(baseUrl: string, providerType: ProviderType) {
+  const trimmed = baseUrl.trim().replace(/\/+$/, '')
+
+  if (!trimmed) {
+    return ''
+  }
+
+  if (/\/chat\/completions$/i.test(trimmed) || /\/chat$/i.test(trimmed)) {
+    return trimmed
+  }
+
+  return providerType === 'scallion_proxy' ? `${trimmed}/chat` : `${trimmed}/chat/completions`
 }
 
 function isLocalCompatibleEndpoint(baseUrl: string) {
@@ -432,5 +451,5 @@ function isTransientLlmError(error: unknown) {
 }
 
 function delay(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms))
 }

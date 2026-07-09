@@ -119,6 +119,20 @@ struct LlmError {
   message: Option<String>,
 }
 
+fn chat_endpoint(base_url: &str, provider_type: &str) -> String {
+  let trimmed = base_url.trim().trim_end_matches('/');
+
+  if trimmed.ends_with("/chat/completions") || trimmed.ends_with("/chat") {
+    return trimmed.to_string();
+  }
+
+  if provider_type == "scallion_proxy" {
+    format!("{}/chat", trimmed)
+  } else {
+    format!("{}/chat/completions", trimmed)
+  }
+}
+
 #[tauri::command]
 fn read_project_guidance() -> ProjectGuidancePayload {
   let root = project_root();
@@ -214,12 +228,8 @@ async fn test_model_connection(request: ModelConnectionRequest) -> Result<Mainte
     return Err("Base URL 和 Model Name 不能为空".into());
   }
 
-  let endpoint = if request.provider_type == "scallion_proxy" {
-    format!("{}/chat", base_url)
-  } else {
-    format!("{}/chat/completions", base_url)
-  };
-  let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(24));
+  let endpoint = chat_endpoint(&base_url, &request.provider_type);
+  let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(18));
 
   if base_url.starts_with("http://localhost") || base_url.starts_with("http://127.0.0.1") {
     builder = builder.danger_accept_invalid_certs(true);
@@ -278,11 +288,7 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
     return Err("Base URL and Model Name are required".into());
   }
 
-  let endpoint = if request.provider_type == "scallion_proxy" {
-    format!("{}/chat", base_url)
-  } else {
-    format!("{}/chat/completions", base_url)
-  };
+  let endpoint = chat_endpoint(&base_url, &request.provider_type);
   let client = reqwest::Client::builder()
     .timeout(Duration::from_secs(90))
     .build()
