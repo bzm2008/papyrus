@@ -61,6 +61,7 @@ export function FlowWorkspace() {
   const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('workbench')
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
+  const autoWorkbenchTimerRef = useRef<number | undefined>(undefined)
   const previousRunStateRef = useRef(useAppStore.getState().llmRunState)
   const receiptRunStateRef = useRef(useAppStore.getState().llmRunState)
   const flowMessages = useAppStore((state) => state.flowMessages)
@@ -111,6 +112,12 @@ export function FlowWorkspace() {
     latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
       ? latestChangeStat
       : undefined
+  const shouldAutoOpenWorkbench =
+    Boolean(activeSecretaryGoal?.status === 'active') ||
+    flowThinkingEffort === 'ultra_hive' ||
+    agentSteps.length >= 2 ||
+    flowTraces.length >= 2 ||
+    agentTodos.length >= 4
 
   useEffect(() => {
     const previousRunState = previousRunStateRef.current
@@ -118,17 +125,43 @@ export function FlowWorkspace() {
     const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
     const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
 
-    if (isBusy && !wasBusy) {
-      setRightPanelOpen(true)
-      setRightPanelView('workbench')
-    }
-
     if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'workbench') {
       setRightPanelOpen(false)
     }
 
     previousRunStateRef.current = llmRunState
   }, [llmRunState, rightPanelPinned, rightPanelView])
+
+  useEffect(() => {
+    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
+
+    if (
+      !isBusy ||
+      rightPanelOpen ||
+      rightPanelPinned ||
+      rightPanelView !== 'workbench' ||
+      !shouldAutoOpenWorkbench
+    ) {
+      if (autoWorkbenchTimerRef.current !== undefined) {
+        window.clearTimeout(autoWorkbenchTimerRef.current)
+        autoWorkbenchTimerRef.current = undefined
+      }
+      return
+    }
+
+    autoWorkbenchTimerRef.current = window.setTimeout(() => {
+      setRightPanelView('workbench')
+      setRightPanelOpen(true)
+      autoWorkbenchTimerRef.current = undefined
+    }, 420)
+
+    return () => {
+      if (autoWorkbenchTimerRef.current !== undefined) {
+        window.clearTimeout(autoWorkbenchTimerRef.current)
+        autoWorkbenchTimerRef.current = undefined
+      }
+    }
+  }, [llmRunState, rightPanelOpen, rightPanelPinned, rightPanelView, shouldAutoOpenWorkbench])
 
   useEffect(() => {
     const previousRunState = receiptRunStateRef.current
@@ -409,7 +442,7 @@ export function FlowWorkspace() {
           </div>
         </header>
 
-        <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5">
+        <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 [scrollbar-gutter:stable]">
           <div className="mx-auto flex min-h-full w-full max-w-[920px] flex-col">
             {secretaryPlanDraft ? (
               <SecretaryPlanCard

@@ -99,6 +99,9 @@ export function SecretaryWorkbenchPanel({
   changeStat,
 }: WorkbenchProps) {
   const snapshot = useWorkbenchSnapshot(todos, steps, traces, changeStat)
+  const desktopPlacement = pinned
+    ? 'lg:static lg:inset-auto lg:z-auto lg:h-auto lg:w-[348px] lg:rounded-none lg:border-y-0 lg:border-r-0 lg:shadow-[inset_1px_0_0_rgba(255,255,255,0.72)]'
+    : 'lg:fixed lg:inset-y-3 lg:left-auto lg:right-3 lg:z-40 lg:h-auto lg:w-[348px] lg:rounded-2xl lg:border lg:shadow-[0_24px_80px_rgba(43,34,19,0.18)]'
 
   return (
     <motion.aside
@@ -107,7 +110,7 @@ export function SecretaryWorkbenchPanel({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 18 }}
       transition={{ type: 'spring', stiffness: 420, damping: 42, mass: 0.8 }}
-      className="fixed inset-x-3 bottom-3 z-40 h-[70vh] min-h-0 w-[calc(100vw-1.5rem)] shrink-0 overflow-hidden rounded-2xl border border-[#e1dccf] bg-[#fffefa]/86 shadow-[0_24px_80px_rgba(43,34,19,0.18)] backdrop-blur-xl lg:static lg:inset-auto lg:z-auto lg:h-auto lg:w-[348px] lg:rounded-none lg:border-y-0 lg:border-r-0 lg:shadow-[inset_1px_0_0_rgba(255,255,255,0.72)]"
+      className={`fixed inset-x-3 bottom-3 z-40 h-[70vh] min-h-0 w-[calc(100vw-1.5rem)] shrink-0 overflow-hidden rounded-2xl border border-[#e1dccf] bg-[#fffefa]/86 shadow-[0_24px_80px_rgba(43,34,19,0.18)] backdrop-blur-xl ${desktopPlacement}`}
     >
       <div className="flex h-full min-h-0 flex-col">
         <header className="papyrus-toolbar flex h-11 shrink-0 items-center gap-2 border-b px-3">
@@ -177,7 +180,7 @@ export function SecretaryWorkbenchPanel({
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -8 }}
                 transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                className="papyrus-scrollbar flex h-full min-h-0 flex-col overflow-y-auto px-3 py-3"
+                className="papyrus-scrollbar flex h-full min-h-0 flex-col overflow-y-auto px-3 py-3 [scrollbar-gutter:stable]"
               >
                 <WorkbenchTodoList todos={todos} />
                 <ToolCallCapsules items={snapshot.tools} />
