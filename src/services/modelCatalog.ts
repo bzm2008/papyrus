@@ -74,7 +74,7 @@ export const defaultProviderConfigs: Record<ProviderId, LlmProviderConfig> = {
     label: 'Scallion 内置模型',
     baseUrl: 'https://scallion.uno/api/papyrus/llm',
     apiKey: '',
-    modelName: 'astron-code-latest',
+    modelName: 'agnes-2.0-flash',
     docsUrl: 'https://scallion.uno',
     setupHint: 'Built-in cloud model through Scallion proxy. No upstream key is stored in the client.',
     contextWindowTokens: 131072,

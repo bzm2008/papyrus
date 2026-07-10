@@ -22,6 +22,7 @@ import {
   loadStoredSession,
   pollLoginDevice,
   saveSession,
+  sessionFromPollResponse,
   type LoginDevice,
 } from './services/wpsScallionSession'
 import { createWpsPlanDraft, runUnifiedAgent } from './services/wpsUnifiedAgent'
@@ -119,18 +120,26 @@ export default function App() {
       return
     }
 
-    const timer = window.setInterval(async () => {
+    let cancelled = false
+    let transientFailures = 0
+    const startedAt = Date.now()
+    const intervalMs = Math.max(1, loginDevice.interval) * 1000
+    let timer: number | undefined
+
+    const schedule = (delayMs = intervalMs) => {
+      if (!cancelled) {
+        timer = window.setTimeout(tick, delayMs)
+      }
+    }
+
+    const tick = async () => {
       try {
         const payload = await pollLoginDevice(loginDevice.deviceCode)
+        const nextSession = sessionFromPollResponse(payload)
 
-        if (payload.status === 'pending') {
-          return
-        }
+        transientFailures = 0
 
-        window.clearInterval(timer)
-
-        if (payload.status === 'approved') {
-          const nextSession = { token: payload.token, user: payload.user }
+        if (nextSession) {
           saveSession(nextSession)
           setSession(nextSession)
           setLoginStatus('idle')
@@ -139,16 +148,41 @@ export default function App() {
           return
         }
 
-        setLoginStatus('error')
-        setLastError('授权未完成，请重新登录。')
-      } catch (error) {
-        window.clearInterval(timer)
-        setLoginStatus('error')
-        setLastError(error instanceof Error ? error.message : 'Scallion 授权失败')
-      }
-    }, Math.max(1, loginDevice.interval) * 1000)
+        if (payload.status === 'pending') {
+          if (Date.now() - startedAt > (loginDevice.expiresIn || 600) * 1000) {
+            setLoginStatus('error')
+            setLastError('授权码已过期，请重新登录。')
+            return
+          }
 
-    return () => window.clearInterval(timer)
+          schedule()
+          return
+        }
+
+        setLoginStatus('error')
+        setLastError(payload.status === 'denied' ? '你已取消授权，请重新登录。' : '授权未完成，请重新登录。')
+      } catch (error) {
+        transientFailures += 1
+
+        if (Date.now() - startedAt > (loginDevice.expiresIn || 600) * 1000 || transientFailures >= 8) {
+          setLoginStatus('error')
+          setLastError(error instanceof Error ? error.message : 'Scallion 授权失败')
+          return
+        }
+
+        setLastError('正在重新连接 Scallion 授权服务...')
+        schedule(Math.min(12000, intervalMs * (1 + transientFailures)))
+      }
+    }
+
+    schedule(0)
+
+    return () => {
+      cancelled = true
+      if (timer !== undefined) {
+        window.clearTimeout(timer)
+      }
+    }
   }, [loginDevice, loginStatus])
 
   const startLogin = async () => {

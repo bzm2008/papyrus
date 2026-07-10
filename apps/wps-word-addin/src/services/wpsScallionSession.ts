@@ -5,15 +5,26 @@ const STORAGE_KEY = 'papyrus.wps.scallion.session'
 
 type DeviceResponse = {
   deviceCode: string
+  device_code?: string
   userCode: string
+  user_code?: string
   verificationUrl: string
+  verification_url?: string
   expiresIn: number
+  expires_in?: number
   interval: number
 }
 
-type PollResponse =
-  | { status: 'pending' | 'expired' | 'denied' | 'error'; error?: string }
-  | { status: 'approved'; token: string; user: ScallionUser }
+export type PollResponse = {
+  status?: 'pending' | 'expired' | 'denied' | 'error' | 'approved'
+  error?: string
+  token?: string
+  accessToken?: string
+  access_token?: string
+  user?: ScallionUser
+  account?: ScallionUser
+  data?: Partial<PollResponse>
+}
 
 export type LoginDevice = DeviceResponse
 
@@ -41,25 +52,38 @@ export function clearSession() {
 }
 
 export async function createLoginDevice() {
-  const payload = await requestJson<Partial<DeviceResponse>>(`${AUTH_API}/device`, {
+  const payload = await requestJson<Partial<DeviceResponse> & { data?: Partial<DeviceResponse> }>(`${AUTH_API}/device`, {
     method: 'POST',
   })
+  const device = normalizeDeviceResponse(payload)
 
-  if (!payload.deviceCode || !payload.verificationUrl) {
+  if (!device) {
     throw new Error('无法创建 Scallion 登录设备码。')
   }
 
-  return {
-    deviceCode: payload.deviceCode,
-    userCode: payload.userCode ?? '',
-    verificationUrl: payload.verificationUrl,
-    expiresIn: payload.expiresIn ?? 600,
-    interval: payload.interval ?? 2,
-  }
+  return device
 }
 
 export async function pollLoginDevice(deviceCode: string) {
-  return requestJson<PollResponse>(`${AUTH_API}/device/${encodeURIComponent(deviceCode)}`)
+  const payload = await requestJson<PollResponse>(`${AUTH_API}/device/${encodeURIComponent(deviceCode)}`)
+  return normalizePollResponse(payload)
+}
+
+export function sessionFromPollResponse(payload: PollResponse): ScallionSession | undefined {
+  if (payload.status !== 'approved') {
+    return undefined
+  }
+
+  const token = payload.token ?? payload.accessToken ?? payload.access_token
+
+  if (!token) {
+    return undefined
+  }
+
+  return {
+    token,
+    user: normalizeScallionUser(payload.user ?? payload.account),
+  }
 }
 
 async function requestJson<T>(url: string, options: { method?: string } = {}): Promise<T> {
@@ -130,4 +154,40 @@ function networkError(error: unknown) {
   }
 
   return error instanceof Error ? error : new Error('Scallion 授权请求失败。')
+}
+
+function normalizeDeviceResponse(payload: Partial<DeviceResponse> & { data?: Partial<DeviceResponse> }) {
+  const source = payload.data ?? payload
+  const deviceCode = source.deviceCode ?? source.device_code
+  const verificationUrl = source.verificationUrl ?? source.verification_url
+
+  if (!deviceCode || !verificationUrl) {
+    return undefined
+  }
+
+  return {
+    deviceCode,
+    userCode: source.userCode ?? source.user_code ?? '',
+    verificationUrl,
+    expiresIn: source.expiresIn ?? source.expires_in ?? 600,
+    interval: source.interval ?? 2,
+  }
+}
+
+function normalizePollResponse(payload: PollResponse): PollResponse {
+  return payload.data ? { ...payload, ...payload.data } : payload
+}
+
+function normalizeScallionUser(user?: ScallionUser): ScallionUser {
+  if (!user) {
+    return { id: 'scallion', username: 'Scallion 用户' }
+  }
+
+  const source = user as ScallionUser & { name?: string; email?: string }
+
+  return {
+    ...user,
+    id: source.id ?? 'scallion',
+    username: source.username || source.name || source.email || 'Scallion 用户',
+  }
 }

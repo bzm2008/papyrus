@@ -293,9 +293,9 @@ export async function fetchScallionProxyModels(provider: LlmProviderConfig) {
 
   return (
     models.map((model) => ({
-      id: model.id || model.name || model.displayName || '',
-      label: model.label || model.displayName || model.name || model.id || '',
-      modelName: model.modelName || model.model_name || model.name || model.id || '',
+      id: model.id || model.modelName || model.model_name || model.name || model.displayName || '',
+      label: model.label || model.displayName || model.name || model.modelName || model.model_name || model.id || '',
+      modelName: model.id || model.modelName || model.model_name || model.name || '',
       available: model.available ?? model.enabled ?? true,
       contextWindowTokens:
         model.contextWindowTokens ??

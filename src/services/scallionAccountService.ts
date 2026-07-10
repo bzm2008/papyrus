@@ -7,7 +7,7 @@ import {
   type ScallionUser,
 } from '../stores/useAppStore'
 
-const SCALLION_ACCOUNT_API = 'https://scallion.uno/api/papyrus/account'
+const SCALLION_QUOTA_API = 'https://scallion.uno/api/papyrus/llm/quota'
 const DEFAULT_UPGRADE_URL = 'https://scallion.uno/pricing'
 
 type AccountPayload = {
@@ -85,7 +85,7 @@ export async function refreshScallionQuota() {
   }
 
   try {
-    const response = await fetch(SCALLION_ACCOUNT_API, {
+    const response = await fetch(SCALLION_QUOTA_API, {
       headers: {
         Authorization: `Bearer ${token}`,
       },

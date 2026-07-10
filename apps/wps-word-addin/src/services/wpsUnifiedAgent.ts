@@ -9,9 +9,19 @@ import type {
 } from '../types'
 
 const LLM_API = 'https://scallion.uno/api/papyrus/llm/chat'
-const PRIMARY_MODEL = 'mimo-v2.5-pro'
-const FALLBACK_MODEL = 'astron-code-latest'
+const MODELS_API = 'https://scallion.uno/api/papyrus/llm/models'
+const PRIMARY_MODEL = 'agnes-2.0-flash'
+const FALLBACK_MODEL = 'agnes-2.0-flash'
 const REQUEST_TIMEOUT_MS = 45000
+
+type ScallionModelPayload =
+  | Array<{ id?: string; modelName?: string; model_name?: string; name?: string; available?: boolean; enabled?: boolean }>
+  | {
+      data?: Array<{ id?: string; modelName?: string; model_name?: string; name?: string; available?: boolean; enabled?: boolean }>
+      models?: Array<{ id?: string; modelName?: string; model_name?: string; name?: string; available?: boolean; enabled?: boolean }>
+    }
+
+let modelListPromise: Promise<string[]> | undefined
 
 type LlmPayload = {
   choices?: Array<{
@@ -329,6 +339,7 @@ async function callScallion(
     headers.Authorization = `Bearer ${token}`
   }
 
+  const resolvedModel = await resolveScallionModel(token, model)
   const controller = new AbortController()
   const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
@@ -338,7 +349,7 @@ async function callScallion(
       headers,
       signal: controller.signal,
       body: JSON.stringify({
-        model,
+        model: resolvedModel,
         messages,
         temperature,
         max_tokens: maxTokens,
@@ -361,6 +372,50 @@ async function callScallion(
   } finally {
     window.clearTimeout(timer)
   }
+}
+
+async function resolveScallionModel(token: string | undefined, preferredModel: string) {
+  try {
+    const models = await getAvailableScallionModels(token)
+    return models.find((model) => model === preferredModel) ?? models[0] ?? preferredModel
+  } catch {
+    return preferredModel
+  }
+}
+
+async function getAvailableScallionModels(token: string | undefined) {
+  if (!modelListPromise) {
+    modelListPromise = fetchAvailableScallionModels(token).catch((error) => {
+      modelListPromise = undefined
+      throw error
+    })
+  }
+
+  return modelListPromise
+}
+
+async function fetchAvailableScallionModels(token: string | undefined) {
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+  }
+
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+
+  const response = await fetch(MODELS_API, { headers })
+  const payload = (await response.json().catch(() => ({}))) as ScallionModelPayload
+
+  if (!response.ok) {
+    throw new Error(`Scallion 模型列表请求失败: HTTP ${response.status}`)
+  }
+
+  const models = Array.isArray(payload) ? payload : payload.models ?? payload.data ?? []
+
+  return models
+    .filter((model) => model.available ?? model.enabled ?? true)
+    .map((model) => model.id || model.modelName || model.model_name || model.name || '')
+    .filter(Boolean)
 }
 
 function buildContext(snapshot: WpsDocumentSnapshot) {
