@@ -1,7 +1,6 @@
 use crate::work_assistant::{
-    clear_audit_entries_locked, persist_roots, read_audit_entries, AssistantErrorPayload,
-    AuditEntry, AuthorizedRoot, AuthorizedRootKind, CapabilityStatus, WorkAssistantError,
-    WorkAssistantState,
+    clear_audit_entries, persist_roots, read_audit_entries, AssistantErrorPayload, AuditEntry,
+    AuthorizedRoot, AuthorizedRootKind, CapabilityStatus, WorkAssistantError, WorkAssistantState,
 };
 use std::{
     path::PathBuf,
@@ -116,7 +115,7 @@ pub fn work_assistant_list_audit(
 pub fn work_assistant_clear_audit(
     state: State<'_, WorkAssistantState>,
 ) -> Result<(), AssistantErrorPayload> {
-    clear_audit_entries_locked(&state.audit_guard, &state.audit_path).map_err(Into::into)
+    clear_audit_entries(&state).map_err(Into::into)
 }
 
 #[tauri::command]

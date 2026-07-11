@@ -1,10 +1,9 @@
-use crate::work_assistant::WorkAssistantError;
+use crate::work_assistant::{WorkAssistantError, WorkAssistantState};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
     path::Path,
-    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -29,7 +28,18 @@ impl AuditEntry {
     }
 }
 
-pub fn append_audit_entry(path: &Path, entry: &AuditEntry) -> Result<(), WorkAssistantError> {
+pub fn append_audit_entry(
+    state: &WorkAssistantState,
+    entry: &AuditEntry,
+) -> Result<(), WorkAssistantError> {
+    let _guard = state
+        .audit_guard
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("audit log lock is unavailable"))?;
+    append_audit_entry_at(&state.audit_path, entry)
+}
+
+fn append_audit_entry_at(path: &Path, entry: &AuditEntry) -> Result<(), WorkAssistantError> {
     let parent = path
         .parent()
         .ok_or_else(|| WorkAssistantError::protocol("audit path has no parent directory"))?;
@@ -52,17 +62,6 @@ pub fn append_audit_entry(path: &Path, entry: &AuditEntry) -> Result<(), WorkAss
         .map_err(|error| {
             WorkAssistantError::protocol(format!("could not append audit entry: {error}"))
         })
-}
-
-pub fn append_audit_entry_locked(
-    audit_guard: &Mutex<()>,
-    path: &Path,
-    entry: &AuditEntry,
-) -> Result<(), WorkAssistantError> {
-    let _guard = audit_guard
-        .lock()
-        .map_err(|_| WorkAssistantError::protocol("audit log lock is unavailable"))?;
-    append_audit_entry(path, entry)
 }
 
 pub fn read_audit_entries(path: &Path) -> Result<Vec<AuditEntry>, WorkAssistantError> {
@@ -93,7 +92,15 @@ pub fn read_audit_entries(path: &Path) -> Result<Vec<AuditEntry>, WorkAssistantE
     Ok(entries)
 }
 
-pub fn clear_audit_entries(path: &Path) -> Result<(), WorkAssistantError> {
+pub fn clear_audit_entries(state: &WorkAssistantState) -> Result<(), WorkAssistantError> {
+    let _guard = state
+        .audit_guard
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("audit log lock is unavailable"))?;
+    clear_audit_entries_at(&state.audit_path)
+}
+
+fn clear_audit_entries_at(path: &Path) -> Result<(), WorkAssistantError> {
     let parent = path
         .parent()
         .ok_or_else(|| WorkAssistantError::protocol("audit path has no parent directory"))?;
@@ -111,16 +118,6 @@ pub fn clear_audit_entries(path: &Path) -> Result<(), WorkAssistantError> {
         })
 }
 
-pub fn clear_audit_entries_locked(
-    audit_guard: &Mutex<()>,
-    path: &Path,
-) -> Result<(), WorkAssistantError> {
-    let _guard = audit_guard
-        .lock()
-        .map_err(|_| WorkAssistantError::protocol("audit log lock is unavailable"))?;
-    clear_audit_entries(path)
-}
-
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -131,9 +128,11 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::work_assistant::WorkAssistantState;
     use std::{
+        collections::{HashMap, HashSet},
         fs,
-        sync::{mpsc, Arc, Mutex},
+        sync::{mpsc, Arc, Barrier, Mutex, RwLock},
         thread,
         time::Duration,
     };
@@ -143,17 +142,28 @@ mod tests {
         std::env::temp_dir().join(format!("papyrus-test-{}", Uuid::new_v4()))
     }
 
+    fn test_state(directory: &Path) -> WorkAssistantState {
+        WorkAssistantState {
+            roots: RwLock::new(Vec::new()),
+            previews: Mutex::new(HashMap::new()),
+            approvals: Mutex::new(HashMap::new()),
+            cancelled_runs: Mutex::new(HashSet::new()),
+            audit_path: directory.join("audit.jsonl"),
+            audit_guard: Mutex::new(()),
+        }
+    }
+
     #[test]
     fn appends_and_reads_newest_audit_entry_first() {
         let directory = test_dir();
-        let path = directory.join("audit.jsonl");
+        let state = test_state(&directory);
         let first = AuditEntry::new("first", "one");
         let second = AuditEntry::new("second", "two");
 
-        append_audit_entry(&path, &first).unwrap();
-        append_audit_entry(&path, &second).unwrap();
+        append_audit_entry(&state, &first).unwrap();
+        append_audit_entry(&state, &second).unwrap();
 
-        let entries = read_audit_entries(&path).unwrap();
+        let entries = read_audit_entries(&state.audit_path).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].event, "second");
         assert_eq!(entries[1].event, "first");
@@ -164,17 +174,17 @@ mod tests {
     #[test]
     fn skips_malformed_trailing_lines() {
         let directory = test_dir();
-        let path = directory.join("audit.jsonl");
+        let state = test_state(&directory);
         let entry = AuditEntry::new("saved", "ok");
 
-        append_audit_entry(&path, &entry).unwrap();
+        append_audit_entry(&state, &entry).unwrap();
         fs::write(
-            &path,
+            &state.audit_path,
             format!("{}\n{{bad-json", serde_json::to_string(&entry).unwrap()),
         )
         .unwrap();
 
-        let entries = read_audit_entries(&path).unwrap();
+        let entries = read_audit_entries(&state.audit_path).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event, "saved");
 
@@ -208,40 +218,41 @@ mod tests {
     #[test]
     fn clear_truncates_file_without_deleting_parent_directory() {
         let directory = test_dir();
-        let path = directory.join("audit.jsonl");
-        append_audit_entry(&path, &AuditEntry::new("saved", "ok")).unwrap();
+        let state = test_state(&directory);
+        append_audit_entry(&state, &AuditEntry::new("saved", "ok")).unwrap();
 
-        clear_audit_entries(&path).unwrap();
+        clear_audit_entries(&state).unwrap();
 
         assert!(directory.is_dir());
-        assert!(path.is_file());
-        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+        assert!(state.audit_path.is_file());
+        assert_eq!(fs::metadata(&state.audit_path).unwrap().len(), 0);
 
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn shared_audit_guard_serializes_append_and_clear_operations() {
+    fn state_audit_guard_serializes_append_and_clear_operations() {
         let directory = test_dir();
-        let path = directory.join("audit.jsonl");
-        let audit_guard = Arc::new(Mutex::new(()));
-        let held_guard = audit_guard.lock().unwrap();
+        let state = Arc::new(test_state(&directory));
+        let path = state.audit_path.clone();
+        let held_guard = state.audit_guard.lock().unwrap();
+        let append_ready = Arc::new(Barrier::new(2));
+        let (append_attempt_tx, append_attempt_rx) = mpsc::channel();
         let (append_complete_tx, append_complete_rx) = mpsc::channel();
-        let append_path = path.clone();
-        let append_guard = Arc::clone(&audit_guard);
+        let append_state = Arc::clone(&state);
+        let append_ready_worker = Arc::clone(&append_ready);
 
         let append = thread::spawn(move || {
-            append_audit_entry_locked(
-                &append_guard,
-                &append_path,
-                &AuditEntry::new("saved", "ok"),
-            )
-            .unwrap();
+            append_ready_worker.wait();
+            append_attempt_tx.send(()).unwrap();
+            append_audit_entry(&append_state, &AuditEntry::new("saved", "ok")).unwrap();
             append_complete_tx.send(()).unwrap();
         });
 
+        append_ready.wait();
+        append_attempt_rx.recv().unwrap();
         assert!(append_complete_rx
-            .recv_timeout(Duration::from_millis(50))
+            .recv_timeout(Duration::from_secs(1))
             .is_err());
         drop(held_guard);
         append.join().unwrap();
@@ -250,17 +261,23 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event, "saved");
 
-        let held_guard = audit_guard.lock().unwrap();
+        let held_guard = state.audit_guard.lock().unwrap();
+        let clear_ready = Arc::new(Barrier::new(2));
+        let (clear_attempt_tx, clear_attempt_rx) = mpsc::channel();
         let (clear_complete_tx, clear_complete_rx) = mpsc::channel();
-        let clear_path = path.clone();
-        let clear_guard = Arc::clone(&audit_guard);
+        let clear_state = Arc::clone(&state);
+        let clear_ready_worker = Arc::clone(&clear_ready);
         let clear = thread::spawn(move || {
-            clear_audit_entries_locked(&clear_guard, &clear_path).unwrap();
+            clear_ready_worker.wait();
+            clear_attempt_tx.send(()).unwrap();
+            clear_audit_entries(&clear_state).unwrap();
             clear_complete_tx.send(()).unwrap();
         });
 
+        clear_ready.wait();
+        clear_attempt_rx.recv().unwrap();
         assert!(clear_complete_rx
-            .recv_timeout(Duration::from_millis(50))
+            .recv_timeout(Duration::from_secs(1))
             .is_err());
         drop(held_guard);
         clear.join().unwrap();
