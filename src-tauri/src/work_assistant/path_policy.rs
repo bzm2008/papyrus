@@ -8,6 +8,37 @@ pub struct PathPolicy<'a> {
     roots: &'a [AuthorizedRoot],
 }
 
+/// Keeps the complete destination-parent chain open while a mutation is in progress.
+/// On Windows these handles deny DELETE sharing, so a later path operation cannot be
+/// redirected by replacing a checked parent with a junction or reparse point.
+pub struct DestinationMutationGuard {
+    candidate: PathBuf,
+    #[cfg(windows)]
+    _directories: Vec<fs::File>,
+    #[cfg(unix)]
+    parent: fs::File,
+    #[cfg(unix)]
+    name: std::ffi::CString,
+}
+
+impl DestinationMutationGuard {
+    pub fn candidate(&self) -> &Path {
+        &self.candidate
+    }
+
+    #[cfg(unix)]
+    pub fn parent_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+
+        self.parent.as_raw_fd()
+    }
+
+    #[cfg(unix)]
+    pub fn name(&self) -> &std::ffi::CStr {
+        &self.name
+    }
+}
+
 impl<'a> PathPolicy<'a> {
     pub fn new(roots: &'a [AuthorizedRoot]) -> Self {
         Self { roots }
@@ -102,6 +133,88 @@ impl<'a> PathPolicy<'a> {
         Ok(())
     }
 
+    pub fn bind_destination_mutation(
+        &self,
+        root_id: &str,
+        candidate: &Path,
+    ) -> Result<DestinationMutationGuard, WorkAssistantError> {
+        self.verify_safe_destination(root_id, candidate)?;
+
+        #[cfg(windows)]
+        {
+            let root = canonical_root(self.authorized_root(root_id)?)?;
+            let parent = candidate.parent().ok_or_else(|| {
+                WorkAssistantError::blocked("destination has no parent directory")
+            })?;
+            let relative_parent = parent.strip_prefix(&root).map_err(|_| {
+                WorkAssistantError::path_outside_workspace(
+                    "destination parent is outside the authorized workspace",
+                )
+            })?;
+            let mut expected = root.clone();
+            let mut directories = Vec::new();
+            directories.push(open_verified_windows_directory(&expected)?);
+            for component in relative_parent.components() {
+                expected.push(component.as_os_str());
+                directories.push(open_verified_windows_directory(&expected)?);
+            }
+            return Ok(DestinationMutationGuard {
+                candidate: candidate.to_path_buf(),
+                _directories: directories,
+            });
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+
+            let root = canonical_root(self.authorized_root(root_id)?)?;
+            let parent = candidate.parent().ok_or_else(|| {
+                WorkAssistantError::blocked("destination has no parent directory")
+            })?;
+            let expected_parent = fs::canonicalize(parent).map_err(|error| {
+                WorkAssistantError::blocked(format!(
+                    "could not resolve destination parent for binding: {error}"
+                ))
+            })?;
+            ensure_within_root(&root, &expected_parent)?;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(parent)
+                .map_err(|error| {
+                    WorkAssistantError::blocked(format!(
+                        "could not bind destination parent directory: {error}"
+                    ))
+                })?;
+            let opened_parent = opened_unix_directory_path(&file)?;
+            if opened_parent != expected_parent {
+                return Err(WorkAssistantError::blocked(
+                    "destination parent changed while it was being bound",
+                ));
+            }
+            let name = candidate
+                .file_name()
+                .ok_or_else(|| WorkAssistantError::blocked("destination has no file name"))?;
+            let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| {
+                WorkAssistantError::blocked("destination file name contains a NUL byte")
+            })?;
+            return Ok(DestinationMutationGuard {
+                candidate: candidate.to_path_buf(),
+                parent: file,
+                name,
+            });
+        }
+
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = (root_id, candidate);
+            Err(WorkAssistantError::blocked(
+                "secure handle-bound destination mutations are not available on this platform",
+            ))
+        }
+    }
+
     fn authorized_root(&self, root_id: &str) -> Result<&AuthorizedRoot, WorkAssistantError> {
         self.roots
             .iter()
@@ -129,6 +242,159 @@ impl<'a> PathPolicy<'a> {
 
         Ok(root.join(requested_path))
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn opened_unix_directory_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    use std::os::fd::AsRawFd;
+
+    fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(|error| {
+        WorkAssistantError::blocked(format!(
+            "could not verify bound destination directory: {error}"
+        ))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn opened_unix_directory_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    use std::{ffi::CStr, os::fd::AsRawFd, os::unix::ffi::OsStrExt};
+
+    const F_GETPATH: libc::c_int = 50;
+    let mut buffer = [0 as libc::c_char; libc::PATH_MAX as usize];
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr()) };
+    if result == -1 {
+        return Err(WorkAssistantError::blocked(format!(
+            "could not verify bound destination directory: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let bytes = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_bytes();
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
+fn opened_unix_directory_path(_: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    Err(WorkAssistantError::blocked(
+        "secure handle-bound destination mutations are not available on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn open_verified_windows_directory(expected: &Path) -> Result<fs::File, WorkAssistantError> {
+    use std::{
+        iter,
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        ptr,
+    };
+
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    let wide = expected
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(WorkAssistantError::blocked(format!(
+            "could not bind destination directory: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let file = unsafe { fs::File::from_raw_handle(handle as *mut std::ffi::c_void) };
+    let opened = opened_windows_directory_path(&file)?;
+    if normalize_windows_path(expected.to_path_buf()) != opened {
+        return Err(WorkAssistantError::blocked(
+            "destination directory changed while it was being bound",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn opened_windows_directory_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    use std::{
+        ffi::OsString,
+        os::windows::{ffi::OsStringExt, io::AsRawHandle},
+    };
+
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle() as *mut std::ffi::c_void,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        };
+        if length == 0 {
+            return Err(WorkAssistantError::blocked(format!(
+                "could not verify destination directory: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if (length as usize) < buffer.len() {
+            return Ok(normalize_windows_path(PathBuf::from(OsString::from_wide(
+                &buffer[..length as usize],
+            ))));
+        }
+        buffer.resize(length as usize + 1, 0);
+    }
+}
+
+#[cfg(windows)]
+fn normalize_windows_path(path: PathBuf) -> PathBuf {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+    };
+
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    const PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    if wide.starts_with(PREFIX) {
+        return PathBuf::from(OsString::from_wide(&wide[PREFIX.len()..]));
+    }
+    path
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateFileW(
+        file_name: *const u16,
+        desired_access: u32,
+        share_mode: u32,
+        security_attributes: *const std::ffi::c_void,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: *mut std::ffi::c_void,
+    ) -> isize;
+    fn GetFinalPathNameByHandleW(
+        file: *mut std::ffi::c_void,
+        path: *mut u16,
+        path_length: u32,
+        flags: u32,
+    ) -> u32;
 }
 
 #[cfg(windows)]

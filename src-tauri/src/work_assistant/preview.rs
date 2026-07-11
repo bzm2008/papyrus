@@ -144,6 +144,29 @@ mod tests {
         );
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn preview_rejects_directory_trash_so_the_source_cap_cannot_be_bypassed() {
+        let directory = test_dir();
+        fs::create_dir_all(directory.join("source-directory")).unwrap();
+        fs::write(directory.join("source-directory/file.txt"), "source").unwrap();
+        let request = BatchPreviewRequest {
+            run_id: "run".into(),
+            root_id: "root".into(),
+            operations: vec![FileOperationRequest {
+                kind: FileOperationKind::Trash,
+                source: Some("source-directory".into()),
+                destination: None,
+            }],
+            conflict_policy: ConflictPolicy::Skip,
+        };
+
+        let error = build_batch_preview(&[root(&directory)], &request).unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        assert!(directory.join("source-directory").is_dir());
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 use crate::work_assistant::{
     append_audit_entry, ApprovalChoice, ApprovalGrant, AuditEntry, AuthorizedRoot, BatchPreview,
@@ -350,6 +373,20 @@ pub(crate) fn build_batch_preview(
     for operation in &request.operations {
         let source = resolve_operation_source(&policy, &request.root_id, operation)?;
         let destination = resolve_operation_destination(&policy, &request.root_id, operation)?;
+        if operation.kind == FileOperationKind::Trash {
+            return Err(WorkAssistantError::blocked(
+                "trash is unavailable until it supports handle-bound deletion",
+            ));
+        }
+        #[cfg(not(windows))]
+        if matches!(
+            operation.kind,
+            FileOperationKind::Move | FileOperationKind::Rename
+        ) {
+            return Err(WorkAssistantError::blocked(
+                "move and rename are unavailable without a no-replace relative operation",
+            ));
+        }
         digest.update([operation_kind_byte(&operation.kind)]);
         digest.update(operation.source.as_deref().unwrap_or_default().as_bytes());
         digest.update([0]);
@@ -365,13 +402,9 @@ pub(crate) fn build_batch_preview(
             let metadata = fs::metadata(&source).map_err(|error| {
                 WorkAssistantError::blocked(format!("could not inspect source path: {error}"))
             })?;
-            if matches!(
-                operation.kind,
-                FileOperationKind::Copy | FileOperationKind::Move | FileOperationKind::Rename
-            ) && !metadata.is_file()
-            {
+            if !metadata.is_file() {
                 return Err(WorkAssistantError::blocked(
-                    "copy, move, and rename support regular files only",
+                    "file operations support regular files only in this phase",
                 ));
             }
             if metadata.is_file() {

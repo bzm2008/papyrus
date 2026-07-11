@@ -109,6 +109,29 @@ mod tests {
     }
 
     #[test]
+    fn executor_refuses_trash_even_when_called_without_the_preview_gate() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("source.txt"), "source").unwrap();
+        let root = root(&directory);
+        let policy = PathPolicy::new(std::slice::from_ref(&root));
+        let operation = FileOperationRequest {
+            kind: FileOperationKind::Trash,
+            source: Some("source.txt".into()),
+            destination: None,
+        };
+
+        let error = execute_one(&policy, "root", &operation, &ConflictPolicy::Skip).unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        assert_eq!(
+            fs::read_to_string(directory.join("source.txt")).unwrap(),
+            "source"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn stale_preview_does_not_start_file_execution() {
         let directory = test_dir();
         fs::create_dir_all(&directory).unwrap();
@@ -181,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn overwrite_trashes_the_previous_destination_before_copying() {
+    fn overwrite_is_blocked_until_trashing_can_be_bound_to_the_destination_handle() {
         let directory = test_dir();
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("source.txt"), "new content").unwrap();
@@ -191,10 +214,10 @@ mod tests {
 
         let result = execute_batch_file_operations(&state, execution).unwrap();
 
-        assert_eq!(result.completed.len(), 1);
+        assert_eq!(result.failed.len(), 1);
         assert_eq!(
             fs::read_to_string(directory.join("destination.txt")).unwrap(),
-            "new content"
+            "old content"
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -287,8 +310,9 @@ mod tests {
 use crate::work_assistant::{
     append_audit_entry, validate_preview_fresh, ApprovalChoice, AssistantErrorPayload, AuditEntry,
     BatchExecutionRequest, BatchExecutionResult, BatchItemResult, BatchPreview,
-    BatchPreviewRequest, ConflictPolicy, FileOperationKind, FileOperationRequest, PathPolicy,
-    StoredApproval, StoredPreview, WorkAssistantError, WorkAssistantState,
+    BatchPreviewRequest, ConflictPolicy, DestinationMutationGuard, FileOperationKind,
+    FileOperationRequest, PathPolicy, StoredApproval, StoredPreview, WorkAssistantError,
+    WorkAssistantState,
 };
 use std::{
     fs, io,
@@ -407,6 +431,7 @@ pub fn execute_batch_file_operations(
     Ok(result)
 }
 
+#[derive(Debug)]
 enum OneOperationResult {
     Completed(String),
     Skipped(String),
@@ -444,12 +469,12 @@ fn execute_one(
     };
 
     if operation.kind == FileOperationKind::Trash {
-        trash_path(source.as_ref().expect("trash requires source"))?;
-        return Ok(OneOperationResult::Completed(
-            "moved source to trash".into(),
+        return Err(WorkAssistantError::blocked(
+            "trash is unavailable until it supports handle-bound deletion",
         ));
     }
     let destination_path = destination.as_mut().expect("non-trash needs destination");
+    let mut destination_guard = policy.bind_destination_mutation(root_id, destination_path)?;
     if source
         .as_ref()
         .is_some_and(|source_path| source_path == destination_path)
@@ -461,17 +486,13 @@ fn execute_one(
 
     if let Some(source) = source.as_ref() {
         let metadata = fs::metadata(source).map_err(file_error)?;
-        if matches!(
-            operation.kind,
-            FileOperationKind::Copy | FileOperationKind::Move | FileOperationKind::Rename
-        ) && !metadata.is_file()
-        {
+        if !metadata.is_file() {
             return Err(WorkAssistantError::blocked(
-                "copy, move, and rename support regular files only",
+                "file operations support regular files only in this phase",
             ));
         }
     }
-    if destination_path.exists() {
+    if destination_entry_exists(&destination_guard)? {
         match conflict_policy {
             ConflictPolicy::Skip => {
                 return Ok(OneOperationResult::Skipped(
@@ -480,42 +501,33 @@ fn execute_one(
             }
             ConflictPolicy::Rename => {
                 *destination_path = renamed_destination(&*destination_path)?;
-                policy.verify_safe_destination(root_id, destination_path)?;
+                destination_guard = policy.bind_destination_mutation(root_id, destination_path)?;
             }
-            ConflictPolicy::Overwrite => trash_path(&*destination_path)?,
+            ConflictPolicy::Overwrite => {
+                return Err(WorkAssistantError::blocked(
+                    "overwrite is unavailable until it supports handle-bound trashing",
+                ))
+            }
         }
     }
-    policy.verify_safe_destination(root_id, destination_path)?;
     match operation.kind {
         FileOperationKind::Copy => {
             let source = source.expect("copy requires source");
-            fs::copy(&source, &*destination_path).map_err(file_error)?;
+            copy_to_new_destination(&source, &destination_guard)?;
             Ok(OneOperationResult::Completed("copied regular file".into()))
         }
         FileOperationKind::Move | FileOperationKind::Rename => {
             let source = source.expect("move requires source");
-            match fs::rename(&source, &*destination_path) {
+            match move_to_new_destination(&source, &destination_guard) {
                 Ok(()) => Ok(OneOperationResult::Completed("renamed source".into())),
-                Err(error) if is_cross_device_error(&error) => {
-                    fs::copy(&source, &*destination_path).map_err(file_error)?;
-                    trash_path(&source)?;
-                    Ok(OneOperationResult::Completed(
-                        "copied file then moved source to trash".into(),
-                    ))
-                }
+                Err(error) if is_cross_device_error(&error) => Err(WorkAssistantError::blocked(
+                    "cross-volume moves are unavailable without handle-bound trashing",
+                )),
                 Err(error) => Err(file_error(error)),
             }
         }
         FileOperationKind::CreateDirectory => {
-            let parent = destination_path.parent().ok_or_else(|| {
-                WorkAssistantError::blocked("destination has no parent directory")
-            })?;
-            if !parent.is_dir() {
-                return Err(WorkAssistantError::blocked(
-                    "create directory requires an existing parent",
-                ));
-            }
-            fs::create_dir(&*destination_path).map_err(file_error)?;
+            create_new_destination_directory(&destination_guard)?;
             Ok(OneOperationResult::Completed("created directory".into()))
         }
         FileOperationKind::Trash => unreachable!("trash returned above"),
@@ -645,6 +657,238 @@ fn append_item_audit(
     )
 }
 
+fn destination_entry_exists(
+    destination: &DestinationMutationGuard,
+) -> Result<bool, WorkAssistantError> {
+    #[cfg(unix)]
+    {
+        let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let result = unsafe {
+            libc::fstatat(
+                destination.parent_fd(),
+                destination.name().as_ptr(),
+                metadata.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == 0 {
+            let metadata = unsafe { metadata.assume_init() };
+            if metadata.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                return Err(WorkAssistantError::blocked(
+                    "destination may not be a symbolic link",
+                ));
+            }
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        return match error.kind() {
+            io::ErrorKind::NotFound => Ok(false),
+            _ => Err(file_error(error)),
+        };
+    }
+
+    #[cfg(windows)]
+    {
+        match fs::symlink_metadata(destination.candidate()) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(WorkAssistantError::blocked(
+                "destination may not be a symbolic link",
+            )),
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(file_error(error)),
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = destination;
+        Err(WorkAssistantError::blocked(
+            "secure destination operations are not available on this platform",
+        ))
+    }
+}
+
+fn copy_to_new_destination(
+    source: &Path,
+    destination: &DestinationMutationGuard,
+) -> Result<(), WorkAssistantError> {
+    let mut input = fs::File::open(source).map_err(file_error)?;
+
+    #[cfg(unix)]
+    let mut output = {
+        use std::os::fd::FromRawFd;
+
+        let descriptor = unsafe {
+            libc::openat(
+                destination.parent_fd(),
+                destination.name().as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
+        if descriptor < 0 {
+            return Err(file_error(io::Error::last_os_error()));
+        }
+        unsafe { fs::File::from_raw_fd(descriptor) }
+    };
+
+    #[cfg(windows)]
+    let mut output = create_new_windows_file(destination.candidate()).map_err(file_error)?;
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = destination;
+        return Err(WorkAssistantError::blocked(
+            "secure destination operations are not available on this platform",
+        ));
+    }
+
+    io::copy(&mut input, &mut output).map_err(file_error)?;
+    output.sync_all().map_err(file_error)
+}
+
+fn move_to_new_destination(
+    source: &Path,
+    destination: &DestinationMutationGuard,
+) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        return move_file_without_replace_windows(source, destination.candidate());
+    }
+
+    #[cfg(unix)]
+    {
+        let _ = (source, destination);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "POSIX move and rename require an unavailable no-replace primitive",
+        ));
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (source, destination);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "secure destination operations are not available on this platform",
+        ))
+    }
+}
+
+fn create_new_destination_directory(
+    destination: &DestinationMutationGuard,
+) -> Result<(), WorkAssistantError> {
+    #[cfg(unix)]
+    {
+        let result =
+            unsafe { libc::mkdirat(destination.parent_fd(), destination.name().as_ptr(), 0o700) };
+        if result == 0 {
+            return Ok(());
+        }
+        return Err(file_error(io::Error::last_os_error()));
+    }
+
+    #[cfg(windows)]
+    {
+        return create_directory_windows(destination.candidate()).map_err(file_error);
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = destination;
+        Err(WorkAssistantError::blocked(
+            "secure destination operations are not available on this platform",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn create_new_windows_file(path: &Path) -> io::Result<fs::File> {
+    use std::{
+        iter,
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        ptr,
+    };
+
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_NEW: u32 = 1;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const INVALID_HANDLE_VALUE: isize = -1;
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            ptr::null(),
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { fs::File::from_raw_handle(handle as *mut std::ffi::c_void) })
+}
+
+#[cfg(windows)]
+fn move_file_without_replace_windows(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::{iter, os::windows::ffi::OsStrExt};
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    if unsafe { MoveFileW(source.as_ptr(), destination.as_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_directory_windows(path: &Path) -> io::Result<()> {
+    use std::{iter, os::windows::ffi::OsStrExt, ptr};
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    if unsafe { CreateDirectoryW(wide.as_ptr(), ptr::null()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateFileW(
+        file_name: *const u16,
+        desired_access: u32,
+        share_mode: u32,
+        security_attributes: *const std::ffi::c_void,
+        creation_disposition: u32,
+        flags_and_attributes: u32,
+        template_file: *mut std::ffi::c_void,
+    ) -> isize;
+    fn MoveFileW(existing_file_name: *const u16, new_file_name: *const u16) -> i32;
+    fn CreateDirectoryW(path_name: *const u16, security_attributes: *const std::ffi::c_void)
+        -> i32;
+}
+
 fn renamed_destination(destination: &Path) -> Result<PathBuf, WorkAssistantError> {
     let parent = destination
         .parent()
@@ -667,12 +911,6 @@ fn renamed_destination(destination: &Path) -> Result<PathBuf, WorkAssistantError
     Err(WorkAssistantError::blocked(
         "could not find an available destination name",
     ))
-}
-
-fn trash_path(path: &Path) -> Result<(), WorkAssistantError> {
-    trash::delete(path).map_err(|error| {
-        WorkAssistantError::blocked(format!("could not move path to trash: {error}"))
-    })
 }
 
 fn file_error(error: io::Error) -> WorkAssistantError {

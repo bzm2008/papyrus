@@ -2498,6 +2498,7 @@ name = "papyrus"
 version = "0.1.2"
 dependencies = [
  "dunce",
+ "libc",
  "log",
  "open",
  "reqwest 0.12.28",
