@@ -54,6 +54,10 @@ pub fn init_state(app: &tauri::AppHandle) -> Result<WorkAssistantState, WorkAssi
     let data_dir = app.path().app_data_dir().map_err(|error| {
         WorkAssistantError::protocol(format!("could not locate app data directory: {error}"))
     })?;
+    load_state_from_data_dir(&data_dir)
+}
+
+fn load_state_from_data_dir(data_dir: &Path) -> Result<WorkAssistantState, WorkAssistantError> {
     fs::create_dir_all(&data_dir).map_err(|error| {
         WorkAssistantError::protocol(format!("could not create app data directory: {error}"))
     })?;
@@ -61,7 +65,6 @@ pub fn init_state(app: &tauri::AppHandle) -> Result<WorkAssistantState, WorkAssi
     let audit_path = data_dir.join("work-assistant.jsonl");
     let roots_path = data_dir.join("work-assistant-roots.json");
     let roots = load_roots(&roots_path)?;
-    let _ = read_audit_entries(&audit_path)?;
 
     Ok(WorkAssistantState {
         roots: RwLock::new(roots),
@@ -277,6 +280,28 @@ mod tests {
         assert_eq!(loaded[0].label, "First");
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn state_load_does_not_parse_historical_audit_entries() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("work-assistant.jsonl"), b"not valid audit json").unwrap();
+
+        let state = load_state_from_data_dir(&directory).unwrap();
+
+        assert_eq!(state.audit_path, directory.join("work-assistant.jsonl"));
+        assert!(state.roots.read().unwrap().is_empty());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn dependency_lockfile_does_not_include_rayon_packages() {
+        let lockfile = include_str!("../../Cargo.lock");
+
+        assert!(!lockfile.contains("name = \"rayon\""));
+        assert!(!lockfile.contains("name = \"rayon-core\""));
     }
 
     #[test]

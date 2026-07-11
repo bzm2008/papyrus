@@ -9,6 +9,9 @@ use std::{
 use tauri::State;
 use uuid::Uuid;
 
+const MAX_CANCELLED_RUNS: usize = 256;
+const MAX_RUN_ID_LENGTH: usize = 128;
+
 pub fn capability_statuses() -> Vec<CapabilityStatus> {
     let platform = std::env::consts::OS.to_string();
     ["root_management", "audit_log", "run_cancellation"]
@@ -115,17 +118,34 @@ pub fn work_assistant_cancel_run(
     state: State<'_, WorkAssistantState>,
     run: String,
 ) -> Result<(), AssistantErrorPayload> {
+    record_cancelled_run(&state, run).map_err(Into::into)
+}
+
+fn record_cancelled_run(
+    state: &WorkAssistantState,
+    run: String,
+) -> Result<(), WorkAssistantError> {
     if run.trim().is_empty() {
-        return Err(WorkAssistantError::blocked("run id is required").into());
+        return Err(WorkAssistantError::blocked("run id is required"));
     }
-    state
+    if run.chars().count() > MAX_RUN_ID_LENGTH {
+        return Err(WorkAssistantError::blocked("run id exceeds 128 characters"));
+    }
+    let mut runs = state
         .cancelled_runs
         .lock()
-        .map_err(|_| WorkAssistantError::protocol("cancelled runs lock is unavailable"))
-        .map(|mut runs| {
-            runs.insert(run);
-        })
-        .map_err(Into::into)
+        .map_err(|_| WorkAssistantError::protocol("cancelled runs lock is unavailable"))?;
+    if runs.contains(&run) {
+        return Ok(());
+    }
+    if runs.len() >= MAX_CANCELLED_RUNS {
+        if let Some(evicted) = runs.iter().next().cloned() {
+            runs.remove(&evicted);
+        }
+    }
+    runs.insert(run);
+
+    Ok(())
 }
 
 fn unix_seconds() -> u64 {
@@ -138,6 +158,20 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::{Mutex, RwLock},
+    };
+
+    fn test_state() -> WorkAssistantState {
+        WorkAssistantState {
+            roots: RwLock::new(Vec::new()),
+            previews: Mutex::new(HashMap::new()),
+            approvals: Mutex::new(HashMap::new()),
+            cancelled_runs: Mutex::new(HashSet::new()),
+            audit_path: PathBuf::from("unused-audit-path"),
+        }
+    }
 
     #[test]
     fn capabilities_describe_the_native_broker_without_execution() {
@@ -150,5 +184,30 @@ mod tests {
         assert!(capabilities
             .iter()
             .all(|capability| capability.toolset == "work_assistant"));
+    }
+
+    #[test]
+    fn cancellation_rejects_blank_and_oversized_run_ids() {
+        let state = test_state();
+
+        let blank = record_cancelled_run(&state, " \t\n ".into()).unwrap_err();
+        assert_eq!(blank.code, "blocked");
+
+        let oversized = record_cancelled_run(&state, "a".repeat(129)).unwrap_err();
+        assert_eq!(oversized.code, "blocked");
+    }
+
+    #[test]
+    fn cancellation_set_is_bounded_when_recording_unique_runs() {
+        let state = test_state();
+        for index in 0..256 {
+            record_cancelled_run(&state, format!("run-{index}")).unwrap();
+        }
+
+        record_cancelled_run(&state, "overflow".into()).unwrap();
+
+        let runs = state.cancelled_runs.lock().unwrap();
+        assert_eq!(runs.len(), 256);
+        assert!(runs.contains("overflow"));
     }
 }
