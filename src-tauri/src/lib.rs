@@ -51,7 +51,10 @@ pub fn run() {
       work_assistant::work_assistant_downloads_scan,
       work_assistant::work_assistant_list_audit,
       work_assistant::work_assistant_clear_audit,
-      work_assistant::work_assistant_cancel_run
+      work_assistant::work_assistant_cancel_run,
+      work_assistant::work_assistant_preview_file_operations,
+      work_assistant::work_assistant_approve_file_operations,
+      work_assistant::work_assistant_execute_file_operations
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
@@ -557,6 +560,9 @@ mod security_tests {
         "work_assistant::work_assistant_list_audit",
         "work_assistant::work_assistant_clear_audit",
         "work_assistant::work_assistant_cancel_run",
+        "work_assistant::work_assistant_preview_file_operations",
+        "work_assistant::work_assistant_approve_file_operations",
+        "work_assistant::work_assistant_execute_file_operations",
       ]
     );
   }
