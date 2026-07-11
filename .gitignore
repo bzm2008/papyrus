@@ -15,6 +15,7 @@ artifacts
 src-tauri/target
 *.zip
 .codex-tools
+.worktrees
 *.local
 .env
 
