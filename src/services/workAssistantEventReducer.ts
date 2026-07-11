@@ -183,9 +183,9 @@ export function reduceWorkAssistantEvent(
       const toolCalls = Object.fromEntries(
         Object.entries(state.toolCalls).map(([id, toolCall]) => [
           id,
-          toolCall.status === 'completed' || toolCall.status === 'failed'
-            ? toolCall
-            : { ...toolCall, status: 'cancelled' as const, endedAt: event.at },
+          toolCall.status === 'queued' || toolCall.status === 'running' || toolCall.status === 'awaiting_approval'
+            ? { ...toolCall, status: 'cancelled' as const, endedAt: event.at }
+            : toolCall,
         ]),
       )
       const subagents = Object.fromEntries(

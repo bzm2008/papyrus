@@ -138,6 +138,32 @@ describe('reduceWorkAssistantEvent', () => {
     })
   })
 
+  it('accepts another approval after the matching pending tool completes', () => {
+    const firstStarted = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-1'), at: 1,
+    })
+    const secondStarted = reduceWorkAssistantEvent(firstStarted, {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-2'), at: 2,
+    })
+    const awaitingFirstApproval = reduceWorkAssistantEvent(secondStarted, {
+      type: 'approval.required', runId: 'run-1', request: preview, at: 3,
+    })
+    const firstCompleted = reduceWorkAssistantEvent(awaitingFirstApproval, {
+      type: 'tool.completed', runId: 'run-1', toolCallId: 'tool-1', result: successfulResult, at: 4,
+    })
+    const awaitingSecondApproval = reduceWorkAssistantEvent(firstCompleted, {
+      type: 'approval.required', runId: 'run-1', request: { ...preview, id: 'approval-2', toolCallId: 'tool-2' }, at: 5,
+    })
+
+    expect(firstCompleted).toMatchObject({ status: 'running', pendingApprovalId: undefined })
+    expect(firstCompleted.toolCalls['tool-1']).toMatchObject({ status: 'completed', endedAt: 4 })
+    expect(awaitingSecondApproval).toMatchObject({ status: 'awaiting_approval', pendingApprovalId: 'approval-2' })
+    expect(awaitingSecondApproval.toolCalls['tool-2']).toMatchObject({
+      status: 'awaiting_approval',
+      preview: { ...preview, id: 'approval-2', toolCallId: 'tool-2' },
+    })
+  })
+
   it('keeps a pending approval active until its tool reports progress or completion', () => {
     const firstStarted = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
       type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-1'), at: 1,
@@ -274,6 +300,24 @@ describe('reduceWorkAssistantEvent', () => {
     expect(cancelled.toolCalls['tool-1']).toMatchObject({ status: 'cancelled', endedAt: 11 })
     expect(afterLateCompletion).toBe(cancelled)
     expect(afterLateCompletion.toolCalls['tool-1'].result).toBeUndefined()
+  })
+
+  it('retains terminal tool receipts when a run is cancelled', () => {
+    const cancelledTool = { ...toolCall('cancelled-tool'), status: 'cancelled' as const, endedAt: 7 }
+    const running = {
+      ...createEmptyWorkAssistantRun('run-1'),
+      status: 'running' as const,
+      toolCalls: {
+        'cancelled-tool': cancelledTool,
+        'running-tool': { ...toolCall('running-tool'), status: 'running' as const },
+      },
+    }
+
+    const cancelled = reduceWorkAssistantEvent(running, { type: 'run.cancelled', runId: 'run-1', at: 11 })
+
+    expect(cancelled.toolCalls['cancelled-tool']).toBe(cancelledTool)
+    expect(cancelled.toolCalls['cancelled-tool']).toMatchObject({ status: 'cancelled', endedAt: 7 })
+    expect(cancelled.toolCalls['running-tool']).toMatchObject({ status: 'cancelled', endedAt: 11 })
   })
 
   it('handles terminal run events and ignores events for another run', () => {
