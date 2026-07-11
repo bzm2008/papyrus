@@ -8,6 +8,12 @@ import type {
 const isTerminalSubagent = (subagent: AssistantSubagent) =>
   subagent.status === 'completed' || subagent.status === 'failed' || subagent.status === 'cancelled'
 
+const isTerminalToolCall = (toolCall: AssistantToolCall) =>
+  toolCall.status === 'completed' || toolCall.status === 'failed' || toolCall.status === 'cancelled'
+
+const isTerminalRun = (state: WorkAssistantRun) =>
+  state.status === 'completed' || state.status === 'failed' || state.status === 'cancelled'
+
 const clearsPendingApproval = (state: WorkAssistantRun, toolCall: AssistantToolCall) =>
   state.pendingApprovalId !== undefined && toolCall.preview?.id === state.pendingApprovalId
 
@@ -15,7 +21,7 @@ export function reduceWorkAssistantEvent(
   state: WorkAssistantRun,
   event: WorkAssistantEvent,
 ): WorkAssistantRun {
-  if (event.runId !== state.id || state.status === 'cancelled') {
+  if (event.runId !== state.id || isTerminalRun(state)) {
     return state
   }
 
@@ -30,6 +36,10 @@ export function reduceWorkAssistantEvent(
       return { ...state, stage: event.stage, lastActivityAt: event.at }
 
     case 'tool.started': {
+      if (state.toolCalls[event.toolCall.id]) {
+        return state
+      }
+
       const toolCall = { ...event.toolCall, status: 'running' as const }
       return {
         ...state,
@@ -41,7 +51,7 @@ export function reduceWorkAssistantEvent(
 
     case 'approval.required': {
       const toolCall = state.toolCalls[event.request.toolCallId]
-      if (!toolCall) {
+      if (!toolCall || isTerminalToolCall(toolCall)) {
         return state
       }
 
@@ -59,15 +69,14 @@ export function reduceWorkAssistantEvent(
 
     case 'tool.progress': {
       const toolCall = state.toolCalls[event.toolCallId]
-      if (!toolCall) {
+      if (!toolCall || isTerminalToolCall(toolCall)) {
         return state
       }
 
       const shouldClearApproval = clearsPendingApproval(state, toolCall)
       return {
         ...state,
-        status: 'running',
-        ...(shouldClearApproval ? { pendingApprovalId: undefined } : {}),
+        ...(shouldClearApproval ? { status: 'running' as const, pendingApprovalId: undefined } : {}),
         toolCalls: {
           ...state.toolCalls,
           [toolCall.id]: {
@@ -82,7 +91,7 @@ export function reduceWorkAssistantEvent(
 
     case 'tool.completed': {
       const toolCall = state.toolCalls[event.toolCallId]
-      if (!toolCall) {
+      if (!toolCall || isTerminalToolCall(toolCall)) {
         return state
       }
 
@@ -104,9 +113,16 @@ export function reduceWorkAssistantEvent(
     }
 
     case 'subagent.started':
+      if (state.subagents[event.subagent.id]) {
+        return state
+      }
+
       return {
         ...state,
-        subagents: { ...state.subagents, [event.subagent.id]: event.subagent },
+        subagents: {
+          ...state.subagents,
+          [event.subagent.id]: { ...event.subagent, status: 'running' },
+        },
         lastActivityAt: event.at,
       }
 

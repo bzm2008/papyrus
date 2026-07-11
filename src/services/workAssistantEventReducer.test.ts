@@ -7,6 +7,7 @@ import {
   type AssistantSubagent,
   type AssistantToolCall,
   type AssistantToolResult,
+  type WorkAssistantRun,
 } from './workAssistantProtocol'
 
 const toolCall = (id = 'tool-1'): AssistantToolCall => ({
@@ -92,6 +93,32 @@ describe('reduceWorkAssistantEvent', () => {
     expect(resumed).toMatchObject({ status: 'running', pendingApprovalId: undefined })
   })
 
+  it('keeps a pending approval active until its tool reports progress or completion', () => {
+    const firstStarted = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-1'), at: 1,
+    })
+    const secondStarted = reduceWorkAssistantEvent(firstStarted, {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-2'), at: 2,
+    })
+    const awaitingApproval = reduceWorkAssistantEvent(secondStarted, {
+      type: 'approval.required', runId: 'run-1', request: { ...preview, id: 'approval-2', toolCallId: 'tool-2' }, at: 3,
+    })
+    const afterUnrelatedProgress = reduceWorkAssistantEvent(awaitingApproval, {
+      type: 'tool.progress', runId: 'run-1', toolCallId: 'tool-1', message: 'Still searching', at: 4,
+    })
+    const afterUnrelatedCompletion = reduceWorkAssistantEvent(afterUnrelatedProgress, {
+      type: 'tool.completed', runId: 'run-1', toolCallId: 'tool-1', result: successfulResult, at: 5,
+    })
+    const afterMatchingCompletion = reduceWorkAssistantEvent(afterUnrelatedCompletion, {
+      type: 'tool.completed', runId: 'run-1', toolCallId: 'tool-2', result: successfulResult, at: 6,
+    })
+
+    expect(afterUnrelatedProgress).toMatchObject({ status: 'awaiting_approval', pendingApprovalId: 'approval-2' })
+    expect(afterUnrelatedProgress.toolCalls['tool-1']).toMatchObject({ status: 'running', progress: { message: 'Still searching' } })
+    expect(afterUnrelatedCompletion).toMatchObject({ status: 'awaiting_approval', pendingApprovalId: 'approval-2' })
+    expect(afterMatchingCompletion).toMatchObject({ status: 'running', pendingApprovalId: undefined })
+  })
+
   it('does not create calls for unknown tool events', () => {
     const initial = createEmptyWorkAssistantRun('run-1')
 
@@ -108,6 +135,40 @@ describe('reduceWorkAssistantEvent', () => {
     expect(afterProgress).toBe(initial)
     expect(afterCompletion).toBe(initial)
     expect(afterApproval).toBe(initial)
+  })
+
+  it('does not mutate terminal tool calls with progress, completion, or approval events', () => {
+    const terminalCalls: AssistantToolCall[] = [
+      { ...toolCall(), status: 'completed', endedAt: 10, result: successfulResult },
+      { ...toolCall(), status: 'failed', endedAt: 11, result: { ok: false, summary: 'Failed' } },
+      { ...toolCall(), status: 'cancelled', endedAt: 12 },
+    ]
+    const stateWith = (call: AssistantToolCall): WorkAssistantRun => ({
+      ...createEmptyWorkAssistantRun('run-1'), status: 'running', toolCalls: { 'tool-1': call },
+    })
+
+    for (const call of terminalCalls) {
+      for (const event of [
+        { type: 'tool.progress' as const, runId: 'run-1', toolCallId: 'tool-1', message: 'Late progress', at: 13 },
+        { type: 'tool.completed' as const, runId: 'run-1', toolCallId: 'tool-1', result: successfulResult, at: 14 },
+        { type: 'approval.required' as const, runId: 'run-1', request: preview, at: 15 },
+      ]) {
+        const state = stateWith(call)
+        expect(reduceWorkAssistantEvent(state, event)).toBe(state)
+      }
+    }
+  })
+
+  it('does not overwrite a tool call when a duplicate start arrives', () => {
+    const started = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall(), at: 10,
+    })
+    const duplicate = reduceWorkAssistantEvent(started, {
+      type: 'tool.started', runId: 'run-1', toolCall: { ...toolCall(), intent: 'Overwrite attempt', arguments: {} }, at: 11,
+    })
+
+    expect(duplicate).toBe(started)
+    expect(duplicate.toolCalls['tool-1'].intent).toBe('Search the workspace')
   })
 
   it('tracks subagent progress and completion without reviving terminal subagents', () => {
@@ -127,6 +188,18 @@ describe('reduceWorkAssistantEvent', () => {
     expect(progressed.subagents['agent-1']).toMatchObject({ status: 'running', currentTool: 'workspace.read', progress: ['Reading files'] })
     expect(completed.subagents['agent-1']).toMatchObject({ status: 'completed', summary: 'Done', endedAt: 22 })
     expect(lateProgress).toBe(completed)
+  })
+
+  it('starts a new subagent as running and ignores duplicate starts', () => {
+    const started = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'subagent.started', runId: 'run-1', subagent: subagent(), at: 20,
+    })
+    const duplicate = reduceWorkAssistantEvent(started, {
+      type: 'subagent.started', runId: 'run-1', subagent: { ...subagent(), status: 'completed', summary: 'Overwrite attempt' }, at: 21,
+    })
+
+    expect(started.subagents['agent-1'].status).toBe('running')
+    expect(duplicate).toBe(started)
   })
 
   it('retains the newest 24 subagent progress entries', () => {
@@ -172,5 +245,39 @@ describe('reduceWorkAssistantEvent', () => {
     expect(completed).toMatchObject({ status: 'completed', messageText: 'Final answer', lastActivityAt: 40 })
     expect(failed).toMatchObject({ status: 'failed', error: 'Connection lost', lastActivityAt: 41 })
     expect(otherRunEvent).toBe(completed)
+  })
+
+  it('does not allow any later same-run event to alter terminal runs', () => {
+    const started = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall(), at: 30,
+    })
+    const completed = reduceWorkAssistantEvent(started, {
+      type: 'run.completed', runId: 'run-1', response: 'Final answer', at: 31,
+    })
+    const failed = reduceWorkAssistantEvent(started, {
+      type: 'run.failed', runId: 'run-1', code: 'NETWORK', message: 'Connection lost', recoverable: true, at: 32,
+    })
+    const cancelled = reduceWorkAssistantEvent(started, { type: 'run.cancelled', runId: 'run-1', at: 33 })
+    const lateEvents = [
+      { type: 'run.started' as const, runId: 'run-1', at: 34 },
+      { type: 'message.delta' as const, runId: 'run-1', messageId: 'late', delta: 'Late text', at: 35 },
+      { type: 'stage.changed' as const, runId: 'run-1', stage: 'late', at: 36 },
+      { type: 'tool.started' as const, runId: 'run-1', toolCall: toolCall('late-tool'), at: 37 },
+      { type: 'tool.progress' as const, runId: 'run-1', toolCallId: 'tool-1', message: 'Late progress', at: 38 },
+      { type: 'approval.required' as const, runId: 'run-1', request: preview, at: 39 },
+      { type: 'tool.completed' as const, runId: 'run-1', toolCallId: 'tool-1', result: successfulResult, at: 40 },
+      { type: 'subagent.started' as const, runId: 'run-1', subagent: subagent('late-agent'), at: 41 },
+      { type: 'subagent.progress' as const, runId: 'run-1', subagentId: 'late-agent', message: 'Late progress', at: 42 },
+      { type: 'subagent.completed' as const, runId: 'run-1', subagentId: 'late-agent', summary: 'Late completion', at: 43 },
+      { type: 'run.completed' as const, runId: 'run-1', response: 'Late response', at: 44 },
+      { type: 'run.failed' as const, runId: 'run-1', code: 'LATE', message: 'Late failure', recoverable: false, at: 45 },
+      { type: 'run.cancelled' as const, runId: 'run-1', at: 46 },
+    ]
+
+    for (const terminalRun of [completed, failed, cancelled]) {
+      for (const event of lateEvents) {
+        expect(reduceWorkAssistantEvent(terminalRun, event)).toBe(terminalRun)
+      }
+    }
   })
 })
