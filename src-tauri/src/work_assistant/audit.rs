@@ -1,5 +1,7 @@
 use crate::work_assistant::{WorkAssistantError, WorkAssistantState};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::{
     fs,
     io::Write,
@@ -7,6 +9,32 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+
+#[cfg(test)]
+thread_local! {
+    static AUDIT_LOCK_TEST_HOOK: RefCell<Option<Box<dyn FnOnce(&std::sync::Mutex<()>)>>> =
+        RefCell::new(None);
+}
+
+#[cfg(test)]
+fn install_audit_lock_test_hook(hook: Box<dyn FnOnce(&std::sync::Mutex<()>)>) {
+    AUDIT_LOCK_TEST_HOOK.with(|slot| {
+        assert!(
+            slot.borrow().is_none(),
+            "audit lock test hook is already installed"
+        );
+        *slot.borrow_mut() = Some(hook);
+    });
+}
+
+#[cfg(test)]
+fn run_audit_lock_test_hook(audit_guard: &std::sync::Mutex<()>) {
+    AUDIT_LOCK_TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(audit_guard);
+        }
+    });
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +60,8 @@ pub fn append_audit_entry(
     state: &WorkAssistantState,
     entry: &AuditEntry,
 ) -> Result<(), WorkAssistantError> {
+    #[cfg(test)]
+    run_audit_lock_test_hook(&state.audit_guard);
     let _guard = state
         .audit_guard
         .lock()
@@ -93,6 +123,8 @@ pub fn read_audit_entries(path: &Path) -> Result<Vec<AuditEntry>, WorkAssistantE
 }
 
 pub fn clear_audit_entries(state: &WorkAssistantState) -> Result<(), WorkAssistantError> {
+    #[cfg(test)]
+    run_audit_lock_test_hook(&state.audit_guard);
     let _guard = state
         .audit_guard
         .lock()
@@ -132,9 +164,8 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         fs,
-        sync::{mpsc, Arc, Barrier, Mutex, RwLock},
+        sync::{mpsc, Arc, Mutex, RwLock, TryLockError},
         thread,
-        time::Duration,
     };
     use uuid::Uuid;
 
@@ -236,52 +267,44 @@ mod tests {
         let state = Arc::new(test_state(&directory));
         let path = state.audit_path.clone();
         let held_guard = state.audit_guard.lock().unwrap();
-        let append_ready = Arc::new(Barrier::new(2));
-        let (append_attempt_tx, append_attempt_rx) = mpsc::channel();
-        let (append_complete_tx, append_complete_rx) = mpsc::channel();
+        let (append_contended_tx, append_contended_rx) = mpsc::channel();
         let append_state = Arc::clone(&state);
-        let append_ready_worker = Arc::clone(&append_ready);
 
         let append = thread::spawn(move || {
-            append_ready_worker.wait();
-            append_attempt_tx.send(()).unwrap();
-            append_audit_entry(&append_state, &AuditEntry::new("saved", "ok")).unwrap();
-            append_complete_tx.send(()).unwrap();
+            install_audit_lock_test_hook(Box::new(move |audit_guard| {
+                assert!(matches!(
+                    audit_guard.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                append_contended_tx.send(()).unwrap();
+            }));
+            append_audit_entry(&append_state, &AuditEntry::new("saved", "ok"))
         });
 
-        append_ready.wait();
-        append_attempt_rx.recv().unwrap();
-        assert!(append_complete_rx
-            .recv_timeout(Duration::from_secs(1))
-            .is_err());
+        append_contended_rx.recv().unwrap();
         drop(held_guard);
-        append.join().unwrap();
-        append_complete_rx.recv().unwrap();
+        append.join().unwrap().unwrap();
         let entries = read_audit_entries(&path).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].event, "saved");
 
         let held_guard = state.audit_guard.lock().unwrap();
-        let clear_ready = Arc::new(Barrier::new(2));
-        let (clear_attempt_tx, clear_attempt_rx) = mpsc::channel();
-        let (clear_complete_tx, clear_complete_rx) = mpsc::channel();
+        let (clear_contended_tx, clear_contended_rx) = mpsc::channel();
         let clear_state = Arc::clone(&state);
-        let clear_ready_worker = Arc::clone(&clear_ready);
         let clear = thread::spawn(move || {
-            clear_ready_worker.wait();
-            clear_attempt_tx.send(()).unwrap();
-            clear_audit_entries(&clear_state).unwrap();
-            clear_complete_tx.send(()).unwrap();
+            install_audit_lock_test_hook(Box::new(move |audit_guard| {
+                assert!(matches!(
+                    audit_guard.try_lock(),
+                    Err(TryLockError::WouldBlock)
+                ));
+                clear_contended_tx.send(()).unwrap();
+            }));
+            clear_audit_entries(&clear_state)
         });
 
-        clear_ready.wait();
-        clear_attempt_rx.recv().unwrap();
-        assert!(clear_complete_rx
-            .recv_timeout(Duration::from_secs(1))
-            .is_err());
+        clear_contended_rx.recv().unwrap();
         drop(held_guard);
-        clear.join().unwrap();
-        clear_complete_rx.recv().unwrap();
+        clear.join().unwrap().unwrap();
         assert!(read_audit_entries(&path).unwrap().is_empty());
 
         fs::remove_dir_all(directory).unwrap();
