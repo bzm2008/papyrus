@@ -122,6 +122,10 @@ mod tests {
         assert!(!encoded.contains(&*directory.to_string_lossy()));
         assert_eq!(preview.id.len(), 36);
         assert_eq!(preview.target_summary, "已授权的工作区");
+        assert_eq!(
+            state.previews.lock().unwrap()[&preview.id].tool_call_id,
+            "call-1"
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -316,7 +320,7 @@ pub fn create_native_file_preview(
     request: NativePreviewRequest,
 ) -> Result<AssistantToolPreview, WorkAssistantError> {
     let batch = batch_preview_request_from_native(&request)?;
-    let preview = create_batch_preview(state, batch)?;
+    let preview = create_batch_preview_with_tool_call(state, batch, request.tool_call_id)?;
     let risk = assistant_risk(&preview.risk)?;
     let reversible = risk == AssistantRiskLevel::Reversible;
 
@@ -348,6 +352,14 @@ pub fn create_batch_preview(
     state: &WorkAssistantState,
     request: BatchPreviewRequest,
 ) -> Result<BatchPreview, WorkAssistantError> {
+    create_batch_preview_with_tool_call(state, request, String::new())
+}
+
+fn create_batch_preview_with_tool_call(
+    state: &WorkAssistantState,
+    request: BatchPreviewRequest,
+    tool_call_id: String,
+) -> Result<BatchPreview, WorkAssistantError> {
     let roots = state
         .roots
         .read()
@@ -376,6 +388,7 @@ pub fn create_batch_preview(
             StoredPreview {
                 id: preview.preview_id.clone(),
                 run: preview.run_id.clone(),
+                tool_call_id,
                 revision: preview.revision,
                 risk: preview.risk.clone(),
                 scope: vec![preview.root_id.clone()],

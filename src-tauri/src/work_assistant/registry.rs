@@ -353,6 +353,7 @@ mod tests {
         let preview = |scope: &str| crate::work_assistant::StoredPreview {
             id: format!("preview-{scope}"),
             run: "run".into(),
+            tool_call_id: String::new(),
             revision: 1,
             risk: "read".into(),
             scope: vec![scope.into()],

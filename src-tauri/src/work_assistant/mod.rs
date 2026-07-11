@@ -31,6 +31,7 @@ use uuid::Uuid;
 pub struct StoredPreview {
     pub id: String,
     pub run: String,
+    pub(crate) tool_call_id: String,
     pub revision: u64,
     pub risk: String,
     pub scope: Vec<String>,
