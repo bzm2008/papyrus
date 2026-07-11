@@ -12,7 +12,7 @@ const MAX_RUN_ID_LENGTH: usize = 128;
 
 pub fn capability_statuses() -> Vec<CapabilityStatus> {
     let platform = std::env::consts::OS.to_string();
-    ["root_management", "audit_log", "run_cancellation"]
+    let mut capabilities: Vec<_> = ["root_management", "audit_log", "run_cancellation"]
         .into_iter()
         .map(|name| CapabilityStatus {
             name: name.into(),
@@ -21,7 +21,78 @@ pub fn capability_statuses() -> Vec<CapabilityStatus> {
             reason: None,
             platform: platform.clone(),
         })
-        .collect()
+        .collect();
+    capabilities.extend(file_operation_capabilities(&platform));
+    capabilities
+}
+
+fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
+    let capability = |name: &str, available: bool, reason: Option<&str>| CapabilityStatus {
+        name: name.into(),
+        toolset: "workspace".into(),
+        available,
+        reason: reason.map(str::to_owned),
+        platform: platform.into(),
+    };
+
+    let (copy_available, create_directory_available, unavailable_reason) =
+        if cfg!(any(unix, windows)) {
+            (true, true, None)
+        } else {
+            (
+                false,
+                false,
+                Some("secure destination operations are not available on this platform"),
+            )
+        };
+
+    let mut capabilities = vec![
+        capability("file_copy", copy_available, unavailable_reason),
+        capability(
+            "file_create_directory",
+            create_directory_available,
+            unavailable_reason,
+        ),
+        capability(
+            "file_trash",
+            false,
+            Some("trash is unavailable until it supports handle-bound deletion"),
+        ),
+        capability(
+            "file_overwrite",
+            false,
+            Some("overwrite is unavailable until it supports handle-bound trashing"),
+        ),
+    ];
+
+    #[cfg(windows)]
+    {
+        capabilities.push(capability(
+            "file_move",
+            true,
+            Some("available for same-volume moves; cross-volume moves are blocked"),
+        ));
+        capabilities.push(capability(
+            "file_rename",
+            true,
+            Some("available for same-volume renames"),
+        ));
+    }
+    #[cfg(not(windows))]
+    {
+        capabilities.push(capability(
+            "file_move",
+            false,
+            Some("move is unavailable without a no-replace relative operation"),
+        ));
+        capabilities.push(capability(
+            "file_rename",
+            false,
+            Some("rename is unavailable without a no-replace relative operation"),
+        ));
+    }
+
+    capabilities
 }
 
 #[tauri::command]
@@ -207,10 +278,43 @@ mod tests {
         assert!(capabilities
             .iter()
             .any(|capability| capability.name == "root_management"));
-        assert!(capabilities.iter().all(|capability| capability.available));
         assert!(capabilities
             .iter()
-            .all(|capability| capability.toolset == "work_assistant"));
+            .filter(|capability| capability.toolset == "work_assistant")
+            .all(|capability| capability.available));
+    }
+
+    #[test]
+    fn file_operation_capabilities_explicitly_describe_current_platform_limits() {
+        let capabilities = capability_statuses();
+        let capability = |name: &str| {
+            capabilities
+                .iter()
+                .find(|candidate| candidate.name == name)
+                .unwrap_or_else(|| panic!("missing capability {name}"))
+        };
+
+        assert!(capability("file_copy").available);
+        assert!(capability("file_create_directory").available);
+        assert!(!capability("file_trash").available);
+        assert!(!capability("file_overwrite").available);
+        assert!(capability("file_trash").reason.is_some());
+        assert!(capability("file_overwrite").reason.is_some());
+
+        #[cfg(windows)]
+        {
+            assert!(capability("file_move").available);
+            assert!(capability("file_rename").available);
+            assert!(capability("file_move")
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("cross-volume")));
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(!capability("file_move").available);
+            assert!(!capability("file_rename").available);
+        }
     }
 
     #[test]

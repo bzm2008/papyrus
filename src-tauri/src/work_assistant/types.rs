@@ -13,6 +13,37 @@ pub struct CapabilityStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NativePreviewRequest {
+    pub run_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantRiskLevel {
+    Read,
+    Reversible,
+    High,
+    Blocked,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantToolPreview {
+    pub id: String,
+    pub revision: String,
+    pub risk: AssistantRiskLevel,
+    pub title: String,
+    pub target_summary: String,
+    pub impact_summary: String,
+    pub reversible: bool,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthorizedRoot {
     pub id: String,
     pub label: String,
@@ -256,5 +287,35 @@ mod tests {
         assert_eq!(value["rootId"], "root-1");
         assert_eq!(value["conflictPolicy"], "rename");
         assert_eq!(value["operations"][0]["kind"], "copy");
+    }
+
+    #[test]
+    fn native_preview_contract_matches_the_frontend_envelope() {
+        let request = NativePreviewRequest {
+            run_id: "run-1".into(),
+            tool_call_id: "call-1".into(),
+            tool_name: "file_plan_batch".into(),
+            arguments: serde_json::json!({
+                "rootId": "root-1",
+                "operations": [],
+                "conflictPolicy": "skip",
+            }),
+        };
+        let preview = AssistantToolPreview {
+            id: "preview-1".into(),
+            revision: "42".into(),
+            risk: AssistantRiskLevel::Reversible,
+            title: "文件操作预览".into(),
+            target_summary: "已授权的工作区".into(),
+            impact_summary: "1 项文件操作".into(),
+            reversible: true,
+            expires_at: 1,
+        };
+
+        let request_value = serde_json::to_value(request).unwrap();
+        let preview_value = serde_json::to_value(preview).unwrap();
+        assert_eq!(request_value["toolCallId"], "call-1");
+        assert_eq!(preview_value["expiresAt"], 1);
+        assert_eq!(preview_value["risk"], "reversible");
     }
 }

@@ -3,7 +3,7 @@ mod tests {
     use super::*;
     use crate::work_assistant::{
         AuthorizedRoot, AuthorizedRootKind, BatchPreviewRequest, ConflictPolicy, FileOperationKind,
-        FileOperationRequest, WorkAssistantState,
+        FileOperationRequest, NativePreviewRequest, WorkAssistantState,
     };
     use std::{
         collections::{HashMap, HashSet},
@@ -49,6 +49,81 @@ mod tests {
             }],
             conflict_policy: policy,
         }
+    }
+
+    #[test]
+    fn native_preview_converter_only_accepts_the_batch_plan_protocol() {
+        let request = NativePreviewRequest {
+            run_id: "run-1".into(),
+            tool_call_id: "call-1".into(),
+            tool_name: "file_plan_batch".into(),
+            arguments: serde_json::json!({
+                "rootId": "root-1",
+                "operations": [{
+                    "kind": "copy",
+                    "source": "inbox/a.txt",
+                    "destination": "archive/a.txt",
+                }],
+                "conflictPolicy": "rename",
+            }),
+        };
+
+        let batch = batch_preview_request_from_native(&request).unwrap();
+        assert_eq!(batch.run_id, "run-1");
+        assert_eq!(batch.root_id, "root-1");
+        assert_eq!(batch.conflict_policy, ConflictPolicy::Rename);
+
+        let unknown = NativePreviewRequest {
+            tool_name: "workspace_scan".into(),
+            ..request.clone()
+        };
+        assert_eq!(
+            batch_preview_request_from_native(&unknown)
+                .unwrap_err()
+                .code,
+            "blocked"
+        );
+
+        let malformed = NativePreviewRequest {
+            arguments: serde_json::json!({ "operations": [] }),
+            ..request
+        };
+        assert_eq!(
+            batch_preview_request_from_native(&malformed)
+                .unwrap_err()
+                .code,
+            "protocol"
+        );
+    }
+
+    #[test]
+    fn native_preview_response_redacts_absolute_workspace_paths() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("source.txt"), "source").unwrap();
+        let state = state(root(&directory), &directory);
+        let request = NativePreviewRequest {
+            run_id: "run-1".into(),
+            tool_call_id: "call-1".into(),
+            tool_name: "file_plan_batch".into(),
+            arguments: serde_json::json!({
+                "rootId": "root",
+                "operations": [{
+                    "kind": "copy",
+                    "source": "source.txt",
+                    "destination": "archive/source.txt",
+                }],
+                "conflictPolicy": "skip",
+            }),
+        };
+
+        let preview = create_native_file_preview(&state, request).unwrap();
+        let encoded = serde_json::to_string(&preview).unwrap();
+        assert!(!encoded.contains(&*directory.to_string_lossy()));
+        assert_eq!(preview.id.len(), 36);
+        assert_eq!(preview.target_summary, "已授权的工作区");
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -169,9 +244,10 @@ mod tests {
     }
 }
 use crate::work_assistant::{
-    append_audit_entry, ApprovalChoice, ApprovalGrant, AuditEntry, AuthorizedRoot, BatchPreview,
-    BatchPreviewRequest, ConflictPolicy, FileOperationKind, FileOperationRequest, PathPolicy,
-    StoredApproval, StoredPreview, WorkAssistantError, WorkAssistantState,
+    append_audit_entry, ApprovalChoice, ApprovalGrant, AssistantRiskLevel, AssistantToolPreview,
+    AuditEntry, AuthorizedRoot, BatchPreview, BatchPreviewRequest, ConflictPolicy,
+    FileOperationKind, FileOperationRequest, NativePreviewRequest, PathPolicy, StoredApproval,
+    StoredPreview, WorkAssistantError, WorkAssistantState,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -190,6 +266,82 @@ const APPROVAL_LIFETIME_SECONDS: u64 = 5 * 60;
 pub(crate) struct CalculatedPreview {
     pub revision: u64,
     pub risk: String,
+}
+
+/// Converts the public frontend envelope into the existing private batch request. The model may
+/// only request a named plan; run ownership always comes from the envelope, never its arguments.
+pub fn batch_preview_request_from_native(
+    request: &NativePreviewRequest,
+) -> Result<BatchPreviewRequest, WorkAssistantError> {
+    if request.tool_name != "file_plan_batch" {
+        return Err(WorkAssistantError::blocked(
+            "this native preview only supports file_plan_batch",
+        ));
+    }
+    if request.run_id.trim().is_empty() || request.tool_call_id.trim().is_empty() {
+        return Err(WorkAssistantError::protocol(
+            "native preview requires a run id and tool call id",
+        ));
+    }
+
+    let mut arguments = request.arguments.clone();
+    let object = arguments.as_object_mut().ok_or_else(|| {
+        WorkAssistantError::protocol("file_plan_batch arguments must be a JSON object")
+    })?;
+    if object
+        .get("rootId")
+        .and_then(Value::as_str)
+        .is_none_or(|root_id| root_id.trim().is_empty())
+    {
+        return Err(WorkAssistantError::protocol(
+            "file_plan_batch requires a rootId",
+        ));
+    }
+    if !object.contains_key("operations") || !object.contains_key("conflictPolicy") {
+        return Err(WorkAssistantError::protocol(
+            "file_plan_batch requires operations and conflictPolicy",
+        ));
+    }
+    object.insert("runId".into(), Value::String(request.run_id.clone()));
+
+    serde_json::from_value(arguments).map_err(|error| {
+        WorkAssistantError::protocol(format!("file_plan_batch arguments are invalid: {error}"))
+    })
+}
+
+/// Creates the only frontend-visible file preview. It intentionally exposes opaque identifiers
+/// and aggregate descriptions, not local filesystem paths or the stored operation payload.
+pub fn create_native_file_preview(
+    state: &WorkAssistantState,
+    request: NativePreviewRequest,
+) -> Result<AssistantToolPreview, WorkAssistantError> {
+    let batch = batch_preview_request_from_native(&request)?;
+    let preview = create_batch_preview(state, batch)?;
+    let risk = assistant_risk(&preview.risk)?;
+    let reversible = risk == AssistantRiskLevel::Reversible;
+
+    Ok(AssistantToolPreview {
+        id: preview.preview_id,
+        revision: preview.revision.to_string(),
+        risk,
+        title: "文件操作预览".into(),
+        target_summary: "已授权的工作区".into(),
+        impact_summary: format!("{} 项文件操作", preview.operation_count),
+        reversible,
+        expires_at: preview.expires,
+    })
+}
+
+fn assistant_risk(risk: &str) -> Result<AssistantRiskLevel, WorkAssistantError> {
+    match risk {
+        "read" => Ok(AssistantRiskLevel::Read),
+        "reversible" => Ok(AssistantRiskLevel::Reversible),
+        "high" => Ok(AssistantRiskLevel::High),
+        "blocked" => Ok(AssistantRiskLevel::Blocked),
+        _ => Err(WorkAssistantError::protocol(
+            "stored preview has an unknown risk level",
+        )),
+    }
 }
 
 pub fn create_batch_preview(
