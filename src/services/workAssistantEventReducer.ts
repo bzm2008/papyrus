@@ -50,6 +50,10 @@ export function reduceWorkAssistantEvent(
     }
 
     case 'approval.required': {
+      if (state.pendingApprovalId !== undefined) {
+        return state
+      }
+
       const toolCall = state.toolCalls[event.request.toolCallId]
       if (!toolCall || isTerminalToolCall(toolCall)) {
         return state

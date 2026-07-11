@@ -93,6 +93,51 @@ describe('reduceWorkAssistantEvent', () => {
     expect(resumed).toMatchObject({ status: 'running', pendingApprovalId: undefined })
   })
 
+  it('preserves the current approval when another tool requests approval concurrently', () => {
+    const firstStarted = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-1'), at: 1,
+    })
+    const secondStarted = reduceWorkAssistantEvent(firstStarted, {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-2'), at: 2,
+    })
+    const awaitingFirstApproval = reduceWorkAssistantEvent(secondStarted, {
+      type: 'approval.required', runId: 'run-1', request: preview, at: 3,
+    })
+    const afterSecondApproval = reduceWorkAssistantEvent(awaitingFirstApproval, {
+      type: 'approval.required', runId: 'run-1', request: { ...preview, id: 'approval-2', toolCallId: 'tool-2' }, at: 4,
+    })
+
+    expect(afterSecondApproval).toBe(awaitingFirstApproval)
+    expect(afterSecondApproval).toMatchObject({ status: 'awaiting_approval', pendingApprovalId: 'approval-1' })
+    expect(afterSecondApproval.toolCalls['tool-1']).toMatchObject({ status: 'awaiting_approval', preview })
+    expect(afterSecondApproval.toolCalls['tool-2']).toMatchObject({ status: 'running' })
+  })
+
+  it('accepts another approval after the current approval is resolved', () => {
+    const firstStarted = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-1'), at: 1,
+    })
+    const secondStarted = reduceWorkAssistantEvent(firstStarted, {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-2'), at: 2,
+    })
+    const awaitingFirstApproval = reduceWorkAssistantEvent(secondStarted, {
+      type: 'approval.required', runId: 'run-1', request: preview, at: 3,
+    })
+    const firstResolved = reduceWorkAssistantEvent(awaitingFirstApproval, {
+      type: 'tool.progress', runId: 'run-1', toolCallId: 'tool-1', message: 'Approved', at: 4,
+    })
+    const awaitingSecondApproval = reduceWorkAssistantEvent(firstResolved, {
+      type: 'approval.required', runId: 'run-1', request: { ...preview, id: 'approval-2', toolCallId: 'tool-2' }, at: 5,
+    })
+
+    expect(firstResolved).toMatchObject({ status: 'running', pendingApprovalId: undefined })
+    expect(awaitingSecondApproval).toMatchObject({ status: 'awaiting_approval', pendingApprovalId: 'approval-2' })
+    expect(awaitingSecondApproval.toolCalls['tool-2']).toMatchObject({
+      status: 'awaiting_approval',
+      preview: { ...preview, id: 'approval-2', toolCallId: 'tool-2' },
+    })
+  })
+
   it('keeps a pending approval active until its tool reports progress or completion', () => {
     const firstStarted = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
       type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-1'), at: 1,
