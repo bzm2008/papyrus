@@ -8,6 +8,12 @@ describe('effectiveRisk', () => {
     expect(effectiveRisk('high', 'read')).toBe('high')
     expect(effectiveRisk('read', 'unexpected')).toBe('blocked')
   })
+
+  it('fails closed when either risk is an inherited or unknown string', () => {
+    expect(effectiveRisk('toString', 'read')).toBe('blocked')
+    expect(effectiveRisk('read', 'toString')).toBe('blocked')
+    expect(effectiveRisk('unknown-risk')).toBe('blocked')
+  })
 })
 
 describe('approvalChoices', () => {
@@ -16,6 +22,11 @@ describe('approvalChoices', () => {
     expect(approvalChoices('reversible')).toEqual(['once', 'run', 'deny'])
     expect(approvalChoices('high')).toEqual(['once', 'deny'])
     expect(approvalChoices('blocked')).toEqual(['deny'])
+  })
+
+  it('returns only deny for inherited and unknown risks', () => {
+    expect(approvalChoices('toString')).toEqual(['deny'])
+    expect(approvalChoices('unknown-risk')).toEqual(['deny'])
   })
 })
 

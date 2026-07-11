@@ -32,6 +32,16 @@ describe('WORK_ASSISTANT_TOOLS', () => {
     expect(tools.map((tool) => tool.name)).not.toContain('browser_snapshot')
   })
 
+  it('excludes unavailable tools even when their toolset and platform are enabled', () => {
+    const tools = enabledToolDefinitions({
+      platform: 'windows',
+      enabledToolsets: ['desktop'],
+      availability: { desktop: false },
+    })
+
+    expect(tools.map((tool) => tool.name)).not.toContain('desktop_status')
+  })
+
   it('declares strict object schemas and bounds batch plans', () => {
     for (const tool of WORK_ASSISTANT_TOOLS) {
       expect(tool.inputSchema).toMatchObject({ type: 'object', additionalProperties: false })

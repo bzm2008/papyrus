@@ -29,7 +29,9 @@ const riskRank: Record<AssistantRiskLevel, number> = {
 }
 
 function normalizeRisk(risk: unknown): AssistantRiskLevel {
-  return typeof risk === 'string' && risk in riskRank ? risk as AssistantRiskLevel : 'blocked'
+  return typeof risk === 'string' && Object.prototype.hasOwnProperty.call(riskRank, risk)
+    ? risk as AssistantRiskLevel
+    : 'blocked'
 }
 
 export function effectiveRisk(defaultRisk: unknown, previewRisk?: unknown): AssistantRiskLevel {
