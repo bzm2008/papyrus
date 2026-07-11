@@ -86,6 +86,31 @@ pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<Prepared
     Ok(PreparedRecoveryHandles { root: root_guard, vault: vault_guard, slot })
 }
 
+/// Revalidation consumes only retained capabilities and adapter-private leaf/path metadata.
+/// No model or consumer path enters this operation.
+pub(crate) fn verify_bound_source(
+    root: &File,
+    parent: &File,
+    source: &File,
+    leaf: &str,
+    parent_path: &Path,
+) -> Result<(PlatformFileIdentity, PlatformFileIdentity), WorkAssistantError> {
+    let root_identity = file_identity(root)?;
+    let source_identity = file_identity(source)?;
+    let _parent_identity = file_identity(parent)?;
+    let current = open_handle(&parent_path.join(leaf), false)?;
+    reject_reparse(&current, "source")?;
+    let metadata = current.metadata().map_err(blocked_io("could not inspect source"))?;
+    if !metadata.is_file() {
+        return Err(WorkAssistantError::blocked("approved source must be a regular file"));
+    }
+    let current_identity = file_identity(&current)?;
+    if current_identity != source_identity {
+        return Err(WorkAssistantError::stale_preview("the source file identity changed after preview"));
+    }
+    Ok((root_identity, current_identity))
+}
+
 const PRIVATE_RECOVERY_DACL: &str = "D:P(A;;FA;;;OW)";
 
 fn create_private_directory(path: &Path, allow_existing: bool) -> Result<(), WorkAssistantError> {

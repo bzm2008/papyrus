@@ -72,6 +72,25 @@ pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<Prepared
     Ok(PreparedRecoveryHandles { root, vault, slot: leaf_directory })
 }
 
+/// The retained parent descriptor is the only namespace used for the leaf re-open.
+pub(crate) fn verify_bound_source(
+    root: &File,
+    parent: &File,
+    source: &File,
+    leaf: &str,
+) -> Result<(PlatformFileIdentity, PlatformFileIdentity), WorkAssistantError> {
+    let root_identity = identity(root)?;
+    let source_identity = identity(source)?;
+    let leaf = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("invalid source leaf"))?;
+    validate_regular_at(parent.as_raw_fd(), &leaf)?;
+    let current = openat_regular(parent.as_raw_fd(), &leaf)?;
+    let current_identity = identity(&current)?;
+    if current_identity != source_identity {
+        return Err(WorkAssistantError::stale_preview("the source file identity changed after preview"));
+    }
+    Ok((root_identity, current_identity))
+}
+
 fn open_root(root: &Path) -> Result<File, WorkAssistantError> {
     let file = OpenOptions::new()
         .read(true)

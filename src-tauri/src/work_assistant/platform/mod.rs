@@ -59,7 +59,7 @@ pub struct SourceSnapshot {
 
 // Task 3 receives only this bound adapter, never a caller-supplied full source path.
 trait PlatformSource {
-    fn verify_snapshot(&self, root: &Path, expected: &SourceSnapshotSummary) -> Result<(), WorkAssistantError>;
+    fn verify_snapshot(&self) -> Result<(), WorkAssistantError>;
     fn copy_to_staging(&self) -> Result<(), WorkAssistantError>;
     fn move_to_recovery(&self) -> Result<(), WorkAssistantError>;
     fn publish_staging(&self) -> Result<(), WorkAssistantError>;
@@ -76,21 +76,27 @@ struct BoundPlatformSource {
     parent: File,
     source: File,
     leaf: String,
-    relative: String,
+    root_identity: PlatformFileIdentity,
+    source_identity: PlatformFileIdentity,
     #[cfg(windows)]
     parent_path: PathBuf,
 }
 
 impl PlatformSource for BoundPlatformSource {
-    fn verify_snapshot(&self, root: &Path, expected: &SourceSnapshotSummary) -> Result<(), WorkAssistantError> {
-        // Keep all capabilities alive for the entire snapshot lifetime. The current
-        // Task 2 verifier reopens only through this sealed adapter's stored leaf.
-        let _ = (&self.root, &self.parent, &self.source, &self.leaf);
-        match open_source_snapshot(root, &self.relative) {
-            Ok(current) => current.require_summary_identity(expected),
-            Err(_) => Err(WorkAssistantError::stale_preview(
-                "the workspace or source changed after preview",
-            )),
+    fn verify_snapshot(&self) -> Result<(), WorkAssistantError> {
+        let identities = {
+            #[cfg(windows)]
+            { windows::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_path) }
+            #[cfg(target_os = "linux")]
+            { linux::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf) }
+            #[cfg(target_os = "macos")]
+            { macos::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf) }
+            #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+            { Err(WorkAssistantError::blocked("identity-bound source snapshots are not available on this platform")) }
+        };
+        match identities {
+            Ok((root, source)) if root == self.root_identity && source == self.source_identity => Ok(()),
+            _ => Err(WorkAssistantError::stale_preview("the workspace or source changed after preview")),
         }
     }
     fn copy_to_staging(&self) -> Result<(), WorkAssistantError> { unavailable_operation("copy_to_staging") }
@@ -147,8 +153,8 @@ impl SourceSnapshot {
         &self.file
     }
 
-    pub fn verify_snapshot(&self, root: &Path) -> Result<(), WorkAssistantError> {
-        self.platform.verify_snapshot(root, &self.summary)
+    pub fn verify_snapshot(&self) -> Result<(), WorkAssistantError> {
+        self.platform.verify_snapshot()
     }
 
     pub(crate) fn copy_to_staging(&self) -> Result<(), WorkAssistantError> { self.platform.copy_to_staging() }
@@ -195,7 +201,8 @@ pub fn open_source_snapshot(
             parent: opened.parent,
             source: opened.source,
             leaf: opened.leaf,
-            relative: original_relative_path.clone(),
+            root_identity: opened.root_identity.clone(),
+            source_identity: opened.source_identity.clone(),
             #[cfg(windows)]
             parent_path: opened.parent_path,
         },
@@ -334,12 +341,12 @@ fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRe
 }
 
 #[cfg(target_os = "linux")]
-fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<File, WorkAssistantError> {
+fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
     linux::prepare_recovery_vault(root, leaf)
 }
 
 #[cfg(target_os = "macos")]
-fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<File, WorkAssistantError> {
+fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
     macos::prepare_recovery_vault(root, leaf)
 }
 
@@ -387,7 +394,7 @@ mod tests {
         let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
         fs::remove_file(&source).unwrap();
         fs::write(&source, "replacement").unwrap();
-        let error = snapshot.verify_snapshot(&root).unwrap_err();
+        let error = snapshot.verify_snapshot().unwrap_err();
 
         assert_eq!(error.code, "stale_preview");
         fs::remove_dir_all(root).unwrap();
