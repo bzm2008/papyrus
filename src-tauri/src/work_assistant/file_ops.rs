@@ -57,14 +57,8 @@ mod tests {
         request: BatchPreviewRequest,
     ) -> BatchExecutionRequest {
         let preview = create_batch_preview(state, request).unwrap();
-        let grant = approve_batch_preview(
-            state,
-            &preview.preview_id,
-            preview.revision,
-            ApprovalChoice::Once,
-        )
-        .unwrap()
-        .unwrap();
+        let grant =
+            approve_batch_preview(state, &preview.preview_id, "run", ApprovalChoice::Once).unwrap();
         BatchExecutionRequest {
             preview_id: preview.preview_id,
             revision: preview.revision,
@@ -95,6 +89,21 @@ mod tests {
             fs::read_to_string(directory.join("source.txt")).unwrap(),
             "source"
         );
+        assert!(!directory.join("destination.txt").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn stored_preview_execution_requires_an_explicit_approval_token() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("source.txt"), "source").unwrap();
+        let state = state(root(&directory), &directory);
+        let preview = create_batch_preview(&state, copy_request(ConflictPolicy::Skip)).unwrap();
+
+        let error = execute_stored_preview(&state, &preview.preview_id, None).unwrap_err();
+
+        assert_eq!(error.code, "blocked");
         assert!(!directory.join("destination.txt").exists());
         fs::remove_dir_all(directory).unwrap();
     }
@@ -189,6 +198,91 @@ mod tests {
         );
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn directory_copy_is_rejected_before_an_overwrite_can_trash_the_destination() {
+        let directory = test_dir();
+        fs::create_dir_all(directory.join("source-directory")).unwrap();
+        fs::write(directory.join("source-directory/file.txt"), "source").unwrap();
+        fs::write(directory.join("destination.txt"), "keep me").unwrap();
+        let state = state(root(&directory), &directory);
+        let request = BatchPreviewRequest {
+            run_id: "run".into(),
+            root_id: "root".into(),
+            operations: vec![FileOperationRequest {
+                kind: FileOperationKind::Copy,
+                source: Some("source-directory".into()),
+                destination: Some("destination.txt".into()),
+            }],
+            conflict_policy: ConflictPolicy::Overwrite,
+        };
+        let error = create_batch_preview(&state, request).unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        assert_eq!(
+            fs::read_to_string(directory.join("destination.txt")).unwrap(),
+            "keep me"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn one_time_approval_covers_every_item_in_its_preview_batch() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("source.txt"), "source").unwrap();
+        fs::write(directory.join("second.txt"), "second").unwrap();
+        let state = state(root(&directory), &directory);
+        let mut request = copy_request(ConflictPolicy::Skip);
+        request.operations.push(FileOperationRequest {
+            kind: FileOperationKind::Copy,
+            source: Some("second.txt".into()),
+            destination: Some("second-destination.txt".into()),
+        });
+        let execution = approved_execution(&state, request);
+
+        let result = execute_batch_file_operations(&state, execution).unwrap();
+
+        assert_eq!(result.completed.len(), 2);
+        assert_eq!(
+            fs::read_to_string(directory.join("destination.txt")).unwrap(),
+            "source"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("second-destination.txt")).unwrap(),
+            "second"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn run_approval_is_charged_by_operation_count_atomically() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("source.txt"), "source").unwrap();
+        fs::write(directory.join("second.txt"), "second").unwrap();
+        let state = state(root(&directory), &directory);
+        let mut request = copy_request(ConflictPolicy::Skip);
+        request.operations.push(FileOperationRequest {
+            kind: FileOperationKind::Copy,
+            source: Some("second.txt".into()),
+            destination: Some("second-destination.txt".into()),
+        });
+        let preview = create_batch_preview(&state, request).unwrap();
+        let grant =
+            approve_batch_preview(&state, &preview.preview_id, "run", ApprovalChoice::Run).unwrap();
+        let execution = BatchExecutionRequest {
+            preview_id: preview.preview_id,
+            revision: preview.revision,
+            token: grant.token.clone(),
+        };
+
+        let result = execute_batch_file_operations(&state, execution).unwrap();
+
+        assert_eq!(result.completed.len(), 2);
+        assert_eq!(state.approvals.lock().unwrap()[&grant.token].used_count, 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 use crate::work_assistant::{
     append_audit_entry, validate_preview_fresh, ApprovalChoice, AssistantErrorPayload, AuditEntry,
@@ -203,7 +297,7 @@ use std::{
 use tauri::State;
 
 #[tauri::command]
-pub fn work_assistant_preview_file_operations(
+pub fn work_assistant_preview(
     state: State<'_, WorkAssistantState>,
     request: BatchPreviewRequest,
 ) -> Result<BatchPreview, AssistantErrorPayload> {
@@ -211,35 +305,56 @@ pub fn work_assistant_preview_file_operations(
 }
 
 #[tauri::command]
-pub fn work_assistant_approve_file_operations(
+pub fn work_assistant_approve(
     state: State<'_, WorkAssistantState>,
     preview_id: String,
-    revision: u64,
+    run_id: String,
     choice: ApprovalChoice,
-) -> Result<Option<crate::work_assistant::ApprovalGrant>, AssistantErrorPayload> {
-    crate::work_assistant::approve_batch_preview(&state, &preview_id, revision, choice)
+) -> Result<crate::work_assistant::ApprovalGrant, AssistantErrorPayload> {
+    crate::work_assistant::approve_batch_preview(&state, &preview_id, &run_id, choice)
         .map_err(Into::into)
 }
 
 #[tauri::command]
-pub fn work_assistant_execute_file_operations(
+pub fn work_assistant_execute(
     state: State<'_, WorkAssistantState>,
-    request: BatchExecutionRequest,
+    preview_id: String,
+    approval_token: Option<String>,
 ) -> Result<BatchExecutionResult, AssistantErrorPayload> {
-    execute_batch_file_operations(&state, request).map_err(Into::into)
+    execute_stored_preview(&state, &preview_id, approval_token).map_err(Into::into)
+}
+
+fn execute_stored_preview(
+    state: &WorkAssistantState,
+    preview_id: &str,
+    approval_token: Option<String>,
+) -> Result<BatchExecutionResult, WorkAssistantError> {
+    let token = approval_token
+        .ok_or_else(|| WorkAssistantError::blocked("a native approval token is required"))?;
+    let (preview, _) = crate::work_assistant::validate_preview_by_id_fresh(state, preview_id)?;
+    execute_batch_file_operations(
+        state,
+        BatchExecutionRequest {
+            preview_id: preview.id,
+            revision: preview.revision,
+            token,
+        },
+    )
 }
 
 pub fn execute_batch_file_operations(
     state: &WorkAssistantState,
     execution: BatchExecutionRequest,
 ) -> Result<BatchExecutionResult, WorkAssistantError> {
-    let approval = validate_approval(state, &execution)?;
     let (preview, request) =
         validate_preview_fresh(state, &execution.preview_id, execution.revision)?;
+    let required_count = u32::try_from(request.operations.len())
+        .map_err(|_| WorkAssistantError::blocked("preview has too many operations"))?;
+    let approval = validate_approval(state, &execution, required_count)?;
     if is_run_cancelled(state, &request.run_id)? {
         return Ok(cancelled_result(&request.operations, 0));
     }
-    consume_approval(state, &execution, &preview, &approval)?;
+    consume_approval(state, &execution, &preview, &approval, required_count)?;
 
     let roots = state
         .roots
@@ -323,7 +438,7 @@ fn execute_one(
             let path = operation.destination.as_deref().ok_or_else(|| {
                 WorkAssistantError::blocked("destination is required for this operation")
             })?;
-            Some(policy.resolve_destination(root_id, path)?)
+            Some(policy.resolve_safe_destination(root_id, path)?)
         }
         FileOperationKind::Trash => None,
     };
@@ -343,6 +458,19 @@ fn execute_one(
             "source and destination must be different paths",
         ));
     }
+
+    if let Some(source) = source.as_ref() {
+        let metadata = fs::metadata(source).map_err(file_error)?;
+        if matches!(
+            operation.kind,
+            FileOperationKind::Copy | FileOperationKind::Move | FileOperationKind::Rename
+        ) && !metadata.is_file()
+        {
+            return Err(WorkAssistantError::blocked(
+                "copy, move, and rename support regular files only",
+            ));
+        }
+    }
     if destination_path.exists() {
         match conflict_policy {
             ConflictPolicy::Skip => {
@@ -350,18 +478,17 @@ fn execute_one(
                     "destination already exists".into(),
                 ))
             }
-            ConflictPolicy::Rename => *destination_path = renamed_destination(&*destination_path)?,
+            ConflictPolicy::Rename => {
+                *destination_path = renamed_destination(&*destination_path)?;
+                policy.verify_safe_destination(root_id, destination_path)?;
+            }
             ConflictPolicy::Overwrite => trash_path(&*destination_path)?,
         }
     }
+    policy.verify_safe_destination(root_id, destination_path)?;
     match operation.kind {
         FileOperationKind::Copy => {
             let source = source.expect("copy requires source");
-            if !fs::metadata(&source).map_err(file_error)?.is_file() {
-                return Err(WorkAssistantError::blocked(
-                    "copy supports regular files only",
-                ));
-            }
             fs::copy(&source, &*destination_path).map_err(file_error)?;
             Ok(OneOperationResult::Completed("copied regular file".into()))
         }
@@ -370,11 +497,6 @@ fn execute_one(
             match fs::rename(&source, &*destination_path) {
                 Ok(()) => Ok(OneOperationResult::Completed("renamed source".into())),
                 Err(error) if is_cross_device_error(&error) => {
-                    if !fs::metadata(&source).map_err(file_error)?.is_file() {
-                        return Err(WorkAssistantError::blocked(
-                            "cross-volume directory moves are not allowed",
-                        ));
-                    }
                     fs::copy(&source, &*destination_path).map_err(file_error)?;
                     trash_path(&source)?;
                     Ok(OneOperationResult::Completed(
@@ -403,6 +525,7 @@ fn execute_one(
 fn validate_approval(
     state: &WorkAssistantState,
     execution: &BatchExecutionRequest,
+    required_count: u32,
 ) -> Result<StoredApproval, WorkAssistantError> {
     let approval = state
         .approvals
@@ -415,7 +538,10 @@ fn validate_approval(
         || approval.preview != execution.preview_id
         || approval.revision != execution.revision
         || approval.expires <= unix_seconds()
-        || approval.used_count >= approval.max_count
+        || approval
+            .used_count
+            .checked_add(required_count)
+            .is_none_or(|count| count > approval.max_count)
     {
         return Err(WorkAssistantError::blocked(
             "approval token is invalid or has expired",
@@ -441,6 +567,7 @@ fn consume_approval(
     execution: &BatchExecutionRequest,
     preview: &StoredPreview,
     expected: &StoredApproval,
+    required_count: u32,
 ) -> Result<(), WorkAssistantError> {
     let mut approvals = state
         .approvals
@@ -455,13 +582,19 @@ fn consume_approval(
         || approval.scope != preview.scope
         || approval.expires <= unix_seconds()
         || approval.used_count != expected.used_count
-        || approval.used_count >= approval.max_count
+        || approval
+            .used_count
+            .checked_add(required_count)
+            .is_none_or(|count| count > approval.max_count)
     {
         return Err(WorkAssistantError::blocked(
             "approval token is no longer valid",
         ));
     }
-    approval.used_count += 1;
+    approval.used_count = approval
+        .used_count
+        .checked_add(required_count)
+        .ok_or_else(|| WorkAssistantError::blocked("approval item count overflow"))?;
     if approval.once {
         approvals.remove(&execution.token);
     }

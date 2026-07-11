@@ -117,6 +117,33 @@ mod tests {
         assert_eq!(error.code, "stale_preview");
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn preview_rejects_directory_move_before_it_can_prepare_an_overwrite() {
+        let directory = test_dir();
+        fs::create_dir_all(directory.join("source-directory")).unwrap();
+        fs::write(directory.join("source-directory/file.txt"), "source").unwrap();
+        fs::write(directory.join("destination.txt"), "keep me").unwrap();
+        let request = BatchPreviewRequest {
+            run_id: "run".into(),
+            root_id: "root".into(),
+            operations: vec![FileOperationRequest {
+                kind: FileOperationKind::Move,
+                source: Some("source-directory".into()),
+                destination: Some("destination.txt".into()),
+            }],
+            conflict_policy: ConflictPolicy::Overwrite,
+        };
+
+        let error = build_batch_preview(&[root(&directory)], &request).unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        assert_eq!(
+            fs::read_to_string(directory.join("destination.txt")).unwrap(),
+            "keep me"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 use crate::work_assistant::{
     append_audit_entry, ApprovalChoice, ApprovalGrant, AuditEntry, AuthorizedRoot, BatchPreview,
@@ -194,18 +221,19 @@ pub fn create_batch_preview(
 pub fn approve_batch_preview(
     state: &WorkAssistantState,
     preview_id: &str,
-    revision: u64,
+    run_id: &str,
     choice: ApprovalChoice,
-) -> Result<Option<ApprovalGrant>, WorkAssistantError> {
+) -> Result<ApprovalGrant, WorkAssistantError> {
     let preview = stored_preview(state, preview_id)?;
-    if preview.revision != revision {
-        return Err(WorkAssistantError::stale_preview(
-            "preview revision does not match",
+    if preview.run != run_id {
+        return Err(WorkAssistantError::blocked(
+            "approval run does not match preview",
         ));
     }
     if preview.expires <= unix_seconds() {
         return Err(WorkAssistantError::stale_preview("preview has expired"));
     }
+    let max_count = request_from_payload(&preview.payload)?.operations.len() as u32;
 
     let choice_label = match choice {
         ApprovalChoice::Once => "once",
@@ -225,7 +253,9 @@ pub fn approve_batch_preview(
             .lock()
             .map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?
             .retain(|_, approval| approval.preview != preview.id);
-        return Ok(None);
+        return Err(WorkAssistantError::blocked(
+            "file operation approval was denied",
+        ));
     }
 
     let token = Uuid::new_v4().to_string();
@@ -248,15 +278,11 @@ pub fn approve_batch_preview(
                 scope: preview.scope,
                 once: choice == ApprovalChoice::Once,
                 expires: grant.expires,
-                max_count: if choice == ApprovalChoice::Once {
-                    1
-                } else {
-                    MAX_OPERATIONS as u32
-                },
+                max_count,
                 used_count: 0,
             },
         );
-    Ok(Some(grant))
+    Ok(grant)
 }
 
 pub(crate) fn validate_preview_fresh(
@@ -286,6 +312,14 @@ pub(crate) fn validate_preview_fresh(
         ));
     }
     Ok((preview, request))
+}
+
+pub(crate) fn validate_preview_by_id_fresh(
+    state: &WorkAssistantState,
+    preview_id: &str,
+) -> Result<(StoredPreview, BatchPreviewRequest), WorkAssistantError> {
+    let preview = stored_preview(state, preview_id)?;
+    validate_preview_fresh(state, preview_id, preview.revision)
 }
 
 pub(crate) fn build_batch_preview(
@@ -331,6 +365,15 @@ pub(crate) fn build_batch_preview(
             let metadata = fs::metadata(&source).map_err(|error| {
                 WorkAssistantError::blocked(format!("could not inspect source path: {error}"))
             })?;
+            if matches!(
+                operation.kind,
+                FileOperationKind::Copy | FileOperationKind::Move | FileOperationKind::Rename
+            ) && !metadata.is_file()
+            {
+                return Err(WorkAssistantError::blocked(
+                    "copy, move, and rename support regular files only",
+                ));
+            }
             if metadata.is_file() {
                 total_source_bytes = total_source_bytes.saturating_add(metadata.len());
             }

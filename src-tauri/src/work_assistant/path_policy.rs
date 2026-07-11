@@ -43,6 +43,65 @@ impl<'a> PathPolicy<'a> {
         Ok(candidate)
     }
 
+    /// Resolves a destination and rejects every existing link/reparse point on the path.
+    /// The check is repeated immediately before each pathname mutation by file operations.
+    pub fn resolve_safe_destination(
+        &self,
+        root_id: &str,
+        requested_path: impl AsRef<Path>,
+    ) -> Result<PathBuf, WorkAssistantError> {
+        let candidate = self.resolve_destination(root_id, requested_path)?;
+        self.verify_safe_destination(root_id, &candidate)?;
+        Ok(candidate)
+    }
+
+    pub fn verify_safe_destination(
+        &self,
+        root_id: &str,
+        candidate: &Path,
+    ) -> Result<(), WorkAssistantError> {
+        let root = self.authorized_root(root_id)?;
+        let root_path = canonical_root(root)?;
+        let relative = candidate.strip_prefix(&root_path).map_err(|_| {
+            WorkAssistantError::path_outside_workspace(
+                "destination is outside the authorized workspace",
+            )
+        })?;
+        let mut current = root_path.clone();
+        for component in relative.components() {
+            current.push(component.as_os_str());
+            match fs::symlink_metadata(&current) {
+                Ok(metadata) => {
+                    if is_link_or_reparse_point(&metadata) {
+                        return Err(WorkAssistantError::blocked(
+                            "destination paths may not contain links or reparse points",
+                        ));
+                    }
+                    let resolved = fs::canonicalize(&current).map_err(|error| {
+                        WorkAssistantError::blocked(format!(
+                            "could not verify destination path: {error}"
+                        ))
+                    })?;
+                    ensure_within_root(&root_path, &resolved)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if current != candidate {
+                        return Err(WorkAssistantError::blocked(
+                            "destination parent directory does not exist",
+                        ));
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(WorkAssistantError::blocked(format!(
+                        "could not inspect destination path: {error}"
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn authorized_root(&self, root_id: &str) -> Result<&AuthorizedRoot, WorkAssistantError> {
         self.roots
             .iter()
@@ -70,6 +129,18 @@ impl<'a> PathPolicy<'a> {
 
         Ok(root.join(requested_path))
     }
+}
+
+#[cfg(windows)]
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    metadata.file_type().is_symlink() || metadata.file_attributes() & 0x0400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse_point(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 pub fn validate_authorized_root(
@@ -347,6 +418,34 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, "path_outside_workspace");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_destination_rejects_a_destination_parent_that_is_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_dir();
+        let root_path = directory.join("workspace");
+        let outside_path = directory.join("outside");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::create_dir_all(&outside_path).unwrap();
+        symlink(&outside_path, root_path.join("mutable")).unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&root_path).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let error = PathPolicy::new(&[root])
+            .resolve_safe_destination("root", Path::new("mutable/output.txt"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        assert!(!outside_path.join("output.txt").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 }
