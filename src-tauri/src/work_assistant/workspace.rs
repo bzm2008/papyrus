@@ -99,9 +99,12 @@ pub fn search_workspace(
             truncated = true;
             break;
         }
+        let path = policy.resolve_existing(root_id, Path::new(&entry.path))?;
+        if !is_eligible_workspace_path(Path::new(&entry.path), &path, &entry.extension) {
+            continue;
+        }
         let name_matches = entry.name.to_lowercase().contains(&needle);
         let content_matches = if entry.kind == "file" && is_text_extension(&entry.extension) {
-            let path = policy.resolve_existing(root_id, Path::new(&entry.path))?;
             read_text_limited(&path)
                 .map(|text| text.to_lowercase().contains(&needle))
                 .unwrap_or(false)
@@ -129,6 +132,11 @@ pub fn inspect_file(
         return Err(WorkAssistantError::blocked("workspace path is not a file"));
     }
     let extension = extension_for(&path);
+    if !is_eligible_workspace_path(requested_path, &path, &extension) {
+        return Err(WorkAssistantError::blocked(
+            "this workspace file is not eligible for inspection",
+        ));
+    }
     if !is_text_extension(&extension) {
         return Err(WorkAssistantError::blocked(
             "this file type cannot be inspected as text",
@@ -177,7 +185,8 @@ fn collect_entries(
         };
         let name = entry.file_name().to_string_lossy().to_string();
         let relative_path = relative_directory.join(&name);
-        if is_excluded_name(&name) || has_hidden_or_system_attribute(&entry.path()) {
+        if relative_path.components().count() > MAX_SCAN_DEPTH {
+            scan.truncated = true;
             continue;
         }
         let resolved = match policy.resolve_existing(root_id, &relative_path) {
@@ -189,6 +198,10 @@ fn collect_entries(
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
+        let extension = extension_for(&resolved);
+        if !is_eligible_workspace_path(&relative_path, &resolved, &extension) {
+            continue;
+        }
         if metadata.is_dir() {
             scan.entries
                 .push(workspace_entry(&name, &relative_path, "directory", "", 0));
@@ -198,10 +211,6 @@ fn collect_entries(
                 scan.truncated = true;
             }
         } else if metadata.is_file() {
-            let extension = extension_for(&resolved);
-            if is_dangerous_extension(&extension) {
-                continue;
-            }
             scan.entries.push(workspace_entry(
                 &name,
                 &relative_path,
@@ -260,6 +269,14 @@ fn is_excluded_name(name: &str) -> bool {
             name,
             "node_modules" | "target" | "dist" | "build" | "vendor"
         )
+}
+
+fn is_eligible_workspace_path(relative_path: &Path, resolved_path: &Path, extension: &str) -> bool {
+    relative_path
+        .components()
+        .all(|component| !is_excluded_name(&component.as_os_str().to_string_lossy()))
+        && !has_hidden_or_system_attribute(resolved_path)
+        && !is_dangerous_extension(extension)
 }
 
 fn is_dangerous_extension(extension: &str) -> bool {
@@ -338,7 +355,7 @@ fn has_hidden_or_system_attribute(_: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{inspect_file, scan_workspace};
+    use super::{inspect_file, scan_workspace, search_workspace};
     use crate::work_assistant::{AuthorizedRoot, AuthorizedRootKind};
     use std::{
         fs,
@@ -400,6 +417,38 @@ mod tests {
     }
 
     #[test]
+    fn scan_excludes_entries_deeper_than_eight_relative_components() {
+        let directory = test_dir();
+        let mut nested = directory.clone();
+        for level in 1..=9 {
+            nested = nested.join(format!("level-{level}"));
+            fs::create_dir_all(&nested).unwrap();
+        }
+        fs::write(nested.join("too-deep.txt"), "hidden by depth limit").unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&directory).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let scan = scan_workspace(&[root], "root").unwrap();
+
+        assert!(scan.truncated);
+        assert!(scan
+            .entries
+            .iter()
+            .all(|entry| { Path::new(&entry.path).components().count() <= 8 }));
+        assert!(!scan.entries.iter().any(|entry| entry.name == "level-9"));
+        assert!(!scan
+            .entries
+            .iter()
+            .any(|entry| entry.name == "too-deep.txt"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn inspect_rejects_executables_and_oversized_text() {
         let directory = test_dir();
         fs::create_dir_all(&directory).unwrap();
@@ -419,6 +468,34 @@ mod tests {
 
         assert_eq!(executable.code, "blocked");
         assert_eq!(oversized.code, "blocked");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn direct_inspect_and_search_exclude_hidden_and_dangerous_text_files() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(".env"), "SECRET=needle").unwrap();
+        fs::write(directory.join("tool.js"), "const needle = true;").unwrap();
+        fs::write(directory.join("notes.txt"), "needle").unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&directory).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let hidden = inspect_file(&[root.clone()], "root", Path::new(".env")).unwrap_err();
+        let dangerous = inspect_file(&[root.clone()], "root", Path::new("tool.js")).unwrap_err();
+        let search = search_workspace(&[root], "root", "needle").unwrap();
+
+        assert_eq!(hidden.code, "blocked");
+        assert_eq!(dangerous.code, "blocked");
+        assert!(hidden.message.contains("not eligible"));
+        assert!(dangerous.message.contains("not eligible"));
+        assert_eq!(search.entries.len(), 1);
+        assert_eq!(search.entries[0].name, "notes.txt");
         fs::remove_dir_all(directory).unwrap();
     }
 }

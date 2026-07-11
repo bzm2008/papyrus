@@ -31,9 +31,6 @@ pub fn run() {
       rag_query,
       mcp_search,
       read_project_guidance,
-      read_binary_file,
-      read_text_file,
-      scan_project_folder,
       web_search,
       health_check_backend,
       check_sqlite_status,
@@ -64,14 +61,6 @@ pub fn run() {
 struct ProjectGuidancePayload {
   style: String,
   world: String,
-}
-
-#[derive(Serialize)]
-struct ProjectFileEntry {
-  name: String,
-  path: String,
-  kind: String,
-  extension: String,
 }
 
 #[derive(Serialize)]
@@ -418,26 +407,6 @@ fn mcp_search(query: String) -> Vec<String> {
 }
 
 #[tauri::command]
-fn read_text_file(path: String) -> Result<String, String> {
-  fs::read_to_string(path).map_err(|error| format!("读取文件失败：{}", error))
-}
-
-#[tauri::command]
-fn read_binary_file(path: String) -> Result<Vec<u8>, String> {
-  fs::read(path).map_err(|error| format!("读取文件失败：{}", error))
-}
-
-#[tauri::command]
-fn scan_project_folder(path: String) -> Result<Vec<ProjectFileEntry>, String> {
-  let root = PathBuf::from(path);
-  let mut entries = Vec::new();
-
-  collect_project_files(&root, 0, &mut entries)?;
-
-  Ok(entries)
-}
-
-#[tauri::command]
 async fn web_search(query: String) -> Result<Vec<WebSearchResult>, String> {
   let trimmed = query.trim();
 
@@ -539,53 +508,26 @@ fn directory_size(path: &PathBuf) -> u64 {
     .sum()
 }
 
-fn collect_project_files(
-  dir: &PathBuf,
-  depth: usize,
-  entries: &mut Vec<ProjectFileEntry>,
-) -> Result<(), String> {
-  if depth > 4 || entries.len() >= 120 {
-    return Ok(());
-  }
+#[cfg(test)]
+mod security_tests {
+  #[test]
+  fn legacy_arbitrary_path_commands_are_not_registered() {
+    let source = include_str!("lib.rs");
+    let handler_start = source
+      .find(".invoke_handler(tauri::generate_handler![")
+      .expect("invoke handler must be declared");
+    let handler_end = source[handler_start..]
+      .find("])\n    .run")
+      .expect("invoke handler must close");
+    let handler = &source[handler_start..handler_start + handler_end];
 
-  let read_dir = fs::read_dir(dir).map_err(|error| format!("扫描目录失败：{}", error))?;
-
-  for entry in read_dir.flatten() {
-    let path = entry.path();
-    let name = entry.file_name().to_string_lossy().to_string();
-
-    if name.starts_with('.') || name == "node_modules" || name == "target" || name == "dist" {
-      continue;
-    }
-
-    if path.is_dir() {
-      entries.push(ProjectFileEntry {
-        name,
-        path: path.to_string_lossy().to_string(),
-        kind: "folder".into(),
-        extension: String::new(),
-      });
-      collect_project_files(&path, depth + 1, entries)?;
-      continue;
-    }
-
-    let extension = path
-      .extension()
-      .and_then(|ext| ext.to_str())
-      .unwrap_or("")
-      .to_lowercase();
-
-    if matches!(extension.as_str(), "txt" | "md" | "docx" | "html" | "htm") {
-      entries.push(ProjectFileEntry {
-        name,
-        path: path.to_string_lossy().to_string(),
-        kind: "file".into(),
-        extension,
-      });
+    for command in ["read_text_file", "read_binary_file", "scan_project_folder"] {
+      assert!(
+        !handler.contains(command),
+        "legacy arbitrary-path command {command} must not be exposed through invoke"
+      );
     }
   }
-
-  Ok(())
 }
 
 fn parse_duckduckgo_results(html: &str) -> Vec<WebSearchResult> {

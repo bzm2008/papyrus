@@ -174,7 +174,9 @@ fn is_sensitive_root(path: &Path) -> Result<bool, WorkAssistantError> {
 
     Ok(path.components().any(|component| {
         let name = component.as_os_str().to_string_lossy();
-        name.eq_ignore_ascii_case(".ssh") || name.eq_ignore_ascii_case("credentials")
+        name.eq_ignore_ascii_case(".ssh")
+            || name.eq_ignore_ascii_case("credential")
+            || name.eq_ignore_ascii_case("credentials")
     }))
 }
 
@@ -292,6 +294,22 @@ mod tests {
         let error = validate_authorized_root(&nested_path, &[existing]).unwrap_err();
 
         assert_eq!(error.code, "blocked");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn root_validation_rejects_credential_directories_case_insensitively() {
+        let directory = test_dir();
+        let credential = directory.join("CrEdEnTiAl");
+        let credentials = directory.join("cReDeNtIaLs");
+        fs::create_dir_all(&credential).unwrap();
+        fs::create_dir_all(&credentials).unwrap();
+
+        let credential_error = validate_authorized_root(&credential, &[]).unwrap_err();
+        let credentials_error = validate_authorized_root(&credentials, &[]).unwrap_err();
+
+        assert_eq!(credential_error.code, "blocked");
+        assert_eq!(credentials_error.code, "blocked");
         fs::remove_dir_all(directory).unwrap();
     }
 
