@@ -8,6 +8,8 @@ use std::{
 };
 use tauri::Manager;
 
+mod work_assistant;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -15,6 +17,7 @@ pub fn run() {
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .setup(|app| {
+      app.manage(work_assistant::init_state(&app.handle())?);
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()
@@ -39,7 +42,14 @@ pub fn run() {
       rebuild_project_index,
       test_model_connection,
       llm_chat,
-      open_external_url
+      open_external_url,
+      work_assistant::work_assistant_capabilities,
+      work_assistant::work_assistant_list_roots,
+      work_assistant::work_assistant_add_root,
+      work_assistant::work_assistant_remove_root,
+      work_assistant::work_assistant_list_audit,
+      work_assistant::work_assistant_clear_audit,
+      work_assistant::work_assistant_cancel_run
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
