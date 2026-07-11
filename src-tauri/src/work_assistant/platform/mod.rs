@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 #[cfg(target_os = "linux")]
@@ -54,6 +54,53 @@ pub struct RecoveryReceipt {
 pub struct SourceSnapshot {
     file: File,
     summary: SourceSnapshotSummary,
+    platform: BoundPlatformSource,
+}
+
+// Task 3 receives only this bound adapter, never a caller-supplied full source path.
+trait PlatformSource {
+    fn verify_snapshot(&self, root: &Path, expected: &SourceSnapshotSummary) -> Result<(), WorkAssistantError>;
+    fn copy_to_staging(&self) -> Result<(), WorkAssistantError>;
+    fn move_to_recovery(&self) -> Result<(), WorkAssistantError>;
+    fn publish_staging(&self) -> Result<(), WorkAssistantError>;
+    fn create_directory(&self) -> Result<(), WorkAssistantError>;
+}
+
+/// Sealed native capability retained with the snapshot.  Task 3 will receive this
+/// capability, never a caller supplied source or destination path.  On POSIX an
+/// ancestor can still be moved by another process after it has been opened; the
+/// retained descriptors make that boundary explicit and every transaction must
+/// revalidate identities before publishing.
+struct BoundPlatformSource {
+    root: File,
+    parent: File,
+    source: File,
+    leaf: String,
+    relative: String,
+    #[cfg(windows)]
+    parent_path: PathBuf,
+}
+
+impl PlatformSource for BoundPlatformSource {
+    fn verify_snapshot(&self, root: &Path, expected: &SourceSnapshotSummary) -> Result<(), WorkAssistantError> {
+        // Keep all capabilities alive for the entire snapshot lifetime. The current
+        // Task 2 verifier reopens only through this sealed adapter's stored leaf.
+        let _ = (&self.root, &self.parent, &self.source, &self.leaf);
+        match open_source_snapshot(root, &self.relative) {
+            Ok(current) => current.require_summary_identity(expected),
+            Err(_) => Err(WorkAssistantError::stale_preview(
+                "the workspace or source changed after preview",
+            )),
+        }
+    }
+    fn copy_to_staging(&self) -> Result<(), WorkAssistantError> { unavailable_operation("copy_to_staging") }
+    fn move_to_recovery(&self) -> Result<(), WorkAssistantError> { unavailable_operation("move_to_recovery") }
+    fn publish_staging(&self) -> Result<(), WorkAssistantError> { unavailable_operation("publish_staging") }
+    fn create_directory(&self) -> Result<(), WorkAssistantError> { unavailable_operation("create_directory") }
+}
+
+fn unavailable_operation(operation: &str) -> Result<(), WorkAssistantError> {
+    Err(WorkAssistantError::blocked(format!("{operation} is reserved for the native transaction executor")))
 }
 
 impl SourceSnapshot {
@@ -99,13 +146,24 @@ impl SourceSnapshot {
     pub(crate) fn file(&self) -> &File {
         &self.file
     }
+
+    pub fn verify_snapshot(&self, root: &Path) -> Result<(), WorkAssistantError> {
+        self.platform.verify_snapshot(root, &self.summary)
+    }
+
+    pub(crate) fn copy_to_staging(&self) -> Result<(), WorkAssistantError> { self.platform.copy_to_staging() }
+    pub(crate) fn move_to_recovery(&self) -> Result<(), WorkAssistantError> { self.platform.move_to_recovery() }
+    pub(crate) fn publish_staging(&self) -> Result<(), WorkAssistantError> { self.platform.publish_staging() }
+    pub(crate) fn create_directory(&self) -> Result<(), WorkAssistantError> { self.platform.create_directory() }
 }
 
 /// A freshly created, private recovery directory. The absolute filesystem location is kept
 /// private; the serializable receipt contains only a fixed relative original path and UUID leaf.
 pub struct PreparedRecoverySlot {
     receipt: RecoveryReceipt,
+    root: File,
     vault: File,
+    slot: File,
 }
 
 impl PreparedRecoverySlot {
@@ -114,8 +172,14 @@ impl PreparedRecoverySlot {
     }
 
     pub(crate) fn vault(&self) -> &File {
-        &self.vault
+        &self.slot
     }
+}
+
+pub(crate) struct PreparedRecoveryHandles {
+    pub(crate) root: File,
+    pub(crate) vault: File,
+    pub(crate) slot: File,
 }
 
 pub fn open_source_snapshot(
@@ -126,6 +190,15 @@ pub fn open_source_snapshot(
     let opened = open_platform_source(authorized_root, Path::new(&original_relative_path))?;
     Ok(SourceSnapshot {
         file: opened.file,
+        platform: BoundPlatformSource {
+            root: opened.root,
+            parent: opened.parent,
+            source: opened.source,
+            leaf: opened.leaf,
+            relative: original_relative_path.clone(),
+            #[cfg(windows)]
+            parent_path: opened.parent_path,
+        },
         summary: SourceSnapshotSummary {
             original_relative_path,
             root_identity: opened.root_identity,
@@ -148,7 +221,7 @@ pub fn prepare_recovery_slot(
     }
     let recovery_leaf = uuid::Uuid::new_v4().to_string();
     validate_recovery_leaf(&recovery_leaf)?;
-    let vault = prepare_platform_recovery_vault(authorized_root, &recovery_leaf)?;
+    let handles = prepare_platform_recovery_vault(authorized_root, &recovery_leaf)?;
 
     Ok(PreparedRecoverySlot {
         receipt: RecoveryReceipt {
@@ -158,7 +231,9 @@ pub fn prepare_recovery_slot(
             recovery_leaf,
             platform_source_identity: source.source_identity.clone(),
         },
-        vault,
+        root: handles.root,
+        vault: handles.vault,
+        slot: handles.slot,
     })
 }
 
@@ -211,6 +286,12 @@ fn io_error(error: std::io::Error) -> WorkAssistantError {
 
 pub(crate) struct OpenedPlatformSource {
     file: File,
+    root: File,
+    parent: File,
+    source: File,
+    leaf: String,
+    #[cfg(windows)]
+    parent_path: PathBuf,
     root_identity: PlatformFileIdentity,
     source_identity: PlatformFileIdentity,
     byte_len: u64,
@@ -248,7 +329,7 @@ fn open_platform_source(_: &Path, _: &Path) -> Result<OpenedPlatformSource, Work
 }
 
 #[cfg(windows)]
-fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<File, WorkAssistantError> {
+fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
     windows::prepare_recovery_vault(root, leaf)
 }
 
@@ -263,7 +344,7 @@ fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<File, Work
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-fn prepare_platform_recovery_vault(_: &Path, _: &str) -> Result<File, WorkAssistantError> {
+fn prepare_platform_recovery_vault(_: &Path, _: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
     Err(WorkAssistantError::blocked(
         "private recovery storage is not available on this platform",
     ))
@@ -297,22 +378,62 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn replaced_source_identity_is_reported_as_stale_preview() {
         let root = test_dir();
         fs::create_dir_all(&root).unwrap();
         let source = root.join("document.txt");
         fs::write(&source, "first").unwrap();
         let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
-        let expected = snapshot.summary().source_identity.clone();
-        drop(snapshot);
-
         fs::remove_file(&source).unwrap();
         fs::write(&source, "replacement").unwrap();
-        let error = open_source_snapshot(&root, "document.txt")
-            .and_then(|current| current.require_identity(&expected))
-            .unwrap_err();
+        let error = snapshot.verify_snapshot(&root).unwrap_err();
 
         assert_eq!(error.code, "stale_preview");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn held_windows_snapshot_prevents_source_replacement() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("document.txt");
+        fs::write(&source, "first").unwrap();
+        let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+        let error = fs::remove_file(&source).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(32));
+        drop(snapshot);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_identity_comparison_seam_reports_replaced_source_as_stale() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("document.txt"), "first").unwrap();
+        let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+        let mut replacement = snapshot.summary().clone();
+        replacement.source_identity.file_id.push('x');
+        let error = snapshot.require_summary_identity(&replacement).unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+        drop(snapshot);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_identity_comparison_seam_reports_replaced_root_as_stale() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("document.txt"), "first").unwrap();
+        let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+        let mut replacement = snapshot.summary().clone();
+        replacement.root_identity.file_id.push('x');
+        let error = snapshot.require_summary_identity(&replacement).unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+        drop(snapshot);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -340,6 +461,24 @@ mod tests {
     }
 
     #[test]
+    fn verified_private_recovery_vault_is_reusable() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("document.txt"), "contents").unwrap();
+
+        let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+        let first = prepare_recovery_slot(&root, "preview-1", 0, snapshot.summary()).unwrap();
+        drop(first);
+
+        // A second slot must accept the pre-existing vault only after its platform
+        // privacy policy has been verified. Creating a fresh UUID leaf is expected.
+        let second = prepare_recovery_slot(&root, "preview-2", 1, snapshot.summary()).unwrap();
+        drop(second);
+        drop(snapshot);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn recovery_leaf_rejects_model_controlled_separators_and_nuls() {
         for value in ["model/name", "model\\name", "model\0name", ".."] {
             let error = validate_recovery_leaf(value).unwrap_err();
@@ -352,6 +491,52 @@ mod tests {
     fn windows_reparse_attribute_is_rejected() {
         assert!(super::windows::is_reparse_attributes(0x0400));
         assert!(!super::windows::is_reparse_attributes(0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_final_symlink_fixture_is_rejected_or_policy_skipped() {
+        use std::os::windows::fs::symlink_file;
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("target.txt"), "contents").unwrap();
+        match symlink_file("target.txt", root.join("linked.txt")) {
+            Ok(()) => {
+                let result = open_source_snapshot(&root, "linked.txt");
+                assert!(matches!(result, Err(error) if error.code == "blocked"));
+                fs::remove_dir_all(root).unwrap();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314) => {
+                println!("SKIPPED: Windows policy does not permit symlink fixtures: {error}");
+                fs::remove_dir_all(root).unwrap();
+            }
+            Err(error) => panic!("could not create Windows symlink fixture: {error}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_intermediate_symlink_fixture_is_rejected_or_policy_skipped() {
+        use std::os::windows::fs::symlink_dir;
+        let root = test_dir();
+        let outside = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("document.txt"), "contents").unwrap();
+        match symlink_dir(&outside, root.join("linked-directory")) {
+            Ok(()) => {
+                let result = open_source_snapshot(&root, "linked-directory/document.txt");
+                assert!(matches!(result, Err(error) if error.code == "blocked"));
+                fs::remove_dir_all(&root).unwrap();
+                fs::remove_dir_all(&outside).unwrap();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314) => {
+                println!("SKIPPED: Windows policy does not permit symlink fixtures: {error}");
+                fs::remove_dir_all(&root).unwrap();
+                fs::remove_dir_all(&outside).unwrap();
+            }
+            Err(error) => panic!("could not create Windows directory symlink fixture: {error}"),
+        }
     }
 
     #[cfg(unix)]

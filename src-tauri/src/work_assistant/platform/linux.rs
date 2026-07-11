@@ -1,4 +1,4 @@
-use super::{OpenedPlatformSource, PlatformFileIdentity};
+use super::{OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles};
 use crate::work_assistant::WorkAssistantError;
 use std::{
     ffi::CString,
@@ -21,6 +21,7 @@ pub(crate) fn open_source(
 ) -> Result<OpenedPlatformSource, WorkAssistantError> {
     let root = open_root(root)?;
     let root_identity = identity(&root)?;
+    let root_capability = root.try_clone().map_err(blocked_io("could not retain root handle"))?;
     let mut directory = root;
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {
@@ -40,7 +41,11 @@ pub(crate) fn open_source(
                 ));
             }
             return Ok(OpenedPlatformSource {
-                file,
+                file: file.try_clone().map_err(blocked_io("could not retain source handle"))?,
+                root: root_capability,
+                parent: directory.try_clone().map_err(blocked_io("could not retain parent handle"))?,
+                source: file,
+                leaf: name.to_string_lossy().into_owned(),
                 root_identity,
                 source_identity: identity_from_metadata(&metadata),
                 byte_len: metadata.len(),
@@ -50,7 +55,7 @@ pub(crate) fn open_source(
     Err(WorkAssistantError::blocked("source file name is missing"))
 }
 
-pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<File, WorkAssistantError> {
+pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
     let root = open_root(root)?;
     let vault_name = CString::new(RECOVERY_DIRECTORY).expect("static recovery name has no NUL");
     mkdirat_private(root.as_raw_fd(), &vault_name, true)?;
@@ -64,7 +69,7 @@ pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<File, Wo
     validate_directory_at(vault.as_raw_fd(), &leaf)?;
     let leaf_directory = openat_directory(vault.as_raw_fd(), &leaf)?;
     ensure_private_directory(&leaf_directory)?;
-    Ok(leaf_directory)
+    Ok(PreparedRecoveryHandles { root, vault, slot: leaf_directory })
 }
 
 fn open_root(root: &Path) -> Result<File, WorkAssistantError> {

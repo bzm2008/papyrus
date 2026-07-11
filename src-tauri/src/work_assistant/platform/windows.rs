@@ -1,4 +1,4 @@
-use super::{OpenedPlatformSource, PlatformFileIdentity};
+use super::{OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles};
 use crate::work_assistant::WorkAssistantError;
 use std::{
     fs::{self, File},
@@ -11,9 +11,11 @@ use std::{
     ptr,
 };
 use windows_sys::Win32::{
-    Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE},
+    Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE, LocalFree},
+    Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES},
+    Security::Authorization::{ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SE_FILE_OBJECT},
     Storage::FileSystem::{
-        CreateFileW, FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
+        CreateDirectoryW, CreateFileW, FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE,
         OPEN_EXISTING,
@@ -52,33 +54,87 @@ pub(crate) fn open_source(
         ));
     }
     let source_identity = file_identity(&file)?;
+    let leaf = relative
+        .file_name()
+        .ok_or_else(|| WorkAssistantError::blocked("source file name is missing"))?
+        .to_string_lossy()
+        .into_owned();
     Ok(OpenedPlatformSource {
-        file,
+        file: file.try_clone().map_err(blocked_io("could not retain source handle"))?,
+        root: directories[0].try_clone().map_err(blocked_io("could not retain root handle"))?,
+        parent: directories.last().unwrap().try_clone().map_err(blocked_io("could not retain parent handle"))?,
+        source: file,
+        leaf,
+        parent_path: current,
         root_identity,
         source_identity,
         byte_len: metadata.len(),
     })
 }
 
-pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<File, WorkAssistantError> {
+pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
     let root = fs::canonicalize(root).map_err(blocked_io("could not resolve authorized root"))?;
-    let _root_guard = open_verified_directory(&root)?;
+    let root_guard = open_verified_directory(&root)?;
     let vault_path = root.join(RECOVERY_DIRECTORY);
     create_private_directory(&vault_path, true)?;
-    let _vault_guard = open_verified_directory(&vault_path)?;
+    let vault_guard = open_verified_directory(&vault_path)?;
+    verify_private_dacl(&vault_guard)?;
     let leaf_path = vault_path.join(leaf);
     create_private_directory(&leaf_path, false)?;
-    open_verified_directory(&leaf_path)
+    let slot = open_verified_directory(&leaf_path)?;
+    verify_private_dacl(&slot)?;
+    Ok(PreparedRecoveryHandles { root: root_guard, vault: vault_guard, slot })
 }
 
+const PRIVATE_RECOVERY_DACL: &str = "D:P(A;;FA;;;OW)";
+
 fn create_private_directory(path: &Path, allow_existing: bool) -> Result<(), WorkAssistantError> {
-    match fs::create_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if allow_existing && error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(blocked_io("could not create private recovery directory")(
-            error,
-        )),
+    let wide = path.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // Protected owner-rights DACL: no inherited ACEs and only the directory owner receives full access.
+    let sddl: Vec<u16> = PRIVATE_RECOVERY_DACL.encode_utf16().chain(iter::once(0)).collect();
+    if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut descriptor, ptr::null_mut()) } == 0 {
+        return Err(WorkAssistantError::blocked(format!("could not build private recovery DACL: {}", std::io::Error::last_os_error())));
     }
+    let mut attributes = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor, bInheritHandle: 0 };
+    let result = unsafe { CreateDirectoryW(wide.as_ptr(), &mut attributes) };
+    unsafe { LocalFree(descriptor); }
+    if result == 0 {
+        let error = std::io::Error::last_os_error();
+        if allow_existing && error.raw_os_error() == Some(183) {
+            return Ok(());
+        }
+        return Err(WorkAssistantError::blocked(format!("could not create private recovery directory (existing directories are rejected until their DACL is verified): {}", std::io::Error::last_os_error())));
+    }
+    Ok(())
+}
+
+/// Existing recovery directories are accepted only when their DACL is exactly a
+/// protected owner-rights full-control ACE: no inherited ACEs and no other SID.
+fn verify_private_dacl(file: &File) -> Result<(), WorkAssistantError> {
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let result = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+            ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut(), &mut descriptor,
+        )
+    };
+    if result != 0 || descriptor.is_null() {
+        return Err(WorkAssistantError::blocked(format!("could not inspect recovery directory DACL: Windows error {result}")));
+    }
+    let mut text_ptr = ptr::null_mut();
+    let mut len = 0;
+    let converted = unsafe { ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, DACL_SECURITY_INFORMATION, &mut text_ptr, &mut len) };
+    unsafe { LocalFree(descriptor); }
+    if converted == 0 || text_ptr.is_null() {
+        return Err(WorkAssistantError::blocked(format!("could not serialize recovery directory DACL: {}", std::io::Error::last_os_error())));
+    }
+    let text = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(text_ptr, len as usize)) };
+    unsafe { LocalFree(text_ptr as *mut std::ffi::c_void); }
+    if text.trim_end_matches('\0') != PRIVATE_RECOVERY_DACL {
+        return Err(WorkAssistantError::blocked("recovery directory DACL is not owner-only"));
+    }
+    Ok(())
 }
 
 fn open_verified_directory(path: &Path) -> Result<File, WorkAssistantError> {
@@ -107,13 +163,14 @@ fn open_handle(path: &Path, directory: bool) -> Result<File, WorkAssistantError>
     if directory {
         flags |= FILE_FLAG_BACKUP_SEMANTICS;
     }
-    // DELETE is intentionally excluded from the share mode. It keeps an already opened root,
-    // component, or source from being replaced through a normal pathname mutation while bound.
+    // Keep all retained capabilities non-deletable: another process cannot replace
+    // the verified root, ancestor, or source while this snapshot is in flight.
+    let share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
             GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            share_mode,
             ptr::null(),
             OPEN_EXISTING,
             flags,
