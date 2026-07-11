@@ -61,6 +61,94 @@ pub struct FileInspection {
     pub truncated: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileOperationKind {
+    Copy,
+    Move,
+    Rename,
+    CreateDirectory,
+    Trash,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictPolicy {
+    Skip,
+    Rename,
+    Overwrite,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalChoice {
+    Once,
+    Run,
+    Deny,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOperationRequest {
+    pub kind: FileOperationKind,
+    pub source: Option<String>,
+    pub destination: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchPreviewRequest {
+    pub run_id: String,
+    pub root_id: String,
+    pub operations: Vec<FileOperationRequest>,
+    pub conflict_policy: ConflictPolicy,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchPreview {
+    pub preview_id: String,
+    pub run_id: String,
+    pub root_id: String,
+    pub revision: u64,
+    pub risk: String,
+    pub operation_count: usize,
+    pub expires: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalGrant {
+    pub token: String,
+    pub preview_id: String,
+    pub expires: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchExecutionRequest {
+    pub preview_id: String,
+    pub revision: u64,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchItemResult {
+    pub index: usize,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchExecutionResult {
+    pub completed: Vec<BatchItemResult>,
+    pub skipped: Vec<BatchItemResult>,
+    pub failed: Vec<BatchItemResult>,
+    pub remaining: Vec<BatchItemResult>,
+    pub cancelled: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantErrorPayload {
@@ -98,6 +186,14 @@ impl WorkAssistantError {
             code: "protocol".into(),
             message: message.into(),
             recoverable: false,
+        }
+    }
+
+    pub fn stale_preview(message: impl Into<String>) -> Self {
+        Self {
+            code: "stale_preview".into(),
+            message: message.into(),
+            recoverable: true,
         }
     }
 }
@@ -139,5 +235,26 @@ mod tests {
             serde_json::to_string(&AuthorizedRootKind::Workspace).unwrap(),
             "\"workspace\""
         );
+    }
+
+    #[test]
+    fn file_operation_contracts_use_camel_case_fields_and_snake_case_variants() {
+        let request = FileOperationRequest {
+            kind: FileOperationKind::Copy,
+            source: Some("draft.txt".into()),
+            destination: Some("archive/draft.txt".into()),
+        };
+        let batch = BatchPreviewRequest {
+            run_id: "run-1".into(),
+            root_id: "root-1".into(),
+            operations: vec![request],
+            conflict_policy: ConflictPolicy::Rename,
+        };
+
+        let value = serde_json::to_value(&batch).unwrap();
+        assert_eq!(value["runId"], "run-1");
+        assert_eq!(value["rootId"], "root-1");
+        assert_eq!(value["conflictPolicy"], "rename");
+        assert_eq!(value["operations"][0]["kind"], "copy");
     }
 }

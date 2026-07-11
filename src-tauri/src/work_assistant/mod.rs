@@ -1,11 +1,15 @@
 mod audit;
+mod file_ops;
 mod path_policy;
+mod preview;
 mod registry;
 mod types;
 mod workspace;
 
 pub use audit::*;
+pub use file_ops::*;
 pub use path_policy::*;
+pub use preview::*;
 pub use registry::*;
 pub use types::*;
 pub use workspace::*;
@@ -44,6 +48,8 @@ pub struct StoredApproval {
     pub scope: Vec<String>,
     pub once: bool,
     pub expires: u64,
+    pub max_count: u32,
+    pub used_count: u32,
 }
 
 pub struct WorkAssistantState {
