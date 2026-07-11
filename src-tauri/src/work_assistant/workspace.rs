@@ -1,8 +1,13 @@
 use crate::work_assistant::{
-    AssistantErrorPayload, AuthorizedRoot, AuthorizedRootKind, FileInspection, FileSearchResult,
-    PathPolicy, WorkAssistantError, WorkAssistantState, WorkspaceEntry, WorkspaceScan,
+    path_is_within, AssistantErrorPayload, AuthorizedRoot, AuthorizedRootKind, FileInspection,
+    FileSearchResult, PathPolicy, WorkAssistantError, WorkAssistantState, WorkspaceEntry,
+    WorkspaceScan,
 };
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
 use tauri::State;
 
 const MAX_SCAN_DEPTH: usize = 8;
@@ -110,7 +115,7 @@ pub fn search_workspace(
         let content_matches =
             if !name_matches && entry.kind == "file" && is_text_extension(&entry.extension) {
                 let candidate = root.join(&entry.path);
-                let (file, size) = match open_verified_text_file(&candidate, &path) {
+                let (file, size) = match open_verified_text_file(&candidate, &root, &path) {
                     Ok(file) => file,
                     Err(_) => continue,
                 };
@@ -153,7 +158,7 @@ pub fn inspect_file(
         ));
     }
     let candidate = root.join(requested_path);
-    let (file, _) = open_verified_text_file(&candidate, &path)?;
+    let (file, _) = open_verified_text_file(&candidate, &root, &path)?;
     let text = read_text_from_file(file)?;
     let excerpt = text.chars().take(MAX_EXCERPT_CHARS).collect::<String>();
     Ok(FileInspection {
@@ -262,39 +267,43 @@ fn workspace_entry(
 
 fn open_verified_text_file(
     candidate: &Path,
+    workspace_root: &Path,
     expected_resolved: &Path,
 ) -> Result<(fs::File, u64), WorkAssistantError> {
-    open_verified_file(candidate, expected_resolved, || {})
+    open_verified_file(candidate, workspace_root, expected_resolved)
 }
 
 fn open_verified_file(
     candidate: &Path,
+    workspace_root: &Path,
     expected_resolved: &Path,
-    after_pre_open_check: impl FnOnce(),
 ) -> Result<(fs::File, u64), WorkAssistantError> {
-    let before_open = fs::canonicalize(candidate).map_err(|error| {
-        WorkAssistantError::blocked(format!(
-            "could not resolve workspace path before open: {error}"
-        ))
-    })?;
-    if before_open != expected_resolved {
-        return Err(WorkAssistantError::blocked(
-            "workspace path changed before it could be opened",
-        ));
-    }
+    open_verified_file_with_opener(
+        candidate,
+        workspace_root,
+        expected_resolved,
+        open_candidate_file,
+    )
+}
 
-    after_pre_open_check();
-    let file = fs::File::open(candidate).map_err(|error| {
+fn open_verified_file_with_opener(
+    candidate: &Path,
+    workspace_root: &Path,
+    expected_resolved: &Path,
+    open_candidate: impl FnOnce(&Path) -> io::Result<fs::File>,
+) -> Result<(fs::File, u64), WorkAssistantError> {
+    let file = open_candidate(candidate).map_err(|error| {
         WorkAssistantError::blocked(format!("could not open text file: {error}"))
     })?;
-    let after_open = fs::canonicalize(candidate).map_err(|error| {
-        WorkAssistantError::blocked(format!(
-            "could not resolve workspace path after open: {error}"
-        ))
-    })?;
-    if after_open != expected_resolved {
+    let opened_path = opened_file_path(&file)?;
+    if !opened_path_is_within_workspace(workspace_root, &opened_path) {
         return Err(WorkAssistantError::blocked(
-            "workspace path changed while it was being opened",
+            "opened file is outside the authorized workspace",
+        ));
+    }
+    if !opened_path_matches_expected(expected_resolved, &opened_path) {
+        return Err(WorkAssistantError::blocked(
+            "opened file does not match the resolved workspace path",
         ));
     }
 
@@ -310,6 +319,160 @@ fn open_verified_file(
         ));
     }
     Ok((file, metadata.len()))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn open_candidate_file(candidate: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const O_NOFOLLOW: i32 = 0o400000;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(candidate)
+}
+
+#[cfg(windows)]
+fn open_candidate_file(candidate: &Path) -> io::Result<fs::File> {
+    fs::File::open(candidate)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+fn open_candidate_file(_: &Path) -> io::Result<fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "verified workspace file opens are not supported on this platform",
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn opened_file_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    use std::os::fd::AsRawFd;
+
+    fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(|error| {
+        WorkAssistantError::blocked(format!("could not resolve opened workspace file: {error}"))
+    })
+}
+
+#[cfg(windows)]
+fn opened_file_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    use std::{
+        ffi::OsString,
+        os::windows::{ffi::OsStringExt, io::AsRawHandle},
+    };
+
+    let mut buffer = vec![0u16; 260];
+    loop {
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle() as *mut std::ffi::c_void,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        };
+        if length == 0 {
+            return Err(WorkAssistantError::blocked(format!(
+                "could not resolve opened workspace file: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        if (length as usize) < buffer.len() {
+            return Ok(normalize_windows_path(PathBuf::from(OsString::from_wide(
+                &buffer[..length as usize],
+            ))));
+        }
+        buffer.resize(length as usize + 1, 0);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+fn opened_file_path(_: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    Err(WorkAssistantError::blocked(
+        "verified workspace file opens are not supported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn opened_path_is_within_workspace(workspace_root: &Path, opened_path: &Path) -> bool {
+    path_is_within(
+        &normalize_windows_path(workspace_root.to_path_buf()),
+        &normalize_windows_path(opened_path.to_path_buf()),
+    )
+}
+
+#[cfg(not(windows))]
+fn opened_path_is_within_workspace(workspace_root: &Path, opened_path: &Path) -> bool {
+    path_is_within(workspace_root, opened_path)
+}
+
+#[cfg(windows)]
+fn opened_path_matches_expected(expected_path: &Path, opened_path: &Path) -> bool {
+    normalize_windows_path(expected_path.to_path_buf())
+        == normalize_windows_path(opened_path.to_path_buf())
+}
+
+#[cfg(not(windows))]
+fn opened_path_matches_expected(expected_path: &Path, opened_path: &Path) -> bool {
+    expected_path == opened_path
+}
+
+#[cfg(windows)]
+fn normalize_windows_path(path: PathBuf) -> PathBuf {
+    use std::{
+        ffi::OsString,
+        os::windows::ffi::{OsStrExt, OsStringExt},
+    };
+
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    const EXTENDED_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const EXTENDED_UNC_PREFIX: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+    if wide.len() >= EXTENDED_UNC_PREFIX.len()
+        && wide_prefix_equals_ignore_ascii_case(&wide, EXTENDED_UNC_PREFIX)
+    {
+        let mut normalized = vec![b'\\' as u16, b'\\' as u16];
+        normalized.extend_from_slice(&wide[EXTENDED_UNC_PREFIX.len()..]);
+        return PathBuf::from(OsString::from_wide(&normalized));
+    }
+    if wide.len() >= EXTENDED_PREFIX.len()
+        && wide_prefix_equals_ignore_ascii_case(&wide, EXTENDED_PREFIX)
+    {
+        return PathBuf::from(OsString::from_wide(&wide[EXTENDED_PREFIX.len()..]));
+    }
+    path
+}
+
+#[cfg(windows)]
+fn wide_prefix_equals_ignore_ascii_case(path: &[u16], prefix: &[u16]) -> bool {
+    path.starts_with(prefix)
+        || path
+            .iter()
+            .zip(prefix)
+            .all(|(path_character, prefix_character)| {
+                *path_character <= 0x7f
+                    && *prefix_character <= 0x7f
+                    && (*path_character as u8).eq_ignore_ascii_case(&(*prefix_character as u8))
+            })
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetFinalPathNameByHandleW(
+        file: *mut std::ffi::c_void,
+        path: *mut u16,
+        path_length: u32,
+        flags: u32,
+    ) -> u32;
 }
 
 fn read_text_from_file(file: fs::File) -> Result<String, WorkAssistantError> {
@@ -465,8 +628,8 @@ fn has_hidden_or_system_attribute_in_ancestors(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::open_verified_file;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    use super::open_verified_file_with_opener;
     use super::{
         has_hidden_or_system_attribute_in_ancestors, inspect_file, scan_workspace, search_workspace,
     };
@@ -758,28 +921,53 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
-    fn verified_open_rejects_a_path_retargeted_between_resolution_and_open() {
+    fn verified_open_rejects_a_handle_opened_while_a_path_is_retargeted_then_restored() {
         use std::os::unix::fs::symlink;
 
         let directory = test_dir();
-        let inside = directory.join("inside.txt");
+        let workspace = directory.join("workspace");
+        let inside = workspace.join("inside.txt");
         let outside = directory.join("outside.txt");
-        let link = directory.join("candidate.txt");
+        let link = workspace.join("candidate.txt");
+        fs::create_dir_all(&workspace).unwrap();
         fs::write(&inside, "inside").unwrap();
         fs::write(&outside, "outside").unwrap();
         symlink(&inside, &link).unwrap();
         let expected = fs::canonicalize(&inside).unwrap();
 
-        let error = open_verified_file(&link, &expected, || {
+        let root = fs::canonicalize(&workspace).unwrap();
+        let error = open_verified_file_with_opener(&link, &root, &expected, |candidate| {
             fs::remove_file(&link).unwrap();
             symlink(&outside, &link).unwrap();
+            let opened_outside = fs::File::open(candidate).unwrap();
+            fs::remove_file(&link).unwrap();
+            symlink(&inside, &link).unwrap();
+            Ok(opened_outside)
         })
         .unwrap_err();
 
         assert_eq!(error.code, "blocked");
-        assert!(error.message.contains("changed while it was being opened"));
+        assert!(error
+            .message
+            .contains("opened file is outside the authorized workspace"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_open_accepts_a_windows_handle_within_the_workspace() {
+        use super::open_verified_file;
+
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        let target = directory.join("notes.txt");
+        fs::write(&target, "inside").unwrap();
+        let root = fs::canonicalize(&directory).unwrap();
+        let expected = fs::canonicalize(&target).unwrap();
+
+        assert!(open_verified_file(&target, &root, &expected).is_ok());
         fs::remove_dir_all(directory).unwrap();
     }
 
