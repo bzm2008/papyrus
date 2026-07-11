@@ -86,7 +86,7 @@ mod tests {
 
         let malformed = NativePreviewRequest {
             arguments: serde_json::json!({ "operations": [] }),
-            ..request
+            ..request.clone()
         };
         assert_eq!(
             batch_preview_request_from_native(&malformed)
@@ -94,6 +94,19 @@ mod tests {
                 .code,
             "protocol"
         );
+
+        let sensitive_value = r"C:\Users\Administrator\secret";
+        let invalid_policy = NativePreviewRequest {
+            arguments: serde_json::json!({
+                "rootId": "root-1",
+                "operations": [],
+                "conflictPolicy": sensitive_value,
+            }),
+            ..request
+        };
+        let error = batch_preview_request_from_native(&invalid_policy).unwrap_err();
+        assert_eq!(error.message, "file_plan_batch arguments are invalid");
+        assert!(!error.message.contains(sensitive_value));
     }
 
     #[test]
@@ -308,9 +321,8 @@ pub fn batch_preview_request_from_native(
     }
     object.insert("runId".into(), Value::String(request.run_id.clone()));
 
-    serde_json::from_value(arguments).map_err(|error| {
-        WorkAssistantError::protocol(format!("file_plan_batch arguments are invalid: {error}"))
-    })
+    serde_json::from_value(arguments)
+        .map_err(|_| WorkAssistantError::protocol("file_plan_batch arguments are invalid"))
 }
 
 /// Creates the only frontend-visible file preview. It intentionally exposes opaque identifiers

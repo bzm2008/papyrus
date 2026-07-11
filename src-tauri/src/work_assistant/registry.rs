@@ -16,7 +16,7 @@ pub fn capability_statuses() -> Vec<CapabilityStatus> {
         .into_iter()
         .map(|name| CapabilityStatus {
             name: name.into(),
-            toolset: "work_assistant".into(),
+            toolset: "workspace".into(),
             available: true,
             reason: None,
             platform: platform.clone(),
@@ -280,8 +280,24 @@ mod tests {
             .any(|capability| capability.name == "root_management"));
         assert!(capabilities
             .iter()
-            .filter(|capability| capability.toolset == "work_assistant")
+            .filter(|capability| capability.name == "root_management")
             .all(|capability| capability.available));
+        assert!(capabilities.iter().all(|capability| {
+            matches!(
+                capability.toolset.as_str(),
+                "workspace" | "desktop" | "browser" | "project"
+            )
+        }));
+        for name in ["root_management", "audit_log", "run_cancellation"] {
+            assert_eq!(
+                capabilities
+                    .iter()
+                    .find(|capability| capability.name == name)
+                    .unwrap()
+                    .toolset,
+                "workspace"
+            );
+        }
     }
 
     #[test]
