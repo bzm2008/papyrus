@@ -46,6 +46,7 @@ pub(crate) fn open_source(
                 parent: directory.try_clone().map_err(blocked_io("could not retain parent handle"))?,
                 source: file,
                 leaf: name.to_string_lossy().into_owned(),
+                parent_identity: identity(&directory)?,
                 root_identity,
                 source_identity: identity_from_metadata(&metadata),
                 byte_len: metadata.len(),
@@ -77,13 +78,31 @@ pub(crate) fn verify_bound_source(
     parent: &File,
     source: &File,
     leaf: &str,
+    parent_components: &[String],
+    expected_parent_identity: &PlatformFileIdentity,
 ) -> Result<(PlatformFileIdentity, PlatformFileIdentity), WorkAssistantError> {
     let root_identity = identity(root)?;
     let source_identity = identity(source)?;
+    if identity(parent)? != *expected_parent_identity {
+        return Err(WorkAssistantError::stale_preview("the source parent identity changed after preview"));
+    }
+    let mut current = root.try_clone().map_err(blocked_io("could not retain root handle"))?;
+    for component in parent_components {
+        let name = CString::new(component.as_str()).map_err(|_| WorkAssistantError::blocked("invalid source parent component"))?;
+        validate_directory_at(current.as_raw_fd(), &name)
+            .map_err(|_| WorkAssistantError::stale_preview("the source ancestor changed after preview"))?;
+        current = openat_directory(current.as_raw_fd(), &name)
+            .map_err(|_| WorkAssistantError::stale_preview("the source ancestor changed after preview"))?;
+    }
+    if identity(&current)? != *expected_parent_identity {
+        return Err(WorkAssistantError::stale_preview("the source parent identity changed after preview"));
+    }
     let leaf = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("invalid source leaf"))?;
-    validate_regular_at(parent.as_raw_fd(), &leaf)?;
-    let current = openat_regular(parent.as_raw_fd(), &leaf)?;
-    let current_identity = identity(&current)?;
+    validate_regular_at(current.as_raw_fd(), &leaf)
+        .map_err(|_| WorkAssistantError::stale_preview("the source changed after preview"))?;
+    let current_source = openat_regular(current.as_raw_fd(), &leaf)
+        .map_err(|_| WorkAssistantError::stale_preview("the source changed after preview"))?;
+    let current_identity = identity(&current_source)?;
     if current_identity != source_identity {
         return Err(WorkAssistantError::stale_preview("the source file identity changed after preview"));
     }

@@ -76,6 +76,8 @@ struct BoundPlatformSource {
     parent: File,
     source: File,
     leaf: String,
+    parent_components: Vec<String>,
+    parent_identity: PlatformFileIdentity,
     root_identity: PlatformFileIdentity,
     source_identity: PlatformFileIdentity,
     #[cfg(windows)]
@@ -86,11 +88,11 @@ impl PlatformSource for BoundPlatformSource {
     fn verify_snapshot(&self) -> Result<(), WorkAssistantError> {
         let identities = {
             #[cfg(windows)]
-            { windows::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_path) }
+            { windows::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_identity, &self.parent_path) }
             #[cfg(target_os = "linux")]
-            { linux::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf) }
+            { linux::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_components, &self.parent_identity) }
             #[cfg(target_os = "macos")]
-            { macos::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf) }
+            { macos::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_components, &self.parent_identity) }
             #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
             { Err(WorkAssistantError::blocked("identity-bound source snapshots are not available on this platform")) }
         };
@@ -201,6 +203,8 @@ pub fn open_source_snapshot(
             parent: opened.parent,
             source: opened.source,
             leaf: opened.leaf,
+            parent_components: normalized_parent_components(&original_relative_path),
+            parent_identity: opened.parent_identity,
             root_identity: opened.root_identity.clone(),
             source_identity: opened.source_identity.clone(),
             #[cfg(windows)]
@@ -213,6 +217,18 @@ pub fn open_source_snapshot(
             byte_len: opened.byte_len,
         },
     })
+}
+
+fn normalized_parent_components(relative: &str) -> Vec<String> {
+    Path::new(relative)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect()
 }
 
 pub fn prepare_recovery_slot(
@@ -297,6 +313,7 @@ pub(crate) struct OpenedPlatformSource {
     parent: File,
     source: File,
     leaf: String,
+    parent_identity: PlatformFileIdentity,
     #[cfg(windows)]
     parent_path: PathBuf,
     root_identity: PlatformFileIdentity,
@@ -579,5 +596,23 @@ mod tests {
         assert_eq!(error.code, "blocked");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn moved_posix_ancestor_is_reported_as_stale_preview() {
+        let root = test_dir();
+        let moved = test_dir();
+        fs::create_dir_all(root.join("subdir")).unwrap();
+        fs::write(root.join("subdir/document.txt"), "contents").unwrap();
+        let snapshot = open_source_snapshot(&root, "subdir/document.txt").unwrap();
+
+        fs::rename(root.join("subdir"), &moved).unwrap();
+        let error = snapshot.verify_snapshot().unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+
+        drop(snapshot);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved).unwrap();
     }
 }

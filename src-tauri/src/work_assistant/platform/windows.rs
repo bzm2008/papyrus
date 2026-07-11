@@ -65,6 +65,7 @@ pub(crate) fn open_source(
         parent: directories.last().unwrap().try_clone().map_err(blocked_io("could not retain parent handle"))?,
         source: file,
         leaf,
+        parent_identity: file_identity(directories.last().unwrap())?,
         parent_path: current,
         root_identity,
         source_identity,
@@ -93,11 +94,14 @@ pub(crate) fn verify_bound_source(
     parent: &File,
     source: &File,
     leaf: &str,
+    expected_parent_identity: &PlatformFileIdentity,
     parent_path: &Path,
 ) -> Result<(PlatformFileIdentity, PlatformFileIdentity), WorkAssistantError> {
     let root_identity = file_identity(root)?;
     let source_identity = file_identity(source)?;
-    let _parent_identity = file_identity(parent)?;
+    if file_identity(parent)? != *expected_parent_identity {
+        return Err(WorkAssistantError::stale_preview("the source parent identity changed after preview"));
+    }
     let current = open_handle(&parent_path.join(leaf), false)?;
     reject_reparse(&current, "source")?;
     let metadata = current.metadata().map_err(blocked_io("could not inspect source"))?;
