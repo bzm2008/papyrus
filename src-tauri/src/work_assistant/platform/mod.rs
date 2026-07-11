@@ -513,7 +513,7 @@ mod tests {
                 assert!(matches!(result, Err(error) if error.code == "blocked"));
                 fs::remove_dir_all(root).unwrap();
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314) => {
+            Err(error) if error.raw_os_error() == Some(1314) => {
                 println!("SKIPPED: Windows policy does not permit symlink fixtures: {error}");
                 fs::remove_dir_all(root).unwrap();
             }
@@ -537,7 +537,7 @@ mod tests {
                 fs::remove_dir_all(&root).unwrap();
                 fs::remove_dir_all(&outside).unwrap();
             }
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314) => {
+            Err(error) if error.raw_os_error() == Some(1314) => {
                 println!("SKIPPED: Windows policy does not permit symlink fixtures: {error}");
                 fs::remove_dir_all(&root).unwrap();
                 fs::remove_dir_all(&outside).unwrap();
