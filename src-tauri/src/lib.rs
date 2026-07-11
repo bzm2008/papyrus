@@ -47,6 +47,11 @@ pub fn run() {
       work_assistant::work_assistant_list_roots,
       work_assistant::work_assistant_add_root,
       work_assistant::work_assistant_remove_root,
+      work_assistant::work_assistant_workspace_list,
+      work_assistant::work_assistant_workspace_scan,
+      work_assistant::work_assistant_file_search,
+      work_assistant::work_assistant_file_inspect,
+      work_assistant::work_assistant_downloads_scan,
       work_assistant::work_assistant_list_audit,
       work_assistant::work_assistant_clear_audit,
       work_assistant::work_assistant_cancel_run

@@ -1,11 +1,9 @@
 use crate::work_assistant::{
-    clear_audit_entries, persist_roots, read_audit_entries, AssistantErrorPayload, AuditEntry,
-    AuthorizedRoot, AuthorizedRootKind, CapabilityStatus, WorkAssistantError, WorkAssistantState,
+    clear_audit_entries, persist_roots, read_audit_entries, validate_authorized_root,
+    AssistantErrorPayload, AuditEntry, AuthorizedRoot, AuthorizedRootKind, CapabilityStatus,
+    WorkAssistantError, WorkAssistantState,
 };
-use std::{
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use uuid::Uuid;
 
@@ -54,18 +52,20 @@ pub fn work_assistant_add_root(
         return Err(WorkAssistantError::blocked("root label is required").into());
     }
 
-    let root = AuthorizedRoot {
-        id: Uuid::new_v4().to_string(),
-        label: label.trim().to_string(),
-        path: PathBuf::from(path),
-        kind,
-        created_at: unix_seconds(),
-    };
     let mut roots = state
         .roots
         .write()
         .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))
         .map_err(AssistantErrorPayload::from)?;
+    let canonical_path =
+        validate_authorized_root(&path, &roots).map_err(AssistantErrorPayload::from)?;
+    let root = AuthorizedRoot {
+        id: Uuid::new_v4().to_string(),
+        label: label.trim().to_string(),
+        path: canonical_path,
+        kind,
+        created_at: unix_seconds(),
+    };
     roots.push(root.clone());
     if let Err(error) = persist_roots(&state, &roots) {
         roots.pop();
@@ -95,8 +95,29 @@ pub fn work_assistant_remove_root(
         roots.insert(index, root.clone());
         return Err(error.into());
     }
+    drop(roots);
+    invalidate_previews_for_root(&state, &id).map_err(AssistantErrorPayload::from)?;
 
     Ok(root)
+}
+
+fn invalidate_previews_for_root(
+    state: &WorkAssistantState,
+    root_id: &str,
+) -> Result<(), WorkAssistantError> {
+    let mut previews = state
+        .previews
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("workspace previews lock is unavailable"))?;
+    previews.retain(|_, preview| {
+        !preview.scope.iter().any(|scope| scope == root_id)
+            && preview
+                .payload
+                .get("rootId")
+                .and_then(|value| value.as_str())
+                != Some(root_id)
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -126,10 +147,7 @@ pub fn work_assistant_cancel_run(
     record_cancelled_run(&state, run).map_err(Into::into)
 }
 
-fn record_cancelled_run(
-    state: &WorkAssistantState,
-    run: String,
-) -> Result<(), WorkAssistantError> {
+fn record_cancelled_run(state: &WorkAssistantState, run: String) -> Result<(), WorkAssistantError> {
     if run.trim().is_empty() {
         return Err(WorkAssistantError::blocked("run id is required"));
     }
@@ -167,6 +185,7 @@ mod tests {
     use super::*;
     use std::{
         collections::{HashMap, HashSet},
+        path::PathBuf,
         sync::{Mutex, RwLock},
     };
 
@@ -222,5 +241,29 @@ mod tests {
         assert!(!runs.contains("overflow"));
         assert_eq!(overflow.code, "blocked");
         assert!(overflow.recoverable);
+    }
+
+    #[test]
+    fn invalidating_a_root_preview_leaves_other_root_previews_intact() {
+        let state = test_state();
+        let preview = |scope: &str| crate::work_assistant::StoredPreview {
+            id: format!("preview-{scope}"),
+            run: "run".into(),
+            revision: 1,
+            risk: "read".into(),
+            scope: vec![scope.into()],
+            payload: serde_json::json!({ "rootId": scope }),
+            expires: 1,
+        };
+        let mut previews = state.previews.lock().unwrap();
+        previews.insert("a".into(), preview("root-a"));
+        previews.insert("b".into(), preview("root-b"));
+        drop(previews);
+
+        invalidate_previews_for_root(&state, "root-a").unwrap();
+
+        let previews = state.previews.lock().unwrap();
+        assert!(!previews.contains_key("a"));
+        assert!(previews.contains_key("b"));
     }
 }

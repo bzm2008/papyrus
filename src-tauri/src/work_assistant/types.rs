@@ -30,6 +30,39 @@ pub enum AuthorizedRootKind {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub extension: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceScan {
+    pub root_id: String,
+    pub entries: Vec<WorkspaceEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSearchResult {
+    pub entries: Vec<WorkspaceEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileInspection {
+    pub path: String,
+    pub excerpt: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AssistantErrorPayload {
     pub code: String,
     pub message: String,
@@ -44,6 +77,14 @@ pub struct WorkAssistantError {
 }
 
 impl WorkAssistantError {
+    pub fn path_outside_workspace(message: impl Into<String>) -> Self {
+        Self {
+            code: "path_outside_workspace".into(),
+            message: message.into(),
+            recoverable: false,
+        }
+    }
+
     pub fn blocked(message: impl Into<String>) -> Self {
         Self {
             code: "blocked".into(),

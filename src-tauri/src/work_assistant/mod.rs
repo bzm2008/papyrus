@@ -1,10 +1,14 @@
 mod audit;
+mod path_policy;
 mod registry;
 mod types;
+mod workspace;
 
 pub use audit::*;
+pub use path_policy::*;
 pub use registry::*;
 pub use types::*;
+pub use workspace::*;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -288,7 +292,11 @@ mod tests {
     fn state_load_does_not_parse_historical_audit_entries() {
         let directory = test_dir();
         fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("work-assistant.jsonl"), b"not valid audit json").unwrap();
+        fs::write(
+            directory.join("work-assistant.jsonl"),
+            b"not valid audit json",
+        )
+        .unwrap();
 
         let state = load_state_from_data_dir(&directory).unwrap();
 
