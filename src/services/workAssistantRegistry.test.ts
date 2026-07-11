@@ -48,7 +48,11 @@ describe('WORK_ASSISTANT_TOOLS', () => {
     }
 
     const plan = WORK_ASSISTANT_TOOLS.find((tool) => tool.name === 'file_plan_batch')
-    expect(plan?.inputSchema).toMatchObject({
+    if (!plan) {
+      throw new Error('file_plan_batch tool definition is missing')
+    }
+
+    expect(plan.inputSchema).toMatchObject({
       required: ['rootId', 'conflictPolicy', 'operations'],
       properties: {
         rootId: { type: 'string', minLength: 1 },
@@ -56,7 +60,18 @@ describe('WORK_ASSISTANT_TOOLS', () => {
         operations: { type: 'array', minItems: 1, maxItems: 200 },
       },
     })
-    expect(plan?.inputSchema.properties.operations.items).toMatchObject({
+
+    const properties = plan.inputSchema.properties
+    if (!properties || typeof properties !== 'object') {
+      throw new Error('file_plan_batch input schema properties are missing')
+    }
+
+    const operations = properties.operations
+    if (!operations || typeof operations !== 'object' || !('items' in operations)) {
+      throw new Error('file_plan_batch operations schema is incomplete')
+    }
+
+    expect(operations.items).toMatchObject({
       type: 'object',
       additionalProperties: false,
       properties: {
