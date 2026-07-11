@@ -48,6 +48,7 @@ pub struct WorkAssistantState {
     pub(crate) approvals: Mutex<HashMap<String, StoredApproval>>,
     pub(crate) cancelled_runs: Mutex<HashSet<String>>,
     pub(crate) audit_path: PathBuf,
+    pub(crate) audit_guard: Mutex<()>,
 }
 
 pub fn init_state(app: &tauri::AppHandle) -> Result<WorkAssistantState, WorkAssistantError> {
@@ -72,6 +73,7 @@ fn load_state_from_data_dir(data_dir: &Path) -> Result<WorkAssistantState, WorkA
         approvals: Mutex::new(HashMap::new()),
         cancelled_runs: Mutex::new(HashSet::new()),
         audit_path,
+        audit_guard: Mutex::new(()),
     })
 }
 

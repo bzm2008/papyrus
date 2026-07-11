@@ -1,6 +1,7 @@
 use crate::work_assistant::{
-    clear_audit_entries, persist_roots, read_audit_entries, AssistantErrorPayload, AuditEntry,
-    AuthorizedRoot, AuthorizedRootKind, CapabilityStatus, WorkAssistantError, WorkAssistantState,
+    clear_audit_entries_locked, persist_roots, read_audit_entries, AssistantErrorPayload,
+    AuditEntry, AuthorizedRoot, AuthorizedRootKind, CapabilityStatus, WorkAssistantError,
+    WorkAssistantState,
 };
 use std::{
     path::PathBuf,
@@ -103,6 +104,11 @@ pub fn work_assistant_remove_root(
 pub fn work_assistant_list_audit(
     state: State<'_, WorkAssistantState>,
 ) -> Result<Vec<AuditEntry>, AssistantErrorPayload> {
+    let _guard = state
+        .audit_guard
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("audit log lock is unavailable"))
+        .map_err(AssistantErrorPayload::from)?;
     read_audit_entries(&state.audit_path).map_err(Into::into)
 }
 
@@ -110,7 +116,7 @@ pub fn work_assistant_list_audit(
 pub fn work_assistant_clear_audit(
     state: State<'_, WorkAssistantState>,
 ) -> Result<(), AssistantErrorPayload> {
-    clear_audit_entries(&state.audit_path).map_err(Into::into)
+    clear_audit_entries_locked(&state.audit_guard, &state.audit_path).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -139,9 +145,11 @@ fn record_cancelled_run(
         return Ok(());
     }
     if runs.len() >= MAX_CANCELLED_RUNS {
-        if let Some(evicted) = runs.iter().next().cloned() {
-            runs.remove(&evicted);
-        }
+        return Err(WorkAssistantError {
+            code: "blocked".into(),
+            message: "cancelled run capacity has been reached".into(),
+            recoverable: true,
+        });
     }
     runs.insert(run);
 
@@ -170,6 +178,7 @@ mod tests {
             approvals: Mutex::new(HashMap::new()),
             cancelled_runs: Mutex::new(HashSet::new()),
             audit_path: PathBuf::from("unused-audit-path"),
+            audit_guard: Mutex::new(()),
         }
     }
 
@@ -198,16 +207,21 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_set_is_bounded_when_recording_unique_runs() {
+    fn cancellation_rejects_new_runs_when_full_without_discarding_existing_ids() {
         let state = test_state();
         for index in 0..256 {
             record_cancelled_run(&state, format!("run-{index}")).unwrap();
         }
 
-        record_cancelled_run(&state, "overflow".into()).unwrap();
+        record_cancelled_run(&state, "run-0".into()).unwrap();
+        let overflow = record_cancelled_run(&state, "overflow".into()).unwrap_err();
 
         let runs = state.cancelled_runs.lock().unwrap();
         assert_eq!(runs.len(), 256);
-        assert!(runs.contains("overflow"));
+        assert!(runs.contains("run-0"));
+        assert!(runs.contains("run-255"));
+        assert!(!runs.contains("overflow"));
+        assert_eq!(overflow.code, "blocked");
+        assert!(overflow.recoverable);
     }
 }
