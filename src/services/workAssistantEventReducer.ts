@@ -43,7 +43,7 @@ export function reduceWorkAssistantEvent(
       const toolCall = { ...event.toolCall, status: 'running' as const }
       return {
         ...state,
-        status: 'running',
+        status: state.pendingApprovalId === undefined ? 'running' : state.status,
         toolCalls: { ...state.toolCalls, [toolCall.id]: toolCall },
         lastActivityAt: event.at,
       }
@@ -174,10 +174,10 @@ export function reduceWorkAssistantEvent(
     }
 
     case 'run.completed':
-      return { ...state, status: 'completed', messageText: event.response, lastActivityAt: event.at }
+      return { ...state, status: 'completed', pendingApprovalId: undefined, messageText: event.response, lastActivityAt: event.at }
 
     case 'run.failed':
-      return { ...state, status: 'failed', error: event.message, lastActivityAt: event.at }
+      return { ...state, status: 'failed', pendingApprovalId: undefined, error: event.message, lastActivityAt: event.at }
 
     case 'run.cancelled': {
       const toolCalls = Object.fromEntries(

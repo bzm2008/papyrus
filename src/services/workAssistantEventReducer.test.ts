@@ -242,6 +242,21 @@ describe('reduceWorkAssistantEvent', () => {
     expect(duplicate.toolCalls['tool-1'].intent).toBe('Search the workspace')
   })
 
+  it('keeps an outstanding approval when another tool starts', () => {
+    const started = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-1'), at: 1,
+    })
+    const awaitingApproval = reduceWorkAssistantEvent(started, {
+      type: 'approval.required', runId: 'run-1', request: preview, at: 2,
+    })
+    const afterOtherToolStarted = reduceWorkAssistantEvent(awaitingApproval, {
+      type: 'tool.started', runId: 'run-1', toolCall: toolCall('tool-2'), at: 3,
+    })
+
+    expect(afterOtherToolStarted).toMatchObject({ status: 'awaiting_approval', pendingApprovalId: 'approval-1' })
+    expect(afterOtherToolStarted.toolCalls['tool-2']).toMatchObject({ status: 'running' })
+  })
+
   it('tracks subagent progress and completion without reviving terminal subagents', () => {
     const started = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
       type: 'subagent.started', runId: 'run-1', subagent: subagent(), at: 20,
@@ -334,6 +349,22 @@ describe('reduceWorkAssistantEvent', () => {
     expect(completed).toMatchObject({ status: 'completed', messageText: 'Final answer', lastActivityAt: 40 })
     expect(failed).toMatchObject({ status: 'failed', error: 'Connection lost', lastActivityAt: 41 })
     expect(otherRunEvent).toBe(completed)
+  })
+
+  it('clears a pending approval when a run completes or fails', () => {
+    const awaitingApproval = reduceWorkAssistantEvents(createEmptyWorkAssistantRun('run-1'), [
+      { type: 'tool.started', runId: 'run-1', toolCall: toolCall(), at: 1 },
+      { type: 'approval.required', runId: 'run-1', request: preview, at: 2 },
+    ])
+    const completed = reduceWorkAssistantEvent(awaitingApproval, {
+      type: 'run.completed', runId: 'run-1', response: 'Final answer', at: 3,
+    })
+    const failed = reduceWorkAssistantEvent(awaitingApproval, {
+      type: 'run.failed', runId: 'run-1', code: 'NETWORK', message: 'Connection lost', recoverable: true, at: 4,
+    })
+
+    expect(completed).toMatchObject({ status: 'completed', pendingApprovalId: undefined })
+    expect(failed).toMatchObject({ status: 'failed', pendingApprovalId: undefined })
   })
 
   it('does not allow any later same-run event to alter terminal runs', () => {
