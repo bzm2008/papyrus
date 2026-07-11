@@ -8,6 +8,7 @@ use tauri::State;
 const MAX_SCAN_DEPTH: usize = 8;
 const MAX_SCAN_ENTRIES: usize = 5_000;
 const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SEARCH_TEXT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXCERPT_CHARS: usize = 8_000;
 
 #[tauri::command]
@@ -94,6 +95,7 @@ pub fn search_workspace(
     let root = policy.resolve_existing(root_id, Path::new(""))?;
     let mut entries = Vec::new();
     let mut truncated = scan.truncated;
+    let mut remaining_text_bytes = MAX_SEARCH_TEXT_BYTES;
 
     for entry in scan.entries {
         if entries.len() >= MAX_SCAN_ENTRIES {
@@ -105,13 +107,24 @@ pub fn search_workspace(
             continue;
         }
         let name_matches = entry.name.to_lowercase().contains(&needle);
-        let content_matches = if entry.kind == "file" && is_text_extension(&entry.extension) {
-            read_text_limited(&path)
-                .map(|text| text.to_lowercase().contains(&needle))
-                .unwrap_or(false)
-        } else {
-            false
-        };
+        let content_matches =
+            if !name_matches && entry.kind == "file" && is_text_extension(&entry.extension) {
+                let candidate = root.join(&entry.path);
+                let (file, size) = match open_verified_text_file(&candidate, &path) {
+                    Ok(file) => file,
+                    Err(_) => continue,
+                };
+                if size > remaining_text_bytes {
+                    truncated = true;
+                    break;
+                }
+                remaining_text_bytes -= size;
+                read_text_from_file(file)
+                    .map(|text| text.to_lowercase().contains(&needle))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
         if name_matches || content_matches {
             entries.push(entry);
         }
@@ -128,11 +141,6 @@ pub fn inspect_file(
     let policy = PathPolicy::new(roots);
     let root = policy.resolve_existing(root_id, Path::new(""))?;
     let path = policy.resolve_existing(root_id, requested_path)?;
-    let metadata = fs::metadata(&path)
-        .map_err(|error| WorkAssistantError::blocked(format!("could not inspect file: {error}")))?;
-    if !metadata.is_file() {
-        return Err(WorkAssistantError::blocked("workspace path is not a file"));
-    }
     let extension = extension_for(&path);
     if !is_eligible_workspace_path(&root, requested_path, &path, &extension) {
         return Err(WorkAssistantError::blocked(
@@ -144,7 +152,9 @@ pub fn inspect_file(
             "this file type cannot be inspected as text",
         ));
     }
-    let text = read_text_limited(&path)?;
+    let candidate = root.join(requested_path);
+    let (file, _) = open_verified_text_file(&candidate, &path)?;
+    let text = read_text_from_file(file)?;
     let excerpt = text.chars().take(MAX_EXCERPT_CHARS).collect::<String>();
     Ok(FileInspection {
         path: requested_path.to_string_lossy().to_string(),
@@ -250,17 +260,62 @@ fn workspace_entry(
     }
 }
 
-fn read_text_limited(path: &Path) -> Result<String, WorkAssistantError> {
-    let metadata = fs::metadata(path)
-        .map_err(|error| WorkAssistantError::blocked(format!("could not inspect file: {error}")))?;
+fn open_verified_text_file(
+    candidate: &Path,
+    expected_resolved: &Path,
+) -> Result<(fs::File, u64), WorkAssistantError> {
+    open_verified_file(candidate, expected_resolved, || {})
+}
+
+fn open_verified_file(
+    candidate: &Path,
+    expected_resolved: &Path,
+    after_pre_open_check: impl FnOnce(),
+) -> Result<(fs::File, u64), WorkAssistantError> {
+    let before_open = fs::canonicalize(candidate).map_err(|error| {
+        WorkAssistantError::blocked(format!(
+            "could not resolve workspace path before open: {error}"
+        ))
+    })?;
+    if before_open != expected_resolved {
+        return Err(WorkAssistantError::blocked(
+            "workspace path changed before it could be opened",
+        ));
+    }
+
+    after_pre_open_check();
+    let file = fs::File::open(candidate).map_err(|error| {
+        WorkAssistantError::blocked(format!("could not open text file: {error}"))
+    })?;
+    let after_open = fs::canonicalize(candidate).map_err(|error| {
+        WorkAssistantError::blocked(format!(
+            "could not resolve workspace path after open: {error}"
+        ))
+    })?;
+    if after_open != expected_resolved {
+        return Err(WorkAssistantError::blocked(
+            "workspace path changed while it was being opened",
+        ));
+    }
+
+    let metadata = file.metadata().map_err(|error| {
+        WorkAssistantError::blocked(format!("could not inspect opened file: {error}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(WorkAssistantError::blocked("workspace path is not a file"));
+    }
     if metadata.len() > MAX_TEXT_BYTES {
         return Err(WorkAssistantError::blocked(
             "text inspection is limited to files of 2 MB or less",
         ));
     }
+    Ok((file, metadata.len()))
+}
+
+fn read_text_from_file(file: fs::File) -> Result<String, WorkAssistantError> {
     let mut contents = String::new();
-    fs::File::open(path)
-        .and_then(|file| file.take(MAX_TEXT_BYTES + 1).read_to_string(&mut contents))
+    file.take(MAX_TEXT_BYTES + 1)
+        .read_to_string(&mut contents)
         .map_err(|error| {
             WorkAssistantError::blocked(format!("could not read text file: {error}"))
         })?;
@@ -288,11 +343,18 @@ fn is_eligible_workspace_path(
     resolved_path: &Path,
     extension: &str,
 ) -> bool {
-    relative_path
-        .components()
-        .all(|component| !is_excluded_name(&component.as_os_str().to_string_lossy()))
+    is_eligible_relative_path(relative_path)
+        && resolved_path
+            .strip_prefix(workspace_root)
+            .map(|canonical_relative_path| is_eligible_relative_path(canonical_relative_path))
+            .unwrap_or(false)
         && !has_hidden_or_system_attribute_in_workspace(workspace_root, resolved_path)
         && !is_dangerous_extension(extension)
+}
+
+fn is_eligible_relative_path(path: &Path) -> bool {
+    path.components()
+        .all(|component| !is_excluded_name(&component.as_os_str().to_string_lossy()))
 }
 
 fn is_dangerous_extension(extension: &str) -> bool {
@@ -374,7 +436,11 @@ fn has_hidden_or_system_attribute(_: &Path) -> bool {
 }
 
 fn has_hidden_or_system_attribute_in_workspace(workspace_root: &Path, target: &Path) -> bool {
-    has_hidden_or_system_attribute_in_ancestors(workspace_root, target, has_hidden_or_system_attribute)
+    has_hidden_or_system_attribute_in_ancestors(
+        workspace_root,
+        target,
+        has_hidden_or_system_attribute,
+    )
 }
 
 fn has_hidden_or_system_attribute_in_ancestors(
@@ -399,6 +465,8 @@ fn has_hidden_or_system_attribute_in_ancestors(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::open_verified_file;
     use super::{
         has_hidden_or_system_attribute_in_ancestors, inspect_file, scan_workspace, search_workspace,
     };
@@ -583,9 +651,164 @@ mod tests {
         let private_directory = root.join("private");
         let target = private_directory.join("notes.txt");
 
-        assert!(has_hidden_or_system_attribute_in_ancestors(&root, &target, |path| {
-            path == private_directory
-        }));
-        assert!(!has_hidden_or_system_attribute_in_ancestors(&root, &target, |_| false));
+        assert!(has_hidden_or_system_attribute_in_ancestors(
+            &root,
+            &target,
+            |path| { path == private_directory }
+        ));
+        assert!(!has_hidden_or_system_attribute_in_ancestors(
+            &root,
+            &target,
+            |_| false
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hidden_internal_symlink_is_not_eligible_for_inspection_or_search() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_dir();
+        fs::create_dir_all(directory.join(".private")).unwrap();
+        fs::write(directory.join(".private/secret.txt"), "needle").unwrap();
+        symlink(directory.join(".private"), directory.join("ordinary")).unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&directory).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let inspection = inspect_file(&[root.clone()], "root", Path::new("ordinary/secret.txt"));
+        let search = search_workspace(&[root], "root", "needle").unwrap();
+
+        assert!(inspection.is_err());
+        assert!(search.entries.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn set_hidden_attribute(path: &Path) {
+        use std::os::windows::ffi::OsStrExt;
+
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetFileAttributesW(file_name: *const u16) -> u32;
+            fn SetFileAttributesW(file_name: *const u16, file_attributes: u32) -> i32;
+        }
+
+        let wide_path = path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let attributes = unsafe { GetFileAttributesW(wide_path.as_ptr()) };
+        assert_ne!(
+            attributes,
+            INVALID_FILE_ATTRIBUTES,
+            "{:#?}",
+            std::io::Error::last_os_error()
+        );
+        assert_ne!(
+            unsafe { SetFileAttributesW(wide_path.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) },
+            0,
+            "{:#?}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hidden_internal_symlink_is_not_eligible_for_inspection_or_search() {
+        use std::os::windows::fs::symlink_dir;
+
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+
+        let directory = test_dir();
+        let private_directory = directory.join("private");
+        fs::create_dir_all(&private_directory).unwrap();
+        fs::write(private_directory.join("secret.txt"), "needle").unwrap();
+        set_hidden_attribute(&private_directory);
+        match symlink_dir(&private_directory, directory.join("ordinary")) {
+            Ok(()) => {}
+            // Windows symlink creation requires this privilege unless Developer Mode is enabled.
+            Err(error) if error.raw_os_error() == Some(ERROR_PRIVILEGE_NOT_HELD) => {
+                fs::remove_dir_all(directory).unwrap();
+                return;
+            }
+            Err(error) => panic!("could not create internal symlink: {error}"),
+        }
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&directory).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let inspection = inspect_file(&[root.clone()], "root", Path::new("ordinary/secret.txt"));
+        let search = search_workspace(&[root], "root", "needle").unwrap();
+
+        assert_eq!(inspection.unwrap_err().code, "blocked");
+        assert!(search.entries.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_open_rejects_a_path_retargeted_between_resolution_and_open() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_dir();
+        let inside = directory.join("inside.txt");
+        let outside = directory.join("outside.txt");
+        let link = directory.join("candidate.txt");
+        fs::write(&inside, "inside").unwrap();
+        fs::write(&outside, "outside").unwrap();
+        symlink(&inside, &link).unwrap();
+        let expected = fs::canonicalize(&inside).unwrap();
+
+        let error = open_verified_file(&link, &expected, || {
+            fs::remove_file(&link).unwrap();
+            symlink(&outside, &link).unwrap();
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        assert!(error.message.contains("changed while it was being opened"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn search_stops_when_aggregate_content_budget_is_exhausted() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        for index in 0..9 {
+            fs::write(
+                directory.join(format!("document-{index}.txt")),
+                vec![b'x'; 2 * 1024 * 1024 - 6]
+                    .into_iter()
+                    .chain(b"needle".iter().copied())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        }
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&directory).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let search = search_workspace(&[root], "root", "needle").unwrap();
+
+        assert!(search.truncated);
+        assert_eq!(search.entries.len(), 8);
+        fs::remove_dir_all(directory).unwrap();
     }
 }
