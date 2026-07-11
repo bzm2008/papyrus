@@ -51,7 +51,7 @@ export type WpsBridgeStatus =
 export type WpsDocumentBridge = {
   isMock: boolean
   getSnapshot: () => Promise<WpsDocumentSnapshot>
-  applyPatch: (operation: WpsPatchOperation, content: string) => Promise<void>
+  applyPatch: (operation: WpsPatchOperation, content: string, expectedSelectionFingerprint?: string) => Promise<void>
   getStatus: () => WpsBridgeStatus
 }
 
@@ -77,7 +77,7 @@ export function createWpsDocumentBridge(): WpsDocumentBridge {
     isMock: false,
     getStatus: () => 'ready',
     getSnapshot: async () => readWpsSnapshot(app),
-    applyPatch: async (operation, content) => applyWpsPatch(app, operation, content),
+    applyPatch: async (operation, content, expectedSelectionFingerprint) => applyWpsPatch(app, operation, content, expectedSelectionFingerprint),
   }
 }
 
@@ -92,8 +92,11 @@ function createMockBridge(): WpsDocumentBridge {
       wordCount: countCjkFriendlyWords(mockDocument.text),
       mode: 'mock',
     }),
-    applyPatch: async (operation, content) => {
+    applyPatch: async (operation, content, expectedSelectionFingerprint) => {
       recordDebug('Mock apply patch', operation)
+      if (operation === 'replace_selection' && expectedSelectionFingerprint && expectedSelectionFingerprint !== createSelectionFingerprint(mockDocument.selection)) {
+        throw new Error('选区已变更，请重新生成后再替换。')
+      }
       if (operation === 'replace_selection') {
         mockDocument.text = mockDocument.text.replace(mockDocument.selection, content)
         mockDocument.selection = content.slice(0, 120)
@@ -166,6 +169,7 @@ async function applyWpsPatch(
   app: WpsApplicationLike,
   operation: WpsPatchOperation,
   content: string,
+  expectedSelectionFingerprint?: string,
 ) {
   const normalized = content.trim()
 
@@ -186,6 +190,12 @@ async function applyWpsPatch(
   }
 
   if (operation === 'replace_selection' || operation === 'insert_at_cursor') {
+    if (operation === 'replace_selection' && expectedSelectionFingerprint) {
+      const currentSelection = normalizeWpsText(readText(selection.Text) || readText(selection.Range?.Text))
+      if (createSelectionFingerprint(currentSelection) !== expectedSelectionFingerprint) {
+        throw new Error('选区已变更，请重新生成后再替换。')
+      }
+    }
     if (typeof selection.TypeText === 'function') {
       selection.TypeText(normalized)
       recordDebug('Applied patch via Selection.TypeText', { operation, length: normalized.length })
@@ -228,7 +238,17 @@ async function applyWpsPatch(
 }
 
 function normalizeWpsText(value: string) {
-  return value.replace(/\r/g, '\n').split('\u0007').join('').trim()
+  return value.replace(/\r\n?/g, '\n').split('\u0007').join('').trim()
+}
+
+export function createSelectionFingerprint(selection: string) {
+  const normalized = normalizeWpsText(selection)
+  let hash = 2166136261
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `${normalized.length}:${(hash >>> 0).toString(16)}`
 }
 
 function readText(value: unknown) {

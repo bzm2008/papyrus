@@ -14,6 +14,7 @@
     "wps:package": "npm run wps:build && powershell -ExecutionPolicy Bypass -File scripts/package-wps-addin-release.ps1",
     "wps:debug": "powershell -ExecutionPolicy Bypass -File scripts/read-wps-addin-debug.ps1",
     "wps:preview": "vite preview --config apps/wps-word-addin/vite.config.ts",
+    "test:wps": "vitest run apps/wps-word-addin/src",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
@@ -55,7 +56,8 @@
     "tailwindcss": "^4.3.0",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "vitest": "^4.1.10"
   },
   "description": "This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.",
   "main": "eslint.config.js",

@@ -7,6 +7,16 @@ import type {
   WpsDocumentSnapshot,
   WpsPatchOperation,
 } from '../types'
+import { findSkillFromPrompt, inferSkillForPrompt } from '../skills'
+import { createSelectionFingerprint } from './wpsDocumentBridge'
+import {
+  classifyWpsAgentError,
+  readSseResponse,
+  shouldFallbackToNonStream,
+  type WpsAgentTransport,
+} from './wpsAgentRuntime'
+
+export { parseSseChunks, shouldFallbackToNonStream } from './wpsAgentRuntime'
 
 const LLM_API = 'https://scallion.uno/api/papyrus/llm/chat'
 const MODELS_API = 'https://scallion.uno/api/papyrus/llm/models'
@@ -67,6 +77,7 @@ export async function createWpsPlanDraft(input: {
   token?: string
   previousPlan?: WpsPlanDraft
   feedback?: string
+  signal?: AbortSignal
 }): Promise<WpsPlanDraft> {
   const request = input.request.trim()
 
@@ -94,10 +105,10 @@ export async function createWpsPlanDraft(input: {
       buildContext(input.snapshot),
     ].filter(Boolean).join('\n\n')
 
-    planText = await callScallion(input.token, PRIMARY_MODEL, [
+    planText = (await callScallion(input.token, PRIMARY_MODEL, [
       { role: 'system', content: system },
       { role: 'user', content: user },
-    ], 0.2, 1600).catch(() => planText)
+    ], 0.2, 1600, { signal: input.signal })).content
   }
 
   return {
@@ -115,19 +126,30 @@ export async function runUnifiedAgent(input: AgentRunInput): Promise<AgentRunRes
     throw new Error('请先登录 Scallion 后使用内置模型。')
   }
 
+  const resolvedInput = {
+    ...input,
+    selectedSkill: findSkillFromPrompt(input.prompt) ?? input.selectedSkill ?? inferSkillForPrompt(input.prompt),
+  }
   const trace: string[] = []
-  const todos = createTodos(input.prompt, input.snapshot, input.approvedPlan)
+  const todos = createTodos(resolvedInput.prompt, resolvedInput.snapshot, resolvedInput.approvedPlan)
   const report = (status: string) => {
     trace.push(status)
     advanceTodos(todos, status)
-    input.onStatus?.(status)
+    resolvedInput.onStatus?.(status)
+    resolvedInput.onStage?.(status)
   }
 
   report('规划任务')
-  const plan = await createPlan(input).catch(() => localPlan(input.prompt, input.snapshot))
-  const sanitizedPlan = sanitizePlan(plan, input)
+  let plan: WpsAgentPlan
+  try {
+    plan = await createPlan(resolvedInput)
+  } catch (error) {
+    throwIfAborted(resolvedInput.signal, error)
+    plan = localPlan(resolvedInput.prompt, resolvedInput.snapshot)
+  }
+  const sanitizedPlan = sanitizePlan(plan, resolvedInput)
 
-  if (sanitizedPlan.needsSelection && !input.snapshot.selectionText.trim()) {
+  if (sanitizedPlan.needsSelection && !resolvedInput.snapshot.selectionText.trim()) {
     return {
       reply: '请先在 WPS 文档中选中要处理的文字，然后再发给我。',
       intent: sanitizedPlan.intent,
@@ -137,32 +159,46 @@ export async function runUnifiedAgent(input: AgentRunInput): Promise<AgentRunRes
   }
 
   report('读取文档上下文')
-  const context = buildContext(input.snapshot)
+  throwIfAborted(resolvedInput.signal)
+  const context = buildContext(resolvedInput.snapshot)
 
   report('生成结果')
-  const generated = await generateWithFallback(input, sanitizedPlan, context)
-  let parsed = parseAgentJson(generated, sanitizedPlan)
-  let validation = validateAgentJson(parsed, sanitizedPlan, input.snapshot)
+  const generated = await generateWithFallback(resolvedInput, sanitizedPlan, context)
+  let parsed = parseAgentJson(generated.content)
+  let validation = validateAgentJson(parsed, sanitizedPlan, resolvedInput.snapshot)
 
   if (!validation.ok) {
     report('校验并修复')
-    const repaired = await repairOutput(input, sanitizedPlan, context, parsed, validation.issues).catch(
-      () => '',
-    )
+    let repaired = ''
+    try {
+      repaired = await repairOutput(resolvedInput, sanitizedPlan, context, parsed ?? {}, validation.issues)
+    } catch (error) {
+      throwIfAborted(resolvedInput.signal, error)
+    }
     if (repaired) {
-      parsed = parseAgentJson(repaired, sanitizedPlan)
-      validation = validateAgentJson(parsed, sanitizedPlan, input.snapshot)
+      parsed = parseAgentJson(repaired)
+      validation = validateAgentJson(parsed, sanitizedPlan, resolvedInput.snapshot)
     }
   }
 
   if (!validation.ok) {
-    parsed = fallbackFromRaw(generated, sanitizedPlan)
-    validation = validateAgentJson(parsed, sanitizedPlan, input.snapshot)
+    report('输出协议异常')
+    return {
+      reply: sanitizedPlan.writeIntent ? '模型结果未通过写入校验，内容没有写入文档。请重试本次任务。' : generated.content,
+      intent: sanitizedPlan.intent,
+      trace,
+      todos,
+      checks: validation.issues,
+      model: generated.model,
+      transport: generated.transport,
+      usedFallback: generated.usedFallback,
+      recoverableError: '模型结果格式异常，请重试本次任务。',
+    }
   }
 
-  report(validation.ok ? '完成' : '完成但已降级处理')
-  const result = toRunResult(parsed, sanitizedPlan, trace)
-  return { ...result, todos }
+  report('完成')
+  const result = toRunResult(parsed ?? {}, sanitizedPlan, trace, resolvedInput.snapshot)
+  return { ...result, todos, model: generated.model, transport: generated.transport, usedFallback: generated.usedFallback }
 }
 
 
@@ -206,13 +242,14 @@ async function createPlan(input: AgentRunInput): Promise<WpsAgentPlan> {
   ].join('\n')
   const user = [
     `用户指令：${input.prompt}`,
+    input.approvedPlan ? `已批准规划：\n${input.approvedPlan.planText}` : '',
     `当前是否有选区：${input.snapshot.selectionText.trim() ? '是' : '否'}`,
     `本地初判：${JSON.stringify(local)}`,
   ].join('\n')
-  const raw = await callScallion(input.token, PRIMARY_MODEL, [
+  const raw = (await callScallion(input.token, PRIMARY_MODEL, [
     { role: 'system', content: system },
     { role: 'user', content: user },
-  ], 0.1, 900)
+  ], 0.1, 900, { signal: input.signal })).content
 
   return { ...local, ...parseJsonObject(raw) } as WpsAgentPlan
 }
@@ -243,7 +280,9 @@ function sanitizePlan(plan: WpsAgentPlan, input: AgentRunInput): WpsAgentPlan {
   const fallback = localPlan(input.prompt, input.snapshot)
   const intent = isIntent(plan.intent) ? plan.intent : fallback.intent
   const writeIntent =
-    intent === 'rewrite_selection' || intent === 'write_document'
+    intent === 'review_document'
+      ? false
+      : intent === 'rewrite_selection' || intent === 'write_document'
       ? plan.writeIntent !== false
       : Boolean(plan.writeIntent && /改写|写入|替换|插入|生成|正文|rewrite|write/i.test(input.prompt))
   const operation = isPatchOperation(plan.operation) ? plan.operation : fallback.operation
@@ -265,13 +304,12 @@ async function generateWithFallback(
   context: string,
 ) {
   const messages = buildGenerationMessages(input, plan, context)
-
-  try {
-    return await callScallion(input.token, PRIMARY_MODEL, messages, 0.42, 4096)
-  } catch (error) {
-    console.warn('Primary Papyrus model failed, falling back.', error)
-    return callScallion(input.token, FALLBACK_MODEL, messages, 0.38, 4096)
-  }
+  return callScallion(input.token, PRIMARY_MODEL, messages, 0.42, 4096, {
+    stream: true,
+    signal: input.signal,
+    onDraft: input.onDraft,
+    onRuntime: input.onRuntime,
+  })
 }
 
 function buildGenerationMessages(input: AgentRunInput, plan: WpsAgentPlan, context: string) {
@@ -287,6 +325,7 @@ function buildGenerationMessages(input: AgentRunInput, plan: WpsAgentPlan, conte
   ].join('\n')
   const user = [
     `计划：${JSON.stringify(plan)}`,
+    input.approvedPlan ? `已批准规划：\n${input.approvedPlan.planText}` : '',
     input.selectedSkill ? `显式技能：${input.selectedSkill.name}\n${input.selectedSkill.systemHint}` : '',
     `用户指令：\n${input.prompt}`,
     context,
@@ -318,10 +357,10 @@ async function repairOutput(
     context,
   ].join('\n\n')
 
-  return callScallion(input.token, FALLBACK_MODEL, [
+  return (await callScallion(input.token, FALLBACK_MODEL, [
     { role: 'system', content: system },
     { role: 'user', content: user },
-  ], 0.2, 2200)
+  ], 0.2, 2200, { signal: input.signal })).content
 }
 
 async function callScallion(
@@ -330,18 +369,64 @@ async function callScallion(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   temperature: number,
   maxTokens: number,
+  options: { stream?: boolean; signal?: AbortSignal; onDraft?: (draft: string) => void; onRuntime?: AgentRunInput['onRuntime'] } = {},
 ) {
+  throwIfAborted(options.signal)
+  const resolvedModel = await resolveScallionModel(token, model, options.signal)
+  inputRuntime(options, resolvedModel, options.stream && supportsStreaming() ? 'stream' : 'non_stream', false)
+  if (options.stream && supportsStreaming()) {
+    let receivedToken = false
+    try {
+      const content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, true, options.signal, (draft) => {
+        receivedToken = true
+        options.onDraft?.(extractVisibleDraft(draft))
+      })
+      inputRuntime(options, resolvedModel, 'stream', false)
+      return { content, model: resolvedModel, transport: 'stream' as const, usedFallback: false }
+    } catch (error) {
+      if (!shouldFallbackToNonStream(receivedToken, error)) {
+        const classified = classifyWpsAgentError(error)
+        throw new Error(classified.message, { cause: error })
+      }
+      const content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, false, options.signal)
+      options.onDraft?.(extractVisibleDraft(content))
+      inputRuntime(options, resolvedModel, 'non_stream', true)
+      return { content, model: resolvedModel, transport: 'non_stream' as const, usedFallback: true }
+    }
+  }
+
+  const content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, false, options.signal)
+  inputRuntime(options, resolvedModel, 'non_stream', Boolean(options.stream))
+  return { content, model: resolvedModel, transport: 'non_stream' as const, usedFallback: Boolean(options.stream) }
+}
+
+async function requestScallion(
+  token: string | undefined,
+  resolvedModel: string,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  temperature: number,
+  maxTokens: number,
+  stream: boolean,
+  externalSignal?: AbortSignal,
+  onDraft?: (draft: string) => void,
+): Promise<string> {
+  if (externalSignal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError')
+  }
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
-
   if (token) {
     headers.Authorization = `Bearer ${token}`
   }
-
-  const resolvedModel = await resolveScallionModel(token, model)
   const controller = new AbortController()
-  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  let timedOut = false
+  const abortFromCaller = () => controller.abort()
+  externalSignal?.addEventListener('abort', abortFromCaller, { once: true })
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, REQUEST_TIMEOUT_MS)
 
   try {
     const response = await fetch(LLM_API, {
@@ -353,15 +438,20 @@ async function callScallion(
         messages,
         temperature,
         max_tokens: maxTokens,
-        stream: false,
+        stream,
       }),
     })
-    const payload = (await response.json().catch(() => ({}))) as LlmPayload
 
     if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as LlmPayload
       throw new Error(payload.error?.message || `Scallion 模型请求失败: HTTP ${response.status}`)
     }
 
+    if (stream) {
+      return readSseResponse(response, { signal: controller.signal, onToken: onDraft })
+    }
+
+    const payload = (await response.json().catch(() => ({}))) as LlmPayload
     const content = payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text
 
     if (!content?.trim()) {
@@ -369,14 +459,20 @@ async function callScallion(
     }
 
     return content.trim()
+  } catch (error) {
+    if (timedOut) {
+      throw new Error('模型响应超时', { cause: error })
+    }
+    throw error
   } finally {
     window.clearTimeout(timer)
+    externalSignal?.removeEventListener('abort', abortFromCaller)
   }
 }
 
-async function resolveScallionModel(token: string | undefined, preferredModel: string) {
+async function resolveScallionModel(token: string | undefined, preferredModel: string, signal?: AbortSignal) {
   try {
-    const models = await getAvailableScallionModels(token)
+    const models = await raceWithAbort(getAvailableScallionModels(token), signal)
     return models.find((model) => model === preferredModel) ?? models[0] ?? preferredModel
   } catch {
     return preferredModel
@@ -403,7 +499,16 @@ async function fetchAvailableScallionModels(token: string | undefined) {
     headers.Authorization = `Bearer ${token}`
   }
 
-  const response = await fetch(MODELS_API, { headers })
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 12000)
+  let response: Response
+  try {
+    response = await fetch(MODELS_API, { headers, signal: controller.signal })
+  } catch (error) {
+    throw new Error('模型列表请求超时或失败', { cause: error })
+  } finally {
+    window.clearTimeout(timer)
+  }
   const payload = (await response.json().catch(() => ({}))) as ScallionModelPayload
 
   if (!response.ok) {
@@ -500,34 +605,41 @@ function createLocalPlanText(prompt: string, snapshot: WpsDocumentSnapshot, plan
 function createLocalId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
-function parseAgentJson(raw: string, plan: WpsAgentPlan): AgentJson {
+function parseAgentJson(raw: string): AgentJson | undefined {
   const parsed = parseJsonObject(raw)
 
-  if (parsed) {
-    return parsed as AgentJson
+  if (!parsed) {
+    return undefined
   }
 
-  return fallbackFromRaw(raw, plan)
+  const output = parsed as AgentJson
+  const patch = output.patch && typeof output.patch === 'object'
+    ? {
+        ...output.patch,
+        content: cleanPatchContent(safeString(output.patch.content)),
+      }
+    : output.patch
+
+  return {
+    ...output,
+    patch,
+    checks: Array.isArray(output.checks) ? output.checks.map(safeString).filter(Boolean).slice(0, 8) : [],
+  }
 }
 
 function parseJsonObject(raw: string): Record<string, unknown> | undefined {
-  const cleaned = raw
-    .trim()
-    .replace(/^```(?:json)?/i, '')
-    .replace(/```$/i, '')
-    .trim()
-  const match = cleaned.match(/\{[\s\S]*\}/)
-  const jsonText = match?.[0] ?? cleaned
-
   try {
-    return JSON.parse(jsonText) as Record<string, unknown>
+    return JSON.parse(raw.trim()) as Record<string, unknown>
   } catch {
     return undefined
   }
 }
 
-function validateAgentJson(output: AgentJson, plan: WpsAgentPlan, snapshot: WpsDocumentSnapshot): ValidationResult {
+function validateAgentJson(output: AgentJson | undefined, plan: WpsAgentPlan, snapshot: WpsDocumentSnapshot): ValidationResult {
   const issues: string[] = []
+  if (!output) {
+    return { ok: false, issues: ['模型没有返回完整 JSON'] }
+  }
   const reply = safeString(output.reply)
 
   if (!reply) {
@@ -567,25 +679,7 @@ function validateAgentJson(output: AgentJson, plan: WpsAgentPlan, snapshot: WpsD
   return { ok: issues.length === 0, issues }
 }
 
-function fallbackFromRaw(raw: string, plan: WpsAgentPlan): AgentJson {
-  if (!plan.writeIntent) {
-    return { reply: raw.trim(), patch: null, checks: ['降级为普通答复'] }
-  }
-
-  const draft = extractDraft(raw)
-
-  return {
-    reply: plan.intent === 'rewrite_selection' ? '我已生成可替换选区的版本。' : '我已生成可写入文档的正文。',
-    patch: {
-      title: patchTitle(plan.intent),
-      content: draft,
-      operation: plan.operation,
-    },
-    checks: ['降级提取正文'],
-  }
-}
-
-function toRunResult(output: AgentJson, plan: WpsAgentPlan, trace: string[]): AgentRunResult {
+function toRunResult(output: AgentJson, plan: WpsAgentPlan, trace: string[], snapshot: WpsDocumentSnapshot): AgentRunResult {
   const reply = safeString(output.reply) || (plan.writeIntent ? '已完成。' : '我处理完了。')
   const patchContent = safeString(output.patch?.content)
   const operation = isPatchOperation(output.patch?.operation) ? output.patch.operation : plan.operation
@@ -595,6 +689,7 @@ function toRunResult(output: AgentJson, plan: WpsAgentPlan, trace: string[]): Ag
       reply,
       intent: plan.intent,
       trace,
+      checks: output.checks,
     }
   }
 
@@ -606,16 +701,11 @@ function toRunResult(output: AgentJson, plan: WpsAgentPlan, trace: string[]): Ag
       title: safeString(output.patch?.title) || patchTitle(plan.intent),
       content: cleanPatchContent(patchContent),
       recommendedOperation: operation,
+      sourceSelectionFingerprint: createSelectionFingerprint(snapshot.selectionText),
+      sourceContextSummary: sourceContextSummary(snapshot),
     },
+    checks: output.checks,
   }
-}
-
-function extractDraft(raw: string) {
-  const match =
-    raw.match(/正文\s*[:：]\s*([\s\S]+)/) ??
-    raw.match(/```(?:text|markdown|md)?\s*([\s\S]*?)```/i)
-
-  return cleanPatchContent((match?.[1] ?? raw).trim())
 }
 
 function cleanPatchContent(value: string) {
@@ -624,6 +714,80 @@ function cleanPatchContent(value: string) {
     .replace(/```$/i, '')
     .replace(/^正文\s*[:：]\s*/i, '')
     .trim()
+}
+
+function sourceContextSummary(snapshot: WpsDocumentSnapshot) {
+  const source = snapshot.selectionText || snapshot.documentExcerpt
+  return source.replace(/\s+/g, ' ').trim().slice(0, 160)
+}
+
+function supportsStreaming() {
+  return typeof ReadableStream !== 'undefined' && typeof TextDecoder !== 'undefined' && typeof AbortController !== 'undefined'
+}
+
+function extractVisibleDraft(raw: string) {
+  const reply = extractJsonString(raw, 'reply')
+  if (reply) {
+    return reply
+  }
+
+  const patch = raw.match(/"content"\s*:\s*"((?:\\.|[^"\\])*)/)
+  if (patch?.[1]) {
+    return decodeJsonString(patch[1])
+  }
+
+  return '正在生成可写入文稿...'
+}
+
+function extractJsonString(raw: string, key: string) {
+  const match = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)`))
+  return match?.[1] ? decodeJsonString(match[1]) : ''
+}
+
+function decodeJsonString(value: string) {
+  try {
+    return JSON.parse(`"${value}"`) as string
+  } catch {
+    return value.replace(/\\n/g, '\n').replace(/\\"/g, '"')
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal, error?: unknown) {
+  if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+    throw error instanceof Error ? error : new DOMException('Aborted', 'AbortError')
+  }
+}
+
+function inputRuntime(
+  options: { onRuntime?: AgentRunInput['onRuntime'] },
+  model: string,
+  transport: WpsAgentTransport,
+  usedFallback: boolean,
+) {
+  options.onRuntime?.({ model, transport, usedFallback })
+}
+
+function raceWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise
+  }
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('Aborted', 'AbortError'))
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new DOMException('Aborted', 'AbortError'))
+    signal.addEventListener('abort', abort, { once: true })
+    void promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', abort)
+        reject(error)
+      },
+    )
+  })
 }
 
 function operationForIntent(

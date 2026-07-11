@@ -31,10 +31,11 @@ Copy-Item -LiteralPath (Join-Path $installerDir "install.cmd") -Destination $sta
 Copy-Item -LiteralPath (Join-Path $installerDir "install.ps1") -Destination $stageRoot -Force
 Copy-Item -LiteralPath (Join-Path $installerDir "update.ps1") -Destination $stageRoot -Force
 
+$githubReleaseUrl = "https://github.com/bzm2008/papyrus/releases/download/v$Version/Papyrus-WPS-Addin_$Version.zip"
 $release = [ordered]@{
   version = $Version
   product = "Papyrus WPS Add-in"
-  packageUrl = "https://scallion.uno/downloads/papyrus/wps/Papyrus-WPS-Addin_$Version.zip?v=$Version"
+  packageUrl = $githubReleaseUrl
   updateManifestUrl = "https://scallion.uno/api/papyrus/wps/update"
   pubDate = (Get-Date).ToUniversalTime().ToString("o")
 }

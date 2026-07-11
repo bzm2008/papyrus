@@ -46,12 +46,24 @@ export type WpsPlanDraft = {
   updatedAt: number
 }
 
+export type WpsRetryRequest = {
+  executionPrompt: string
+  displayPrompt: string
+  approvedPlan?: WpsPlanDraft
+  snapshot?: WpsDocumentSnapshot
+  assistantId: string
+  selectedSkill?: AgentSkill
+}
+
 export type ChatMessage = {
   id: string
   role: 'user' | 'assistant' | 'system'
   content: string
   createdAt: number
   pendingPatch?: PendingPatch
+  runStatus?: 'generating' | 'completed' | 'failed' | 'cancelled'
+  canRetry?: boolean
+  retryRequest?: WpsRetryRequest
 }
 
 export type PendingPatch = {
@@ -59,6 +71,8 @@ export type PendingPatch = {
   title: string
   content: string
   recommendedOperation: WpsPatchOperation
+  sourceSelectionFingerprint: string
+  sourceContextSummary: string
 }
 
 export type ScallionUser = {
@@ -81,6 +95,10 @@ export type AgentRunInput = {
   token?: string
   approvedPlan?: WpsPlanDraft
   onStatus?: (status: string) => void
+  signal?: AbortSignal
+  onStage?: (stage: string) => void
+  onDraft?: (draft: string) => void
+  onRuntime?: (runtime: { model: string; transport: 'stream' | 'non_stream'; usedFallback: boolean }) => void
 }
 
 export type AgentRunResult = {
@@ -89,4 +107,9 @@ export type AgentRunResult = {
   patch?: Omit<PendingPatch, 'id'>
   trace?: string[]
   todos?: WpsAgentTodo[]
+  checks?: string[]
+  model?: string
+  transport?: 'stream' | 'non_stream'
+  usedFallback?: boolean
+  recoverableError?: string
 }

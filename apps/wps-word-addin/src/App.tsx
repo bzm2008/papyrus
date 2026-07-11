@@ -9,13 +9,19 @@ import {
   LogOut,
   PenLine,
   RefreshCw,
+  RotateCcw,
   Send,
+  Square,
   Sparkles,
   X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { agentSkills, searchSkills } from './skills'
-import { createWpsDocumentBridge, type WpsDocumentBridge } from './services/wpsDocumentBridge'
+import {
+  createSelectionFingerprint,
+  createWpsDocumentBridge,
+  type WpsDocumentBridge,
+} from './services/wpsDocumentBridge'
 import {
   clearSession,
   createLoginDevice,
@@ -35,6 +41,7 @@ import type {
   WpsDocumentSnapshot,
   WpsPatchOperation,
   WpsPlanDraft,
+  WpsRetryRequest,
 } from './types'
 
 const emptySnapshot: WpsDocumentSnapshot = {
@@ -48,6 +55,7 @@ const addinVersion = import.meta.env.VITE_PAPYRUS_WPS_VERSION || 'dev'
 
 export default function App() {
   const bridgeRef = useRef<WpsDocumentBridge | undefined>(undefined)
+  const abortControllerRef = useRef<AbortController | undefined>(undefined)
   const [session, setSession] = useState<ScallionSession | undefined>(() => loadStoredSession())
   const [loginDevice, setLoginDevice] = useState<LoginDevice | undefined>()
   const [loginStatus, setLoginStatus] = useState<'idle' | 'creating' | 'polling' | 'error'>('idle')
@@ -66,12 +74,13 @@ export default function App() {
     },
   ])
   const [pendingPatch, setPendingPatch] = useState<PendingPatch | undefined>()
-  const [runState, setRunState] = useState<'idle' | 'running' | 'error'>('idle')
+  const [runState, setRunState] = useState<'idle' | 'running' | 'error' | 'cancelled'>('idle')
   const [lastError, setLastError] = useState('')
   const [writeNotice, setWriteNotice] = useState('')
   const [planDraft, setPlanDraft] = useState<WpsPlanDraft | undefined>()
   const [agentTodos, setAgentTodos] = useState<WpsAgentTodo[]>([])
   const [agentTrace, setAgentTrace] = useState<string[]>([])
+  const [runtimeDetail, setRuntimeDetail] = useState('')
 
   const skillQuery = getSkillQuery(prompt)
   const visibleSkills = useMemo(() => searchSkills(skillQuery ?? ''), [skillQuery])
@@ -89,6 +98,7 @@ export default function App() {
     { label: bridgeMode, tone: bridgeMode === 'WPS' ? 'ok' : 'warn' },
     { label: session ? '已登录' : '未登录', tone: session ? 'ok' : 'warn' },
     { label: snapshot.cursorAvailable ? contextLabel : '未连接文档', tone: snapshot.cursorAvailable ? 'ok' : 'warn' },
+    ...(runtimeDetail ? [{ label: runtimeDetail, tone: 'neutral' as const }] : []),
     { label: `v${addinVersion}`, tone: 'neutral' },
   ] as const
 
@@ -252,6 +262,8 @@ export default function App() {
 
     setRunState('running')
     setLastError('正在生成规划')
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     try {
       const latestSnapshot = await (bridgeRef.current ?? createWpsDocumentBridge()).getSnapshot()
@@ -261,6 +273,7 @@ export default function App() {
         snapshot: latestSnapshot,
         selectedSkill,
         token: session?.token,
+        signal: controller.signal,
       })
       setPlanDraft(draft)
       setMessages((items) => [
@@ -272,8 +285,13 @@ export default function App() {
       setRunState('idle')
       setLastError('规划已生成，确认后再执行')
     } catch (error) {
-      setRunState('error')
-      setLastError(error instanceof Error ? error.message : '规划生成失败')
+      const cancelled = controller.signal.aborted
+      setRunState(cancelled ? 'cancelled' : 'error')
+      setLastError(cancelled ? '已取消规划生成。' : error instanceof Error ? error.message : '规划生成失败')
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = undefined
+      }
     }
   }
 
@@ -284,6 +302,8 @@ export default function App() {
 
     setRunState('running')
     setLastError('正在修订规划')
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     try {
       const latestSnapshot = await (bridgeRef.current ?? createWpsDocumentBridge()).getSnapshot()
@@ -294,6 +314,7 @@ export default function App() {
         token: session?.token,
         previousPlan: planDraft,
         feedback,
+        signal: controller.signal,
       })
       setPlanDraft(draft)
       setMessages((items) => [
@@ -305,8 +326,13 @@ export default function App() {
       setRunState('idle')
       setLastError('规划已修订')
     } catch (error) {
-      setRunState('error')
-      setLastError(error instanceof Error ? error.message : '规划修订失败')
+      const cancelled = controller.signal.aborted
+      setRunState(cancelled ? 'cancelled' : 'error')
+      setLastError(cancelled ? '已取消规划修订。' : error instanceof Error ? error.message : '规划修订失败')
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = undefined
+      }
     }
   }
 
@@ -322,7 +348,12 @@ export default function App() {
     await runPrompt(draft.executionPrompt, draft.request, draft)
   }
 
-  const runPrompt = async (executionPrompt: string, displayPrompt = executionPrompt, approvedPlan?: WpsPlanDraft) => {
+  const runPrompt = async (
+    executionPrompt: string,
+    displayPrompt = executionPrompt,
+    approvedPlan?: WpsPlanDraft,
+    retry?: WpsRetryRequest,
+  ) => {
     if (!executionPrompt.trim() || runState === 'running') {
       return
     }
@@ -351,42 +382,55 @@ export default function App() {
     setWriteNotice('')
     setAgentTodos([])
     setAgentTrace([])
-
-    const userMessage: ChatMessage = {
-      id: createId(),
-      role: 'user',
-      content: displayPrompt,
-      createdAt: Date.now(),
+    setRuntimeDetail('准备请求')
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+    const assistantId = retry?.assistantId ?? createId()
+    const selectedSkillForRun = retry?.selectedSkill ?? selectedSkill
+    const baseRetry: WpsRetryRequest = {
+      executionPrompt,
+      displayPrompt,
+      approvedPlan,
+      assistantId,
+      selectedSkill: selectedSkillForRun,
     }
-    const assistantId = createId()
-    setMessages((items) => [
-      ...items,
-      userMessage,
-      {
-        id: assistantId,
-        role: 'assistant',
-        content: '正在读取选区和文档上下文...',
-        createdAt: Date.now(),
-      },
-    ])
+
+    if (retry) {
+      setMessages((items) => items.map((item) =>
+        item.id === assistantId
+          ? { ...item, content: '正在重试并读取原始上下文...', runStatus: 'generating', canRetry: false, pendingPatch: undefined, retryRequest: undefined }
+          : item,
+      ))
+    } else {
+      setMessages((items) => [
+        ...items,
+        { id: createId(), role: 'user', content: displayPrompt, createdAt: Date.now() },
+        { id: assistantId, role: 'assistant', content: '正在读取选区和文档上下文...', createdAt: Date.now(), runStatus: 'generating' },
+      ])
+    }
 
     try {
-      const latestSnapshot = await (bridgeRef.current ?? createWpsDocumentBridge()).getSnapshot()
+      const latestSnapshot = retry?.snapshot ?? await (bridgeRef.current ?? createWpsDocumentBridge()).getSnapshot()
       setSnapshot(latestSnapshot)
+      const retryRequest = { ...baseRetry, snapshot: latestSnapshot }
       const result = await runUnifiedAgent({
         prompt: executionPrompt,
         snapshot: latestSnapshot,
-        selectedSkill,
+        selectedSkill: selectedSkillForRun,
         token: session?.token,
         approvedPlan,
+        signal: controller.signal,
         onStatus: (status) => {
           setAgentTrace((items) => [...items, status].slice(-8))
-          setMessages((items) =>
-            items.map((item) =>
-              item.id === assistantId ? { ...item, content: `正在${status}...` } : item,
-            ),
-          )
-          setLastError(status)
+          setRuntimeDetail(status)
+        },
+        onDraft: (draft) => {
+          setMessages((items) => items.map((item) =>
+            item.id === assistantId ? { ...item, content: draft, runStatus: 'generating' } : item,
+          ))
+        },
+        onRuntime: (runtime) => {
+          setRuntimeDetail(`${runtime.model} · ${runtime.transport === 'stream' ? '流式' : '非流式'}${runtime.usedFallback ? ' · 已降级' : ''}`)
         },
       })
       setAgentTodos(result.todos ?? [])
@@ -402,6 +446,8 @@ export default function App() {
         setPendingPatch(patch)
       }
 
+      const failed = Boolean(result.recoverableError)
+
       setMessages((items) =>
         items.map((message) =>
           message.id === assistantId
@@ -409,18 +455,46 @@ export default function App() {
                 ...message,
                 content: result.reply,
                 pendingPatch: patch,
+                runStatus: failed ? 'failed' : 'completed',
+                canRetry: failed,
+                retryRequest: failed ? retryRequest : undefined,
               }
             : message,
         ),
       )
-      setRunState('idle')
+      setRunState(failed ? 'error' : 'idle')
+      setLastError(result.recoverableError ?? '')
+      setRuntimeDetail(result.model ? `${result.model} · ${result.transport === 'stream' ? '流式' : '非流式'}${result.usedFallback ? ' · 已降级' : ''}` : '')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Papyrus 处理失败'
-      setRunState('error')
-      setLastError(message)
+      const cancelled = abortControllerRef.current?.signal.aborted
+      setRunState(cancelled ? 'cancelled' : 'error')
+      setLastError(cancelled ? '已取消本次生成。' : message)
       setMessages((items) =>
-        items.map((item) => (item.id === assistantId ? { ...item, content: message } : item)),
+        items.map((item) =>
+          item.id === assistantId
+            ? {
+                ...item,
+                content: cancelled ? '已取消本次生成。' : message,
+                runStatus: cancelled ? 'cancelled' : 'failed',
+                canRetry: !cancelled,
+                retryRequest: cancelled ? undefined : baseRetry,
+              }
+            : item,
+        ),
       )
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = undefined
+      }
+    }
+  }
+
+  const cancelRun = () => abortControllerRef.current?.abort()
+
+  const retryLastRun = (retry: WpsRetryRequest | undefined) => {
+    if (retry && runState !== 'running') {
+      void runPrompt(retry.executionPrompt, retry.displayPrompt, retry.approvedPlan, retry)
     }
   }
   const runShortcut = (label: string) => {
@@ -445,10 +519,15 @@ export default function App() {
     }
 
     try {
-      await (bridgeRef.current ?? createWpsDocumentBridge()).applyPatch(operation, pendingPatch.content)
+      const patchId = pendingPatch.id
+      await (bridgeRef.current ?? createWpsDocumentBridge()).applyPatch(
+        operation,
+        pendingPatch.content,
+        operation === 'replace_selection' ? pendingPatch.sourceSelectionFingerprint : undefined,
+      )
       setWriteNotice(writeNoticeFor(operation))
-      setPendingPatch(undefined)
       await refreshSnapshot()
+      setPendingPatch((current) => current?.id === patchId ? undefined : current)
     } catch (error) {
       setWriteNotice(error instanceof Error ? error.message : '写入 WPS 文档失败')
     }
@@ -510,6 +589,11 @@ export default function App() {
               <button type="button" title="复制" onClick={() => void navigator.clipboard?.writeText(message.content)}>
                 <Clipboard size={12} />
               </button>
+              {message.canRetry ? (
+                <button type="button" title="重试" onClick={() => retryLastRun(message.retryRequest)}>
+                  <RotateCcw size={12} />
+                </button>
+              ) : null}
             </div>
             <div className="message-content">{message.content}</div>
             {message.pendingPatch ? <PatchPreview patch={message.pendingPatch} onApply={applyPatch} /> : null}
@@ -524,7 +608,11 @@ export default function App() {
             <strong>{pendingPatch.title}</strong>
           </div>
           <div className="patch-actions">
-            <button type="button" disabled={!snapshot.selectionText} onClick={() => void applyPatch('replace_selection')}>
+            <button
+              type="button"
+              disabled={!snapshot.selectionText || createSelectionFingerprint(snapshot.selectionText) !== pendingPatch.sourceSelectionFingerprint}
+              onClick={() => void applyPatch('replace_selection')}
+            >
               替换选区
             </button>
             <button type="button" onClick={() => void applyPatch('insert_at_cursor')}>
@@ -590,11 +678,17 @@ export default function App() {
           <button className="skill-button" type="button" title="选择技能" onClick={() => setSkillOpen((open) => !open)}>
             <Sparkles size={15} />
           </button>
-          <button className="send-button" type="submit" disabled={runState === 'running' || !prompt.trim()}>
+          <button
+            className="send-button"
+            type={runState === 'running' ? 'button' : 'submit'}
+            title={runState === 'running' ? '取消生成' : '发送'}
+            disabled={runState !== 'running' && !prompt.trim()}
+            onClick={runState === 'running' ? cancelRun : undefined}
+          >
             {!session ? (
               <LogIn size={15} />
             ) : runState === 'running' ? (
-              <Loader2 size={15} className="spin" />
+              <Square size={14} />
             ) : (
               <Send size={15} />
             )}

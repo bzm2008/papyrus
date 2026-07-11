@@ -12,13 +12,15 @@ export const agentSkills: AgentSkill[] = [
 ]
 
 export function findSkillFromPrompt(prompt: string) {
-  const match = prompt.match(/@([\p{L}\p{N}_\-.\u4e00-\u9fa5]*)$/u)
-
-  if (!match) {
+  const expression = /(?:^|\s)@([\p{L}\p{N}_\-.\u4e00-\u9fa5]+)/gu
+  let match: RegExpExecArray | null
+  let query = ''
+  while ((match = expression.exec(prompt))) {
+    query = match[1].toLowerCase()
+  }
+  if (!query) {
     return undefined
   }
-
-  const query = match[1].toLowerCase()
   return agentSkills.find((skill) => skillMatches(skill, query))
 }
 
