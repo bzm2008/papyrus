@@ -75,7 +75,7 @@ pub fn scan_workspace(
         entries: Vec::new(),
         truncated: false,
     };
-    collect_entries(&policy, root_id, &root, Path::new(""), 0, &mut scan)?;
+    collect_entries(&policy, root_id, &root, &root, Path::new(""), 0, &mut scan)?;
     Ok(scan)
 }
 
@@ -91,6 +91,7 @@ pub fn search_workspace(
     let scan = scan_workspace(roots, root_id)?;
     let needle = query.to_lowercase();
     let policy = PathPolicy::new(roots);
+    let root = policy.resolve_existing(root_id, Path::new(""))?;
     let mut entries = Vec::new();
     let mut truncated = scan.truncated;
 
@@ -100,7 +101,7 @@ pub fn search_workspace(
             break;
         }
         let path = policy.resolve_existing(root_id, Path::new(&entry.path))?;
-        if !is_eligible_workspace_path(Path::new(&entry.path), &path, &entry.extension) {
+        if !is_eligible_workspace_path(&root, Path::new(&entry.path), &path, &entry.extension) {
             continue;
         }
         let name_matches = entry.name.to_lowercase().contains(&needle);
@@ -125,6 +126,7 @@ pub fn inspect_file(
     requested_path: &Path,
 ) -> Result<FileInspection, WorkAssistantError> {
     let policy = PathPolicy::new(roots);
+    let root = policy.resolve_existing(root_id, Path::new(""))?;
     let path = policy.resolve_existing(root_id, requested_path)?;
     let metadata = fs::metadata(&path)
         .map_err(|error| WorkAssistantError::blocked(format!("could not inspect file: {error}")))?;
@@ -132,7 +134,7 @@ pub fn inspect_file(
         return Err(WorkAssistantError::blocked("workspace path is not a file"));
     }
     let extension = extension_for(&path);
-    if !is_eligible_workspace_path(requested_path, &path, &extension) {
+    if !is_eligible_workspace_path(&root, requested_path, &path, &extension) {
         return Err(WorkAssistantError::blocked(
             "this workspace file is not eligible for inspection",
         ));
@@ -162,6 +164,7 @@ fn read_roots(state: &WorkAssistantState) -> Result<Vec<AuthorizedRoot>, WorkAss
 fn collect_entries(
     policy: &PathPolicy<'_>,
     root_id: &str,
+    workspace_root: &Path,
     directory: &Path,
     relative_directory: &Path,
     depth: usize,
@@ -199,14 +202,22 @@ fn collect_entries(
             Err(_) => continue,
         };
         let extension = extension_for(&resolved);
-        if !is_eligible_workspace_path(&relative_path, &resolved, &extension) {
+        if !is_eligible_workspace_path(workspace_root, &relative_path, &resolved, &extension) {
             continue;
         }
         if metadata.is_dir() {
             scan.entries
                 .push(workspace_entry(&name, &relative_path, "directory", "", 0));
             if depth < MAX_SCAN_DEPTH {
-                collect_entries(policy, root_id, &resolved, &relative_path, depth + 1, scan)?;
+                collect_entries(
+                    policy,
+                    root_id,
+                    workspace_root,
+                    &resolved,
+                    &relative_path,
+                    depth + 1,
+                    scan,
+                )?;
             } else {
                 scan.truncated = true;
             }
@@ -271,11 +282,16 @@ fn is_excluded_name(name: &str) -> bool {
         )
 }
 
-fn is_eligible_workspace_path(relative_path: &Path, resolved_path: &Path, extension: &str) -> bool {
+fn is_eligible_workspace_path(
+    workspace_root: &Path,
+    relative_path: &Path,
+    resolved_path: &Path,
+    extension: &str,
+) -> bool {
     relative_path
         .components()
         .all(|component| !is_excluded_name(&component.as_os_str().to_string_lossy()))
-        && !has_hidden_or_system_attribute(resolved_path)
+        && !has_hidden_or_system_attribute_in_workspace(workspace_root, resolved_path)
         && !is_dangerous_extension(extension)
 }
 
@@ -298,6 +314,10 @@ fn is_dangerous_extension(extension: &str) -> bool {
             | "fish"
             | "app"
             | "scr"
+            | "dmg"
+            | "pkg"
+            | "lnk"
+            | "desktop"
     )
 }
 
@@ -353,9 +373,35 @@ fn has_hidden_or_system_attribute(_: &Path) -> bool {
     false
 }
 
+fn has_hidden_or_system_attribute_in_workspace(workspace_root: &Path, target: &Path) -> bool {
+    has_hidden_or_system_attribute_in_ancestors(workspace_root, target, has_hidden_or_system_attribute)
+}
+
+fn has_hidden_or_system_attribute_in_ancestors(
+    workspace_root: &Path,
+    target: &Path,
+    has_hidden_or_system_attribute: impl Fn(&Path) -> bool,
+) -> bool {
+    let mut candidate = target;
+    loop {
+        if has_hidden_or_system_attribute(candidate) {
+            return true;
+        }
+        if candidate == workspace_root {
+            return false;
+        }
+        let Some(parent) = candidate.parent() else {
+            return false;
+        };
+        candidate = parent;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{inspect_file, scan_workspace, search_workspace};
+    use super::{
+        has_hidden_or_system_attribute_in_ancestors, inspect_file, scan_workspace, search_workspace,
+    };
     use crate::work_assistant::{AuthorizedRoot, AuthorizedRootKind};
     use std::{
         fs,
@@ -497,5 +543,49 @@ mod tests {
         assert_eq!(search.entries.len(), 1);
         assert_eq!(search.entries[0].name, "notes.txt");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn direct_inspect_and_search_exclude_additional_dangerous_extensions() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        for extension in ["dmg", "pkg", "lnk", "desktop"] {
+            fs::write(directory.join(format!("needle.{extension}")), "needle").unwrap();
+        }
+        fs::write(directory.join("notes.txt"), "needle").unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&directory).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        for extension in ["dmg", "pkg", "lnk", "desktop"] {
+            let error = inspect_file(
+                &[root.clone()],
+                "root",
+                Path::new(&format!("needle.{extension}")),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "blocked");
+        }
+        let search = search_workspace(&[root], "root", "needle").unwrap();
+
+        assert_eq!(search.entries.len(), 1);
+        assert_eq!(search.entries[0].name, "notes.txt");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn hidden_or_system_attributes_on_workspace_ancestors_are_ineligible() {
+        let root = PathBuf::from("workspace");
+        let private_directory = root.join("private");
+        let target = private_directory.join("notes.txt");
+
+        assert!(has_hidden_or_system_attribute_in_ancestors(&root, &target, |path| {
+            path == private_directory
+        }));
+        assert!(!has_hidden_or_system_attribute_in_ancestors(&root, &target, |_| false));
     }
 }
