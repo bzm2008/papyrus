@@ -1,6 +1,7 @@
 mod audit;
 mod file_ops;
 mod path_policy;
+pub(crate) mod platform;
 mod preview;
 mod registry;
 mod types;
@@ -9,6 +10,8 @@ mod workspace;
 pub use audit::*;
 pub use file_ops::*;
 pub use path_policy::*;
+#[allow(unused_imports)]
+pub(crate) use platform::*;
 pub use preview::*;
 pub use registry::*;
 pub use types::*;
