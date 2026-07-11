@@ -511,7 +511,7 @@ fn directory_size(path: &PathBuf) -> u64 {
 #[cfg(test)]
 mod security_tests {
   #[test]
-  fn legacy_arbitrary_path_commands_are_not_registered() {
+  fn invoke_handler_exposes_only_approved_commands() {
     let source = include_str!("lib.rs");
     let handler_start = source
       .find(".invoke_handler(tauri::generate_handler![")
@@ -521,12 +521,44 @@ mod security_tests {
       .expect("invoke handler must close");
     let handler = &source[handler_start..handler_start + handler_end];
 
-    for command in ["read_text_file", "read_binary_file", "scan_project_folder"] {
-      assert!(
-        !handler.contains(command),
-        "legacy arbitrary-path command {command} must not be exposed through invoke"
-      );
-    }
+    let registered_commands = handler
+      .lines()
+      .filter_map(|line| {
+        let line = line.trim();
+        (!line.starts_with(".invoke_handler") && !line.is_empty())
+          .then(|| line.trim_end_matches(','))
+      })
+      .collect::<Vec<_>>();
+
+    assert_eq!(
+      registered_commands,
+      [
+        "rag_query",
+        "mcp_search",
+        "read_project_guidance",
+        "web_search",
+        "health_check_backend",
+        "check_sqlite_status",
+        "get_memory_usage",
+        "clear_global_memory",
+        "rebuild_project_index",
+        "test_model_connection",
+        "llm_chat",
+        "open_external_url",
+        "work_assistant::work_assistant_capabilities",
+        "work_assistant::work_assistant_list_roots",
+        "work_assistant::work_assistant_add_root",
+        "work_assistant::work_assistant_remove_root",
+        "work_assistant::work_assistant_workspace_list",
+        "work_assistant::work_assistant_workspace_scan",
+        "work_assistant::work_assistant_file_search",
+        "work_assistant::work_assistant_file_inspect",
+        "work_assistant::work_assistant_downloads_scan",
+        "work_assistant::work_assistant_list_audit",
+        "work_assistant::work_assistant_clear_audit",
+        "work_assistant::work_assistant_cancel_run",
+      ]
+    );
   }
 }
 
