@@ -39,6 +39,11 @@ import {
   type SecretaryTaskClassification,
   type SecretaryTaskComplexity,
 } from './secretaryTaskClassifier'
+import { enabledToolDefinitions } from './workAssistantRegistry'
+import { getWorkAssistantCapabilities } from './workAssistantClient'
+import { runWorkAssistantAgentLoop } from './workAssistantAgentLoop'
+import { executeAssistantToolCall, dispatchOrderedWorkAssistantEvent } from './workAssistantRuntime'
+import { finishSecretaryRun, startSecretaryRun } from './secretaryRunController'
 import { findSemanticCacheHit, rememberSemanticResult } from './semanticCacheService'
 import {
   getEnabledStudioAgents,
@@ -181,8 +186,79 @@ export async function sendFlowMessage(
   store.setLlmRunState('running', '秘书长正在判断任务路径')
 
   try {
-    const plan = await planAgentRun(executionContent, thinkingEffort)
-    const result = await executeAgentRun(executionContent, plan, thinkingEffort)
+    const classification = classifySecretaryTask(executionContent)
+    let routedExecutionContent = executionContent
+
+    if (classification.domain !== 'writing') {
+      const signal = startSecretaryRun(run.id)
+      try {
+        const capabilityStatus = await getWorkAssistantCapabilities()
+        const platform = capabilityStatus.find((status) => status.platform)?.platform ?? 'windows'
+        const availability = {
+          workspace: capabilityStatus.some((status) => status.toolset === 'workspace' && status.available),
+          desktop: capabilityStatus.some((status) => status.toolset === 'desktop' && status.available),
+          browser: false,
+          project: false,
+        }
+        const definitions = enabledToolDefinitions({
+          platform,
+          enabledToolsets: classification.domain === 'mixed' ? ['workspace', 'desktop'] : ['workspace', 'desktop'],
+          availability,
+        }).filter((tool) => classification.domain !== 'mixed' || tool.defaultRisk === 'read')
+        const workRouting = selectModelForRole('agent', {
+          complexity: classification.complexity,
+          writeIntent: false,
+          thinkingEffort,
+        })
+        if (!canCallProvider(workRouting.provider)) {
+          throw new Error('当前没有可用模型来规划受控电脑操作。')
+        }
+        const sampling = getAgentSamplingProfile('agent_output', thinkingEffort)
+        const workResult = await runWorkAssistantAgentLoop({
+          runId: run.id,
+          prompt: executionContent,
+          toolNames: definitions.map((tool) => tool.name),
+          toolSchemas: definitions.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+          modelCall: (messages, currentSignal) => callOpenAICompatible(workRouting.provider, messages, currentSignal, sampling),
+          executeTool: (toolCall, currentSignal) => executeAssistantToolCall({ runId: run.id, toolCall, signal: currentSignal }),
+          finalStream: classification.domain === 'work_assistant'
+            ? async (outline, receipts, onToken, currentSignal) => callOpenAICompatibleStream(
+                workRouting.provider,
+                [
+                  { role: 'system', content: '你是 Papyrus 电脑助手。只根据已验证的工具结果给出简洁、可核对的最终答复，不编造本地路径或完成状态。' },
+                  { role: 'user', content: `用户请求：${executionContent}\n\n工具回执：\n${receipts}\n\n答复提纲：${outline}` },
+                ],
+                { signal: currentSignal, onToken, sampling },
+              )
+            : undefined,
+          emit: dispatchOrderedWorkAssistantEvent,
+          signal,
+          collectionOnly: classification.domain === 'mixed',
+        })
+
+        if (classification.domain === 'work_assistant') {
+          useAppStore.getState().addFlowMessage({ role: 'assistant', agentId: 'writer', content: workResult.response })
+          finishAgentRun(run, {
+            status: 'completed',
+            response: workResult.response,
+            summary: `受控电脑助手完成 ${workResult.toolResults.length} 个工具步骤。`,
+          })
+          useAppStore.getState().setLlmRunState('idle', '电脑助手已完成本轮操作')
+          return
+        }
+
+        routedExecutionContent = [
+          executionContent,
+          '以下是受控本地工具采集结果。只把这些结果作为写作材料，不要声称执行了未出现的操作：',
+          workResult.toolResults.map(({ call, result }) => JSON.stringify({ tool: call.name, ok: result.ok, summary: result.summary, data: result.data })).join('\n'),
+        ].join('\n\n')
+      } finally {
+        finishSecretaryRun(run.id)
+      }
+    }
+
+    const plan = await planAgentRun(routedExecutionContent, thinkingEffort)
+    const result = await executeAgentRun(routedExecutionContent, plan, thinkingEffort)
 
     if (!result.streamedMessageId) {
       useAppStore.getState().addFlowMessage({
@@ -194,10 +270,10 @@ export async function sendFlowMessage(
 
     if (plan.writeIntent && result.patchContent) {
       queueDocumentPatch({
-        operation: plan.documentPatchOperation ?? inferPatchOperation(executionContent),
+        operation: plan.documentPatchOperation ?? inferPatchOperation(routedExecutionContent),
         title: '秘书长生成正文补丁',
         content: result.patchContent,
-        createArticle: shouldCreateArticleFromPrompt(executionContent),
+        createArticle: shouldCreateArticleFromPrompt(routedExecutionContent),
         targetChatId: useAppStore.getState().activeChatId,
       })
     }
@@ -206,7 +282,7 @@ export async function sendFlowMessage(
       status: 'completed',
       response: result.response,
       patchContent: result.patchContent,
-      summary: summarizeFlowRun(executionContent, plan, result),
+      summary: summarizeFlowRun(routedExecutionContent, plan, result),
     })
 
     if (activeGoal) {

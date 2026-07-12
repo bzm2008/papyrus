@@ -1,4 +1,5 @@
 export type SecretaryTaskComplexity = 'simple' | 'standard' | 'complex' | 'goal'
+export type SecretaryTaskDomain = 'writing' | 'work_assistant' | 'mixed'
 
 export type SecretaryTaskClassification = {
   complexity: SecretaryTaskComplexity
@@ -9,6 +10,16 @@ export type SecretaryTaskClassification = {
   cacheability: 'low' | 'medium' | 'high'
   reasons: string[]
   taskType: string
+  domain: SecretaryTaskDomain
+}
+
+const workAssistantPattern = /(?:文件|文件夹|目录|下载|桌面|磁盘|内存|CPU|应用|软件|打开网址|打开链接|定位文件|扫描|整理资料|归档|移动|重命名|复制|删除|电脑状态|downloads?|folders?|files?|desktop|disk|memory|scan|open\s+(?:app|url|file)|rename|move|organize)/i
+const writingDomainPattern = /(?:写|撰写|起草|文章|报告|总结|润色|改写|小说|章节|文案|正文|write|draft|article|report|rewrite)/i
+
+function inferDomain(text: string): SecretaryTaskDomain {
+  const work = workAssistantPattern.test(text)
+  const writing = writingDomainPattern.test(text)
+  return work && writing ? 'mixed' : work ? 'work_assistant' : 'writing'
 }
 
 const robustLongformScalePattern =
@@ -72,6 +83,7 @@ export function classifySecretaryTask(
   const text = prompt.trim()
   const normalized = text.replace(/\s+/g, '')
   const reasons: string[] = []
+  const domain = inferDomain(text)
 
   if (/^\/goal\b/i.test(text) || options.activeGoal) {
     return {
@@ -83,6 +95,7 @@ export function classifySecretaryTask(
       cacheability: 'medium',
       reasons: ['检测到长程目标模式'],
       taskType: 'longform-goal',
+      domain,
     }
   }
 
@@ -99,6 +112,7 @@ export function classifySecretaryTask(
       cacheability: 'high',
       reasons: ['detected longform fiction scale: multi-chapter or million-word writing project'],
       taskType: 'longform-fiction',
+      domain,
     }
   }
 
@@ -112,6 +126,7 @@ export function classifySecretaryTask(
       cacheability: 'high',
       reasons: ['detected longform project scale'],
       taskType: inferTaskType(text, 'longform-project'),
+      domain,
     }
   }
 
@@ -130,6 +145,7 @@ export function classifySecretaryTask(
       cacheability: 'medium',
       reasons: ['检测到小说续写或章节创作任务，需要多 Agent 写作链路'],
       taskType: 'longform-fiction',
+      domain,
     }
   }
 
@@ -143,6 +159,7 @@ export function classifySecretaryTask(
       cacheability: 'medium',
       reasons: [`短请求命中简单任务：${simpleHit.source}`],
       taskType: 'single-step-edit',
+      domain,
     }
   }
 
@@ -157,6 +174,7 @@ export function classifySecretaryTask(
       cacheability: inferCacheability(text, 'high'),
       reasons,
       taskType: inferTaskType(text, platformHit ? 'platform' : 'research-writing'),
+      domain,
     }
   }
 
@@ -171,6 +189,7 @@ export function classifySecretaryTask(
       cacheability: inferCacheability(text, 'medium'),
       reasons,
       taskType: inferTaskType(text, 'complex-writing'),
+      domain,
     }
   }
 
@@ -185,6 +204,7 @@ export function classifySecretaryTask(
       cacheability: inferCacheability(text, platformHit ? 'high' : 'medium'),
       reasons,
       taskType: inferTaskType(text, platformHit ? 'platform-content' : 'writing'),
+      domain,
     }
   }
 
@@ -197,6 +217,7 @@ export function classifySecretaryTask(
     cacheability: 'low',
     reasons: ['默认按单步秘书任务处理'],
     taskType: inferTaskType(text, 'general'),
+    domain,
   }
 }
 

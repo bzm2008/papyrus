@@ -22,15 +22,16 @@ afterEach(() => {
 
 describe('work assistant runtime', () => {
   it('executes read tools without approval', async () => {
-    const invoke = vi.fn(async () => ({ entries: [] }))
+    const invoke = vi.fn(async () => [{ id: 'root', label: 'Downloads', path: 'C:/Users/private', kind: 'downloads' }])
     setWorkAssistantInvokerForTests(invoke)
     const events: WorkAssistantEvent[] = []
 
-    const result = await executeAssistantToolCall({ runId: 'run-1', toolCall: call('workspace_scan', { rootId: 'root' }), emit: (event) => events.push(event) })
+    const result = await executeAssistantToolCall({ runId: 'run-1', toolCall: call('workspace_list'), emit: (event) => events.push(event) })
 
     expect(result.ok).toBe(true)
     expect(events.map((event) => event.type)).toEqual(['tool.started', 'tool.completed'])
-    expect(invoke).toHaveBeenCalledWith('work_assistant_workspace_scan', { rootId: 'root' })
+    expect(invoke).toHaveBeenCalledWith('work_assistant_workspace_list', undefined)
+    expect(JSON.stringify(result.data)).not.toContain('C:/Users/private')
   })
 
   it('previews, waits for approval, approves, then executes an existing file preview', async () => {
@@ -101,4 +102,3 @@ describe('work assistant runtime', () => {
     flushAllWorkAssistantDeltas()
   })
 })
-

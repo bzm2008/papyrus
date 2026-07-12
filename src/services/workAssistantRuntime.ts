@@ -89,6 +89,53 @@ function resultSummary(value: unknown) {
   return '操作已完成。'
 }
 
+function sanitizedToolData(toolName: string, value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  if (toolName === 'workspace_list' && Array.isArray(value)) {
+    return {
+      roots: value.map((root) => {
+        const item = root && typeof root === 'object' ? root as Record<string, unknown> : {}
+        return { id: item.id, label: item.label, kind: item.kind }
+      }),
+    }
+  }
+  if (toolName === 'desktop_status') {
+    const status = value as Record<string, unknown>
+    const disks = Array.isArray(status.disks)
+      ? status.disks.map((disk) => {
+          const item = disk && typeof disk === 'object' ? disk as Record<string, unknown> : {}
+          return { totalBytes: item.totalBytes, availableBytes: item.availableBytes }
+        })
+      : []
+    return {
+      platform: status.platform,
+      cpuCount: status.cpuCount,
+      cpuUsagePercent: status.cpuUsagePercent,
+      memoryTotalBytes: status.memoryTotalBytes,
+      memoryUsedBytes: status.memoryUsedBytes,
+      disks,
+      capabilities: status.capabilities,
+    }
+  }
+  return Array.isArray(value) ? { items: value } : value as Record<string, unknown>
+}
+
+function safeToolFailure(error: unknown) {
+  const payload = error && typeof error === 'object' ? error as Record<string, unknown> : {}
+  const code = typeof payload.code === 'string' ? payload.code : 'tool_failed'
+  const recoverable = payload.recoverable !== false
+  const summary = code === 'stale_preview'
+    ? '预览已过期，请重新生成。'
+    : code === 'cancelled'
+      ? '运行已取消。'
+      : code === 'path_outside_workspace'
+        ? '请求路径不在已授权工作区内。'
+        : code === 'blocked'
+          ? '该本地操作已被安全策略阻止。'
+          : '工具执行失败，请检查能力状态后重试。'
+  return { ok: false as const, summary, errorCode: code, recoverable }
+}
+
 async function executeReadOrDesktopTool(call: AssistantToolCall): Promise<unknown> {
   const args = call.arguments
   switch (call.name) {
@@ -195,7 +242,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     }
 
     const data = await executeReadOrDesktopTool(call)
-    const result = { ok: true, summary: resultSummary(data), data: data && typeof data === 'object' ? data as Record<string, unknown> : undefined }
+    const result = { ok: true, summary: resultSummary(data), data: sanitizedToolData(call.name, data) }
     failureCounts.delete(key)
     emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
     return result
@@ -207,7 +254,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       return cancelled
     }
     failureCounts.set(key, (failureCounts.get(key) ?? 0) + 1)
-    const failed = { ok: false, summary: error instanceof Error ? error.message : '工具执行失败。', errorCode: 'tool_failed', recoverable: true }
+    const failed = safeToolFailure(error)
     emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: failed, at: now() })
     return failed
   }
@@ -271,4 +318,3 @@ export function resetWorkAssistantRuntimeForTests() {
   failureCounts.clear()
   useWorkAssistantStore.setState({ runs: {}, activeRunId: undefined, selectedToolCallId: undefined, capabilityStatus: [] })
 }
-
