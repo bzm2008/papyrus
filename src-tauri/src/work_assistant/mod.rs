@@ -1,4 +1,5 @@
 mod audit;
+mod desktop;
 mod file_ops;
 mod path_policy;
 pub(crate) mod platform;
@@ -8,6 +9,7 @@ mod types;
 mod workspace;
 
 pub use audit::*;
+pub use desktop::*;
 pub use file_ops::*;
 pub use path_policy::*;
 #[allow(unused_imports)]

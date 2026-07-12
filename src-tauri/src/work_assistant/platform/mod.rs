@@ -21,6 +21,7 @@ pub(crate) mod linux;
 pub(crate) mod macos;
 #[cfg(windows)]
 pub(crate) mod windows;
+pub(crate) mod desktop;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

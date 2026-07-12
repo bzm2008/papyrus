@@ -140,6 +140,22 @@ pub fn read_audit_entries(path: &Path) -> Result<Vec<AuditEntry>, WorkAssistantE
     Ok(entries)
 }
 
+/// Return newest-first audit records with a bounded page size.  The native UI can request a
+/// larger page for an audit export, but the broker never materializes more than 200 entries for a
+/// single command response.
+pub fn read_audit_entries_page(
+    path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<AuditEntry>, WorkAssistantError> {
+    let entries = read_audit_entries(path)?;
+    Ok(entries
+        .into_iter()
+        .skip(offset)
+        .take(limit.min(200))
+        .collect())
+}
+
 pub fn clear_audit_entries(state: &WorkAssistantState) -> Result<(), WorkAssistantError> {
     #[cfg(test)]
     run_audit_lock_test_hook(&state.audit_guard);
@@ -162,10 +178,19 @@ fn clear_audit_entries_at(path: &Path) -> Result<(), WorkAssistantError> {
         .write(true)
         .truncate(true)
         .open(path)
-        .map(|_| ())
         .map_err(|error| {
             WorkAssistantError::protocol(format!("could not clear audit log: {error}"))
-        })
+        })?;
+    append_audit_entry_at(
+        path,
+        &AuditEntry::new(
+            "audit_cleared",
+            "audit log truncated by direct settings action",
+        ),
+    )
+    .map_err(|error| {
+        WorkAssistantError::protocol(format!("could not append audit clear marker: {error}"))
+    })
 }
 
 fn unix_seconds() -> u64 {
@@ -266,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_truncates_file_without_deleting_parent_directory() {
+    fn clear_truncates_file_without_deleting_parent_directory_and_appends_marker() {
         let directory = test_dir();
         let state = test_state(&directory);
         append_audit_entry(&state, &AuditEntry::new("saved", "ok")).unwrap();
@@ -275,7 +300,9 @@ mod tests {
 
         assert!(directory.is_dir());
         assert!(state.audit_path.is_file());
-        assert_eq!(fs::metadata(&state.audit_path).unwrap().len(), 0);
+        let entries = read_audit_entries(&state.audit_path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "audit_cleared");
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -324,7 +351,25 @@ mod tests {
         clear_contended_rx.recv().unwrap();
         drop(held_guard);
         clear.join().unwrap().unwrap();
-        assert!(read_audit_entries(&path).unwrap().is_empty());
+        let entries = read_audit_entries(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].event, "audit_cleared");
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn audit_page_is_newest_first_and_caps_limit_at_200() {
+        let directory = test_dir();
+        let state = test_state(&directory);
+        for index in 0..205 {
+            append_audit_entry(&state, &AuditEntry::new("entry", index.to_string())).unwrap();
+        }
+
+        let page = read_audit_entries_page(&state.audit_path, 3, 999).unwrap();
+        assert_eq!(page.len(), 200);
+        assert_eq!(page[0].detail, "201");
+        assert_eq!(page[199].detail, "2");
 
         fs::remove_dir_all(directory).unwrap();
     }

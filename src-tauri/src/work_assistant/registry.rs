@@ -1,5 +1,5 @@
 use crate::work_assistant::{
-    clear_audit_entries, persist_roots, read_audit_entries, validate_authorized_root,
+    clear_audit_entries, persist_roots, read_audit_entries_page, validate_authorized_root,
     AssistantErrorPayload, AuditEntry, AuthorizedRoot, AuthorizedRootKind, CapabilityStatus,
     WorkAssistantError, WorkAssistantState,
 };
@@ -23,7 +23,46 @@ pub fn capability_statuses() -> Vec<CapabilityStatus> {
         })
         .collect();
     capabilities.extend(file_operation_capabilities(&platform));
+    capabilities.extend(desktop_capabilities(&platform));
     capabilities
+}
+
+fn desktop_capabilities(platform: &str) -> Vec<CapabilityStatus> {
+    let capability = |name: &str, available: bool, reason: Option<&str>| CapabilityStatus {
+        name: name.into(),
+        toolset: "desktop".into(),
+        available,
+        reason: reason.map(str::to_owned),
+        platform: platform.into(),
+    };
+    let supported = cfg!(any(windows, target_os = "linux", target_os = "macos"));
+    vec![
+        capability(
+            "desktop_status",
+            supported,
+            (!supported).then_some("desktop status is unavailable on this platform"),
+        ),
+        capability(
+            "desktop_open_url",
+            supported,
+            (!supported).then_some("external URL opening is unavailable on this platform"),
+        ),
+        capability(
+            "desktop_open_file",
+            supported,
+            (!supported).then_some("controlled file opening is unavailable on this platform"),
+        ),
+        capability(
+            "desktop_reveal_file",
+            supported,
+            (!supported).then_some("file reveal is unavailable on this platform"),
+        ),
+        capability(
+            "desktop_open_app",
+            supported,
+            (!supported).then_some("application aliases are unavailable on this platform"),
+        ),
+    ]
 }
 
 fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
@@ -193,13 +232,22 @@ fn invalidate_previews_for_root(
 #[tauri::command]
 pub fn work_assistant_list_audit(
     state: State<'_, WorkAssistantState>,
+    offset: Option<usize>,
+    limit: Option<usize>,
 ) -> Result<Vec<AuditEntry>, AssistantErrorPayload> {
     let _guard = state
         .audit_guard
         .lock()
         .map_err(|_| WorkAssistantError::protocol("audit log lock is unavailable"))
         .map_err(AssistantErrorPayload::from)?;
-    read_audit_entries(&state.audit_path).map_err(Into::into)
+    read_audit_entries_page(
+        &state.audit_path,
+        offset.unwrap_or(0),
+        limit
+            .map(crate::work_assistant::audit_page_limit)
+            .unwrap_or(50),
+    )
+    .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -335,6 +383,25 @@ mod tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("fail closed")));
+    }
+
+    #[test]
+    fn desktop_capabilities_are_explicit_and_use_the_desktop_toolset() {
+        let capabilities = capability_statuses();
+        for name in [
+            "desktop_status",
+            "desktop_open_url",
+            "desktop_open_file",
+            "desktop_reveal_file",
+            "desktop_open_app",
+        ] {
+            let capability = capabilities
+                .iter()
+                .find(|candidate| candidate.name == name)
+                .unwrap_or_else(|| panic!("missing capability {name}"));
+            assert_eq!(capability.toolset, "desktop");
+            assert!(capability.available);
+        }
     }
 
     #[test]

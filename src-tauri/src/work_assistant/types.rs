@@ -11,6 +11,36 @@ pub struct CapabilityStatus {
     pub platform: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskStatus {
+    pub mount_point: String,
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopStatus {
+    pub platform: String,
+    pub cpu_count: usize,
+    pub cpu_usage_percent: f32,
+    pub memory_total_bytes: u64,
+    pub memory_used_bytes: u64,
+    pub disks: Vec<DiskStatus>,
+    pub capabilities: Vec<CapabilityStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredApplication {
+    pub id: String,
+    pub label: String,
+    pub executable_path: PathBuf,
+    pub platform: String,
+    pub created_at: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePreviewRequest {
