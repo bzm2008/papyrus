@@ -1,6 +1,6 @@
 use super::{
-    file_version, FileVersion, OpenedDestination, OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles,
-    RecoveryBinding, StagedFile,
+    file_version, FileVersion, OpenedDestination, OpenedPlatformSource, PlatformFileIdentity,
+    PreparedRecoveryHandles, RecoveryBinding, StagedFile,
 };
 use crate::work_assistant::WorkAssistantError;
 use sha2::{Digest, Sha256};
@@ -277,7 +277,13 @@ pub(crate) fn preflight_recovery_receipt(slot: &File) -> Result<(), WorkAssistan
         sync_receipt_probe(&file).map_err(blocked_io("could not sync recovery receipt preflight"))
     };
     let cleanup = unsafe { libc::unlinkat(slot.as_raw_fd(), name.as_ptr(), 0) };
-    let cleanup = if cleanup == 0 { Ok(()) } else { Err(last_os_error("could not clean up recovery receipt preflight")) };
+    let cleanup = if cleanup == 0 {
+        Ok(())
+    } else {
+        Err(last_os_error(
+            "could not clean up recovery receipt preflight",
+        ))
+    };
     match (operation, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), _) | (_, Err(error)) => Err(recovery_unavailable(error)),
@@ -487,6 +493,24 @@ pub(crate) fn rebind_recovery_parent(
 }
 
 pub(crate) fn rebind_recovery_slot(binding: &RecoveryBinding) -> Result<File, WorkAssistantError> {
+    let vault = rebind_recovery_vault(binding)?;
+    let leaf = CString::new(binding.slot_leaf.as_str())
+        .map_err(|_| WorkAssistantError::stale_preview("private recovery slot is invalid"))?;
+    validate_directory_at(vault.as_raw_fd(), &leaf).map_err(|_| {
+        WorkAssistantError::stale_preview("private recovery slot changed after preview")
+    })?;
+    let slot = openat_directory(vault.as_raw_fd(), &leaf).map_err(|_| {
+        WorkAssistantError::stale_preview("private recovery slot changed after preview")
+    })?;
+    if identity(&slot)? != binding.slot_identity {
+        return Err(WorkAssistantError::stale_preview(
+            "private recovery slot changed after preview",
+        ));
+    }
+    Ok(slot)
+}
+
+fn rebind_recovery_vault(binding: &RecoveryBinding) -> Result<File, WorkAssistantError> {
     let parent = rebind_recovery_parent(
         &binding.authorized_root_path,
         &binding.root_identity,
@@ -505,20 +529,19 @@ pub(crate) fn rebind_recovery_slot(binding: &RecoveryBinding) -> Result<File, Wo
             "private recovery vault changed after preview",
         ));
     }
+    Ok(vault)
+}
+
+pub(crate) fn remove_empty_recovery_slot(binding: &RecoveryBinding) -> Result<(), WorkAssistantError> {
+    let vault = rebind_recovery_vault(binding)?;
     let leaf = CString::new(binding.slot_leaf.as_str())
         .map_err(|_| WorkAssistantError::stale_preview("private recovery slot is invalid"))?;
-    validate_directory_at(vault.as_raw_fd(), &leaf).map_err(|_| {
-        WorkAssistantError::stale_preview("private recovery slot changed after preview")
-    })?;
-    let slot = openat_directory(vault.as_raw_fd(), &leaf).map_err(|_| {
-        WorkAssistantError::stale_preview("private recovery slot changed after preview")
-    })?;
+    let slot = openat_directory(vault.as_raw_fd(), &leaf)?;
     if identity(&slot)? != binding.slot_identity {
-        return Err(WorkAssistantError::stale_preview(
-            "private recovery slot changed after preview",
-        ));
+        return Err(WorkAssistantError::stale_preview("private recovery slot changed before cleanup"));
     }
-    Ok(slot)
+    let result = unsafe { libc::unlinkat(vault.as_raw_fd(), leaf.as_ptr(), libc::AT_REMOVEDIR) };
+    if result == 0 { Ok(()) } else { Err(last_os_error("could not remove uncommitted recovery slot")) }
 }
 
 /// The retained parent descriptor is the only namespace used for the leaf re-open.
@@ -543,7 +566,9 @@ pub(crate) fn verify_bound_source(
     }
     let source_identity = identity(source)?;
     if file_version(source)? != *expected_version {
-        return Err(WorkAssistantError::stale_preview("the source file content changed after preview"));
+        return Err(WorkAssistantError::stale_preview(
+            "the source file content changed after preview",
+        ));
     }
     if identity(parent)? != *expected_parent_identity {
         return Err(WorkAssistantError::stale_preview(
@@ -579,7 +604,9 @@ pub(crate) fn verify_bound_source(
         ));
     }
     if file_version(&current_source)? != *expected_version {
-        return Err(WorkAssistantError::stale_preview("the source file content changed after preview"));
+        return Err(WorkAssistantError::stale_preview(
+            "the source file content changed after preview",
+        ));
     }
     Ok((root_identity, current_identity))
 }

@@ -67,39 +67,55 @@ pub fn execute_batch_file_operations(
     let mut prepared = Vec::with_capacity(request.operations.len());
     for (index, operation) in request.operations.iter().enumerate() {
         if is_run_cancelled(state, &request.run_id)? {
+            let mut result = cancelled_result(&request.operations, index);
+            record_cleanup_warnings(state, &mut result, &mut prepared);
             append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
-            return Ok(cancelled_result(&request.operations, index));
+            return Ok(result);
         }
-        prepared.push(prepare_file_transaction(
-            &root, &preview.id, index, operation, &request.conflict_policy,
-        )?);
+        match prepare_file_transaction(&root, &preview.id, index, operation, &request.conflict_policy) {
+            Ok(transaction) => prepared.push(transaction),
+            Err(error) => {
+                // Every earlier preflight slot belongs to this batch until its transaction commits.
+                // Reclaim them before propagating the preflight error.
+                let cleanup = cleanup_prepared(&mut prepared);
+                if let Some(cleanup) = cleanup {
+                    let _ = append_audit_entry(state, &AuditEntry::new("file_operation_cleanup_warning", cleanup.message));
+                }
+                return Err(error);
+            }
+        }
     }
     consume_approval(state, &execution, &preview, &approval, required_count)?;
 
-    let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false };
-    for (index, transaction) in prepared.into_iter().enumerate() {
+    let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false, warnings: Vec::new() };
+    for (index, transaction) in prepared.iter_mut().enumerate() {
         if is_run_cancelled(state, &request.run_id)? {
             append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
             result.cancelled = true;
             result.remaining.extend(remaining_items(&request.operations, index));
+            record_cleanup_warnings(state, &mut result, &mut prepared);
             break;
         }
         match transaction.execute(|| is_run_cancelled(state, &request.run_id)) {
             Ok(executed) if executed.detail == "destination already exists" => {
-                let item = item(index, executed.detail, None);
-                append_item_audit(state, "skipped", &item)?;
-                result.skipped.push(item);
+                let skipped_item = item(index, executed.detail, None, executed.receipts.clone());
+                append_item_audit(state, "skipped", &skipped_item)?;
+                result.skipped.push(skipped_item);
             }
             Ok(executed) => {
-                let item = item(index, executed.detail, None);
-                for receipt in executed.receipts {
-                    append_audit_entry(state, &AuditEntry::new(
+                let completed_item = item(index, executed.detail, None, executed.receipts.clone());
+                let mut audit_failed = false;
+                for receipt in &executed.receipts {
+                    if append_audit_entry(state, &AuditEntry::new(
                         "file_operation_recovery",
                         format!("preview={};index={};vault={};leaf={}", receipt.preview_id, receipt.index, receipt.vault_scope, receipt.recovery_leaf),
-                    ))?;
+                    )).is_err() { audit_failed = true; }
                 }
-                append_item_audit(state, "completed", &item)?;
-                result.completed.push(item);
+                if append_item_audit(state, "completed", &completed_item).is_err() { audit_failed = true; }
+                result.completed.push(completed_item);
+                if audit_failed {
+                    result.warnings.push(item(index, "operation completed; audit persistence is unavailable".into(), Some(&WorkAssistantError { code: "audit_unavailable".into(), message: String::new(), recoverable: true }), Vec::new()));
+                }
             }
             Err(error) => {
                 if error.code == "cancelled" {
@@ -107,7 +123,7 @@ pub fn execute_batch_file_operations(
                     append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
                     break;
                 }
-                let item = item(index, safe_error_detail(&error), Some(&error));
+                let item = item(index, safe_error_detail(&error), Some(&error), Vec::new());
                 append_item_audit(state, "failed", &item)?;
                 result.failed.push(item);
             }
@@ -123,7 +139,7 @@ fn record_cancelled_transaction(
     index: usize,
     error: &WorkAssistantError,
 ) -> Result<(), WorkAssistantError> {
-    let item = item(index, "operation cancelled".into(), Some(error));
+    let item = item(index, "operation cancelled".into(), Some(error), Vec::new());
     append_item_audit(state, "cancelled", &item)?;
     result.cancelled = true;
     // The active operation did not publish a mutation: include it alongside later work so the UI
@@ -162,12 +178,13 @@ fn append_cancellation_audit_once(
     Ok(())
 }
 
-fn item(index: usize, detail: String, error: Option<&WorkAssistantError>) -> BatchItemResult {
+fn item(index: usize, detail: String, error: Option<&WorkAssistantError>, recovery_receipts: Vec<crate::work_assistant::platform::RecoveryReceipt>) -> BatchItemResult {
     BatchItemResult {
         index,
         detail,
         code: error.map(|value| value.code.clone()),
         recoverable: error.map(|value| value.recoverable),
+        recovery_receipts,
     }
 }
 
@@ -211,11 +228,23 @@ fn is_run_cancelled(state: &WorkAssistantState, run_id: &str) -> Result<bool, Wo
 }
 
 fn cancelled_result(operations: &[FileOperationRequest], start: usize) -> BatchExecutionResult {
-    BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: remaining_items(operations, start), cancelled: true }
+    BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: remaining_items(operations, start), cancelled: true, warnings: Vec::new() }
 }
 
 fn remaining_items(operations: &[FileOperationRequest], start: usize) -> Vec<BatchItemResult> {
-    operations.iter().enumerate().skip(start).map(|(index, _)| item(index, "operation pending".into(), None)).collect()
+    operations.iter().enumerate().skip(start).map(|(index, _)| item(index, "operation pending".into(), None, Vec::new())).collect()
+}
+
+fn cleanup_prepared(prepared: &mut [crate::work_assistant::platform::PreparedFileTransaction]) -> Option<WorkAssistantError> {
+    prepared.iter_mut().filter_map(|transaction| transaction.cleanup_uncommitted().err()).next()
+}
+
+fn record_cleanup_warnings(state: &WorkAssistantState, result: &mut BatchExecutionResult, prepared: &mut [crate::work_assistant::platform::PreparedFileTransaction]) {
+    if let Some(error) = cleanup_prepared(prepared) {
+        let warning = item(usize::MAX, "uncommitted recovery cleanup needs attention".into(), Some(&WorkAssistantError { code: "recovery_cleanup_unavailable".into(), message: String::new(), recoverable: true }), Vec::new());
+        let _ = append_audit_entry(state, &AuditEntry::new("file_operation_cleanup_warning", error.message));
+        result.warnings.push(warning);
+    }
 }
 
 fn append_item_audit(state: &WorkAssistantState, status: &str, item: &BatchItemResult) -> Result<(), WorkAssistantError> {
@@ -245,12 +274,30 @@ mod tests {
 
     #[test]
     fn approved_trash_moves_regular_file_to_private_recovery() {
-        let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "source").unwrap();
+        let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "source").unwrap(); fs::write(path.join("second.txt"), "before").unwrap();
         let state = state(&path);
         let preview = create_batch_preview(&state, BatchPreviewRequest { run_id: "run".into(), root_id: "root".into(), operations: vec![operation(FileOperationKind::Trash, Some("source.txt"), None)], conflict_policy: ConflictPolicy::Skip }).unwrap();
         let grant = approve_batch_preview(&state, &preview.preview_id, "run", ApprovalChoice::Once).unwrap();
         let result = execute_batch_file_operations(&state, BatchExecutionRequest { preview_id: preview.preview_id, revision: preview.revision, token: grant.token }).unwrap();
         assert_eq!(result.completed.len(), 1); assert!(!path.join("source.txt").exists()); assert!(path.join(".papyrus-recovery").exists());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn audit_failure_after_recovery_keeps_completed_state_and_receipt() {
+        let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "source").unwrap(); fs::write(path.join("second.txt"), "before").unwrap();
+        let state = state(&path);
+        let preview = create_batch_preview(&state, BatchPreviewRequest { run_id: "run".into(), root_id: "root".into(), operations: vec![operation(FileOperationKind::Trash, Some("source.txt"), None)], conflict_policy: ConflictPolicy::Skip }).unwrap();
+        let grant = approve_batch_preview(&state, &preview.preview_id, "run", ApprovalChoice::Once).unwrap();
+        crate::work_assistant::inject_audit_append_failure_once();
+        let result = execute_batch_file_operations(&state, BatchExecutionRequest { preview_id: preview.preview_id, revision: preview.revision, token: grant.token }).unwrap();
+        assert!(!path.join("source.txt").exists());
+        assert_eq!(result.completed.len(), 1);
+        assert_eq!(result.completed[0].recovery_receipts.len(), 1);
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code.as_deref(), Some("audit_unavailable"));
+        assert_eq!(result.warnings[0].recoverable, Some(true));
+        assert!(result.failed.is_empty());
         fs::remove_dir_all(path).unwrap();
     }
 
@@ -272,6 +319,55 @@ mod tests {
     }
 
     #[test]
+    fn later_preflight_failure_reclaims_earlier_uncommitted_recovery_slot() {
+        let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "source").unwrap(); fs::write(path.join("second.txt"), "before").unwrap();
+        let state = state(&path);
+        let preview = create_batch_preview(&state, BatchPreviewRequest { run_id: "run".into(), root_id: "root".into(), operations: vec![
+            operation(FileOperationKind::Trash, Some("source.txt"), None),
+            operation(FileOperationKind::Trash, Some("second.txt"), None),
+        ], conflict_policy: ConflictPolicy::Skip }).unwrap();
+        fs::write(path.join("second.txt"), "changed").unwrap();
+        let grant = approve_batch_preview(&state, &preview.preview_id, "run", ApprovalChoice::Once).unwrap();
+        assert_eq!(execute_batch_file_operations(&state, BatchExecutionRequest { preview_id: preview.preview_id, revision: preview.revision, token: grant.token }).unwrap_err().code, "stale_preview");
+        assert!(path.join("source.txt").exists());
+        let vault = path.join(".papyrus-recovery");
+        assert!(!vault.exists() || fs::read_dir(vault).unwrap().next().is_none());
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn cancellation_before_execution_reclaims_prepared_recovery_slot() {
+        let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "source").unwrap();
+        let operation = operation(FileOperationKind::Trash, Some("source.txt"), None);
+        let mut transaction = prepare_file_transaction(&path, "preview", 0, &operation, &ConflictPolicy::Skip).unwrap();
+        let error = match transaction.execute(|| Ok(true)) { Err(error) => error, Ok(_) => panic!("cancelled transaction must not execute") };
+        assert_eq!(error.code, "cancelled");
+        transaction.cleanup_uncommitted().unwrap();
+        assert!(path.join("source.txt").exists());
+        let vault = path.join(".papyrus-recovery");
+        assert!(!vault.exists() || fs::read_dir(vault).unwrap().next().is_none());
+        drop(transaction); fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn unexecuted_recovery_slot_is_reclaimed_but_committed_slot_is_retained() {
+        let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("unexecuted.txt"), "one").unwrap(); fs::write(path.join("committed.txt"), "two").unwrap();
+        let first = operation(FileOperationKind::Trash, Some("unexecuted.txt"), None);
+        let mut unexecuted = prepare_file_transaction(&path, "preview", 0, &first, &ConflictPolicy::Skip).unwrap();
+        unexecuted.cleanup_uncommitted().unwrap();
+        drop(unexecuted);
+        let second = operation(FileOperationKind::Trash, Some("committed.txt"), None);
+        let mut committed = prepare_file_transaction(&path, "preview", 1, &second, &ConflictPolicy::Skip).unwrap();
+        let execution = committed.execute(|| Ok(false)).unwrap();
+        assert_eq!(execution.receipts.len(), 1);
+        // A committed slot must not be reclaimed by the generic preflight cleanup path.
+        committed.cleanup_uncommitted().unwrap();
+        let slot = path.join(".papyrus-recovery").join(&execution.receipts[0].recovery_leaf);
+        assert!(slot.join("content").exists());
+        drop(committed); fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn same_volume_move_uses_the_native_relative_rename_primitive() {
         let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "source").unwrap();
         let result = run(&state(&path), vec![operation(FileOperationKind::Move, Some("source.txt"), Some("moved.txt"))], ConflictPolicy::Skip);
@@ -285,7 +381,7 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("source.txt"), "source").unwrap();
         let operation = operation(FileOperationKind::Copy, Some("source.txt"), Some("destination.txt"));
-        let transaction = prepare_file_transaction(&path, "preview", 0, &operation, &ConflictPolicy::Skip).unwrap();
+        let mut transaction = prepare_file_transaction(&path, "preview", 0, &operation, &ConflictPolicy::Skip).unwrap();
         let calls = std::cell::Cell::new(0u8);
         let error = match transaction.execute(|| {
             calls.set(calls.get() + 1);
@@ -299,11 +395,12 @@ mod tests {
         assert!(!fs::read_dir(&path).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".papyrus-stage-")));
 
         let state = state(&path);
-        let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false };
+        let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false, warnings: Vec::new() };
         record_cancelled_transaction(&state, &mut result, &[operation], 0, &error).unwrap();
         assert!(result.cancelled);
         assert!(result.failed.is_empty());
         assert_eq!(result.remaining.len(), 1);
+        drop(transaction);
         fs::remove_dir_all(path).unwrap();
     }
 

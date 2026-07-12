@@ -276,8 +276,7 @@ pub(crate) fn preflight_recovery_receipt(slot: &File) -> Result<(), WorkAssistan
         probe
             .write_all(b"papyrus-recovery-probe")
             .map_err(blocked_io("could not write recovery receipt probe"))?;
-        probe
-            .sync_all()
+        sync_receipt_probe(&probe)
             .map_err(blocked_io("could not sync recovery receipt probe"))?;
         drop(probe);
         Ok(())
@@ -291,6 +290,24 @@ pub(crate) fn preflight_recovery_receipt(slot: &File) -> Result<(), WorkAssistan
         (Err(error), Ok(())) => Err(recovery_unavailable(error)),
         (_, Err(error)) => Err(recovery_unavailable(error)),
     }
+}
+
+fn sync_receipt_probe(file: &File) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_RECEIPT_PROBE_SYNC_ONCE.with(|value| std::mem::replace(&mut *value.borrow_mut(), false)) {
+        return Err(std::io::Error::other("injected receipt probe sync failure"));
+    }
+    file.sync_all()
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_RECEIPT_PROBE_SYNC_ONCE: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_receipt_probe_sync_failure_once() {
+    FAIL_RECEIPT_PROBE_SYNC_ONCE.with(|value| *value.borrow_mut() = true);
 }
 
 pub(crate) fn remove_staging(staging: &File) -> Result<(), WorkAssistantError> {

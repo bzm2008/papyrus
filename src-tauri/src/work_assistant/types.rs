@@ -172,6 +172,8 @@ pub struct BatchItemResult {
     pub code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recoverable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recovery_receipts: Vec<crate::work_assistant::platform::RecoveryReceipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -182,6 +184,9 @@ pub struct BatchExecutionResult {
     pub failed: Vec<BatchItemResult>,
     pub remaining: Vec<BatchItemResult>,
     pub cancelled: bool,
+    /// Non-fatal persistence/cleanup failures observed after a file transaction committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<BatchItemResult>,
 }
 
 #[derive(Clone, Debug, Serialize)]

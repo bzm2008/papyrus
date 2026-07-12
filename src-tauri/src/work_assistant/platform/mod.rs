@@ -293,6 +293,17 @@ pub struct PreparedRecoverySlot {
     binding: RecoveryBinding,
 }
 
+struct RecoverySlotPreparationFailure {
+    error: WorkAssistantError,
+    slot: Option<PreparedRecoverySlot>,
+}
+
+impl From<WorkAssistantError> for RecoverySlotPreparationFailure {
+    fn from(error: WorkAssistantError) -> Self {
+        Self { error, slot: None }
+    }
+}
+
 pub(crate) struct RecoveryBinding {
     pub(crate) authorized_root_path: PathBuf,
     pub(crate) root_identity: PlatformFileIdentity,
@@ -444,7 +455,13 @@ pub(crate) fn prepare_recovery_slot(
             slot_identity: handles.slot_identity,
         },
     };
-    preflight_recovery_receipt(&slot)?;
+    if let Err(error) = preflight_recovery_receipt(&slot) {
+        // The slot is not yet owned by a prepared transaction. Consume it so cleanup releases
+        // the original capabilities before performing the fresh identity-bound removal. The
+        // preflight failure remains the caller-visible cause even if cleanup also needs repair.
+        let _ = slot.cleanup_uncommitted();
+        return Err(error);
+    }
     Ok(slot)
 }
 
@@ -455,10 +472,19 @@ pub(crate) fn prepare_recovery_slot_for_source(
     preview_id: &str,
     index: usize,
 ) -> Result<PreparedRecoverySlot, WorkAssistantError> {
+    prepare_recovery_slot_for_source_capturing(source, preview_id, index)
+        .map_err(|failure| failure.error)
+}
+
+fn prepare_recovery_slot_for_source_capturing(
+    source: &SourceSnapshot,
+    preview_id: &str,
+    index: usize,
+) -> Result<PreparedRecoverySlot, RecoverySlotPreparationFailure> {
     if preview_id.trim().is_empty() || preview_id.contains('\0') {
         return Err(WorkAssistantError::protocol(
             "recovery receipt requires a valid preview id",
-        ));
+        ).into());
     }
     source.verify_snapshot()?;
     let recovery_leaf = uuid::Uuid::new_v4().to_string();
@@ -501,7 +527,9 @@ pub(crate) fn prepare_recovery_slot_for_source(
             slot_identity: handles.slot_identity,
         },
     };
-    preflight_recovery_receipt(&slot)?;
+    if let Err(error) = preflight_recovery_receipt(&slot) {
+        return Err(RecoverySlotPreparationFailure { error, slot: Some(slot) });
+    }
     Ok(slot)
 }
 
@@ -600,7 +628,7 @@ pub(crate) fn prepare_file_transaction(
     operation: &FileOperationRequest,
     conflict: &ConflictPolicy,
 ) -> Result<PreparedFileTransaction, WorkAssistantError> {
-    let source = match operation.kind {
+    let mut source = match operation.kind {
         FileOperationKind::Copy
         | FileOperationKind::Move
         | FileOperationKind::Rename
@@ -667,24 +695,40 @@ pub(crate) fn prepare_file_transaction(
         FileOperationKind::Move | FileOperationKind::Rename | FileOperationKind::Trash
     ) && !skip
     {
-        Some(prepare_recovery_slot_for_source(
-            source.as_ref().expect("source is required"),
-            preview_id,
-            index,
-        )?)
+        match prepare_recovery_slot_for_source_capturing(
+            source.as_ref().expect("source is required"), preview_id, index,
+        ) {
+            Ok(slot) => Some(slot),
+            Err(failure) => {
+                drop(source.take());
+                drop(existing_destination.take());
+                drop(destination.take());
+                if let Some(slot) = failure.slot { let _ = slot.cleanup_uncommitted(); }
+                return Err(failure.error);
+            }
+        }
     } else {
         None
     };
     let destination_recovery =
         if matches!(conflict, ConflictPolicy::Overwrite) && existing_destination.is_some() && !skip
         {
-            Some(prepare_recovery_slot_for_source(
+            match prepare_recovery_slot_for_source_capturing(
                 existing_destination
                     .as_ref()
                     .expect("destination snapshot is present"),
                 preview_id,
                 index,
-            )?)
+            ) {
+                Ok(slot) => Some(slot),
+                Err(failure) => {
+                    drop(source.take());
+                    drop(existing_destination.take());
+                    drop(destination.take());
+                    if let Some(slot) = failure.slot { let _ = slot.cleanup_uncommitted(); }
+                    return Err(failure.error);
+                }
+            }
         } else {
             None
         };
@@ -2165,6 +2209,28 @@ mod tests {
 
         assert_eq!(error.code, "stale_preview");
         assert!(slot_path.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preflight_failure_releases_transaction_locks_before_reclaiming_slot() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("document.txt"), "contents").unwrap();
+        let operation = FileOperationRequest {
+            kind: FileOperationKind::Trash,
+            source: Some("document.txt".into()),
+            destination: None,
+        };
+        super::windows::inject_receipt_probe_sync_failure_once();
+        let error = match prepare_file_transaction(
+            &root, "preview-preflight", 0, &operation, &ConflictPolicy::Skip,
+        ) { Err(error) => error, Ok(_) => panic!("injected recovery preflight must fail") };
+        assert_eq!(error.code, "recovery_unavailable");
+        assert!(root.join("document.txt").is_file());
+        let vault = root.join(".papyrus-recovery");
+        assert!(!vault.exists() || fs::read_dir(&vault).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 

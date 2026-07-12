@@ -12,6 +12,16 @@ use uuid::Uuid;
 
 #[cfg(test)]
 thread_local! {
+    static FAIL_AUDIT_APPEND_ONCE: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn inject_audit_append_failure_once() {
+    FAIL_AUDIT_APPEND_ONCE.with(|fail| *fail.borrow_mut() = true);
+}
+
+#[cfg(test)]
+thread_local! {
     static AUDIT_LOCK_TEST_HOOK: RefCell<Option<Box<dyn FnOnce(&std::sync::Mutex<()>)>>> =
         RefCell::new(None);
 }
@@ -60,6 +70,14 @@ pub fn append_audit_entry(
     state: &WorkAssistantState,
     entry: &AuditEntry,
 ) -> Result<(), WorkAssistantError> {
+    #[cfg(test)]
+    if FAIL_AUDIT_APPEND_ONCE.with(|fail| std::mem::replace(&mut *fail.borrow_mut(), false)) {
+        return Err(WorkAssistantError {
+            code: "audit_unavailable".into(),
+            message: "injected audit append failure".into(),
+            recoverable: true,
+        });
+    }
     #[cfg(test)]
     run_audit_lock_test_hook(&state.audit_guard);
     let _guard = state
