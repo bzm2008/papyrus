@@ -219,7 +219,7 @@ fn file_has_shebang(path: &Path) -> Result<bool, WorkAssistantError> {
     Ok(length == prefix.len() && &prefix == b"#!")
 }
 
-fn resolve_open_path(
+fn resolve_existing_path(
     roots: &[AuthorizedRoot],
     root_id: &str,
     requested_path: impl AsRef<Path>,
@@ -233,8 +233,25 @@ fn resolve_open_path(
             "only ordinary files and directories can be opened",
         ));
     }
+    Ok(resolved)
+}
+
+fn resolve_open_path(
+    roots: &[AuthorizedRoot],
+    root_id: &str,
+    requested_path: impl AsRef<Path>,
+) -> Result<PathBuf, WorkAssistantError> {
+    let resolved = resolve_existing_path(roots, root_id, requested_path)?;
     validate_open_file(&resolved)?;
     Ok(resolved)
+}
+
+fn resolve_reveal_path(
+    roots: &[AuthorizedRoot],
+    root_id: &str,
+    requested_path: impl AsRef<Path>,
+) -> Result<PathBuf, WorkAssistantError> {
+    resolve_existing_path(roots, root_id, requested_path)
 }
 
 #[tauri::command]
@@ -295,7 +312,7 @@ pub fn work_assistant_desktop_reveal_file(
         .read()
         .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))
         .map_err(AssistantErrorPayload::from)?;
-    let resolved = resolve_open_path(&roots, &root_id, Path::new(&path))
+    let resolved = resolve_reveal_path(&roots, &root_id, Path::new(&path))
         .map_err(AssistantErrorPayload::from)?;
     platform::desktop::reveal_file(&resolved).map_err(Into::into)
 }
@@ -532,7 +549,9 @@ pub fn audit_page_limit(limit: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_assistant::{AuditEntry, AuthorizedRootKind, WorkAssistantState};
+    use crate::work_assistant::{
+        AuditEntry, AuthorizedRoot, AuthorizedRootKind, WorkAssistantState,
+    };
     use std::{
         collections::{HashMap, HashSet},
         fs,
@@ -600,6 +619,30 @@ mod tests {
             fs::set_permissions(&executable, permissions).unwrap();
             assert_eq!(validate_open_file(&executable).unwrap_err().code, "blocked");
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reveal_resolution_allows_an_executable_target_without_allowing_open_execution() {
+        let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("run.exe"), b"MZ\x90\0").unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&directory).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+        let roots = vec![root];
+
+        assert!(resolve_reveal_path(&roots, "root", "run.exe").is_ok());
+        assert_eq!(
+            resolve_open_path(&roots, "root", "run.exe")
+                .unwrap_err()
+                .code,
+            "blocked"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
