@@ -1,5 +1,7 @@
 import { useEffect } from 'react'
 import { type AgentStep, type AgentStepEvent, useAppStore } from '../stores/useAppStore'
+import { dispatchOrderedWorkAssistantEvent, flushAllWorkAssistantDeltas } from '../services/workAssistantRuntime'
+import type { WorkAssistantEvent } from '../services/workAssistantProtocol'
 
 type StepStartEvent = Extract<AgentStepEvent, { title: string }>
 type StepStreamEvent = Extract<AgentStepEvent, { delta: string }>
@@ -37,14 +39,18 @@ export function useAgentStream() {
           endedAt: Date.now(),
         })
       })
+      const unlistenWorkAssistant = await listen<WorkAssistantEvent>('work_assistant_event', (event) => {
+        dispatchOrderedWorkAssistantEvent(event.payload)
+      })
 
-      cleanup = [unlistenStart, unlistenStream, unlistenEnd]
+      cleanup = [unlistenStart, unlistenStream, unlistenEnd, unlistenWorkAssistant]
     }
 
     void bindTauriEvents()
 
     return () => {
       cancelled = true
+      flushAllWorkAssistantDeltas()
       cleanup.forEach((unlisten) => unlisten())
     }
   }, [])

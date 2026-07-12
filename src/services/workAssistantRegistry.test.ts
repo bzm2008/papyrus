@@ -80,5 +80,13 @@ describe('WORK_ASSISTANT_TOOLS', () => {
         destination: { type: 'string', minLength: 1 },
       },
     })
+
+    const apply = WORK_ASSISTANT_TOOLS.find((tool) => tool.name === 'file_apply_batch')
+    expect(apply?.inputSchema).toMatchObject({
+      additionalProperties: false,
+      required: ['previewId'],
+      properties: { previewId: { type: 'string', minLength: 1 } },
+    })
+    expect(apply?.inputSchema.properties).not.toHaveProperty('operations')
   })
 })

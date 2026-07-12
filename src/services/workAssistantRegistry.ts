@@ -58,6 +58,13 @@ const fileSchema = (): AssistantSchemaNode => ({
   required: ['rootId', 'path'],
 })
 
+const previewReferenceSchema = (): AssistantSchemaNode => ({
+  type: 'object',
+  additionalProperties: false,
+  properties: { previewId: { type: 'string', minLength: 1 } },
+  required: ['previewId'],
+})
+
 const batchSchema = (): AssistantSchemaNode => ({
   type: 'object',
   additionalProperties: false,
@@ -89,7 +96,7 @@ export const WORK_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'file_search', toolset: 'workspace', description: 'Search file names and contents in a workspace root.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: { type: 'object', additionalProperties: false, properties: { rootId: { type: 'string', minLength: 1 }, query: { type: 'string', minLength: 1 } }, required: ['rootId', 'query'] } },
   { name: 'file_inspect', toolset: 'workspace', description: 'Inspect a file in a workspace root.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: fileSchema() },
   { name: 'file_plan_batch', toolset: 'workspace', description: 'Preview a bounded batch of workspace file operations.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: batchSchema() },
-  { name: 'file_apply_batch', toolset: 'workspace', description: 'Apply a previewed bounded batch of workspace file operations.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: batchSchema() },
+  { name: 'file_apply_batch', toolset: 'workspace', description: 'Apply an existing opaque file-operation preview.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: previewReferenceSchema() },
   { name: 'file_open', toolset: 'workspace', description: 'Open a workspace file in the system default application.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: fileSchema() },
   { name: 'downloads_scan', toolset: 'desktop', description: 'Scan the local Downloads folder.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: emptyObjectSchema() },
   { name: 'desktop_status', toolset: 'desktop', description: 'Read desktop integration status.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: emptyObjectSchema() },
