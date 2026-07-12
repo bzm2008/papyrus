@@ -297,17 +297,37 @@ fn sync_receipt_probe(file: &File) -> std::io::Result<()> {
     if FAIL_RECEIPT_PROBE_SYNC_ONCE.with(|value| std::mem::replace(&mut *value.borrow_mut(), false)) {
         return Err(std::io::Error::other("injected receipt probe sync failure"));
     }
+    #[cfg(test)]
+    let fail_after = FAIL_RECEIPT_PROBE_SYNC_AFTER.with(|value| {
+        let mut value = value.borrow_mut();
+        match *value {
+            Some(0) => { *value = None; true }
+            Some(remaining) => { *value = Some(remaining - 1); false }
+            None => false,
+        }
+    });
+    #[cfg(not(test))]
+    let fail_after = false;
+    if fail_after {
+        return Err(std::io::Error::other("injected delayed receipt probe sync failure"));
+    }
     file.sync_all()
 }
 
 #[cfg(test)]
 thread_local! {
     static FAIL_RECEIPT_PROBE_SYNC_ONCE: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+    static FAIL_RECEIPT_PROBE_SYNC_AFTER: std::cell::RefCell<Option<usize>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub(crate) fn inject_receipt_probe_sync_failure_once() {
     FAIL_RECEIPT_PROBE_SYNC_ONCE.with(|value| *value.borrow_mut() = true);
+}
+
+#[cfg(test)]
+pub(crate) fn inject_receipt_probe_sync_failure_after(successful_probes: usize) {
+    FAIL_RECEIPT_PROBE_SYNC_AFTER.with(|value| *value.borrow_mut() = Some(successful_probes));
 }
 
 pub(crate) fn remove_staging(staging: &File) -> Result<(), WorkAssistantError> {
