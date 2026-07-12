@@ -1,5 +1,5 @@
 use super::{
-    OpenedDestination, OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles,
+    file_version, FileVersion, OpenedDestination, OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles,
     RecoveryBinding, StagedFile,
 };
 use crate::work_assistant::WorkAssistantError;
@@ -60,6 +60,7 @@ pub(crate) fn open_source(
                 root_identity,
                 source_identity: identity_from_metadata(&metadata),
                 byte_len: metadata.len(),
+                version: file_version(&file)?,
             });
         }
     }
@@ -269,20 +270,33 @@ pub(crate) fn preflight_recovery_receipt(slot: &File) -> Result<(), WorkAssistan
             0o600,
         )
     };
-    if descriptor < 0 {
-        return Err(last_os_error("could not preflight recovery receipt"));
+    let operation = if descriptor < 0 {
+        Err(last_os_error("could not preflight recovery receipt"))
+    } else {
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        sync_receipt_probe(&file).map_err(blocked_io("could not sync recovery receipt preflight"))
+    };
+    // The probe must never survive a failed sync/write path. Cleanup is attempted independently
+    // and a cleanup failure is equally unsafe because it leaves ambiguous receipt metadata.
+    let cleanup = unsafe { libc::unlinkat(slot.as_raw_fd(), name.as_ptr(), 0) };
+    let cleanup = if cleanup == 0 { Ok(()) } else { Err(last_os_error("could not clean up recovery receipt preflight")) };
+    match (operation, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) | (_, Err(error)) => Err(recovery_unavailable(error)),
     }
-    let file = unsafe { File::from_raw_fd(descriptor) };
-    file.sync_all()
-        .map_err(blocked_io("could not sync recovery receipt preflight"))?;
-    drop(file);
-    if unsafe { libc::unlinkat(slot.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-        return Err(last_os_error(
-            "could not clean up recovery receipt preflight",
-        ));
-    }
-    Ok(())
 }
+
+fn sync_receipt_probe(file: &File) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_RECEIPT_PROBE_SYNC_ONCE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(std::io::Error::other("injected receipt probe sync failure"));
+    }
+    file.sync_all()
+}
+
+#[cfg(test)]
+static FAIL_RECEIPT_PROBE_SYNC_ONCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn remove_staging(parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
     let name = CString::new(leaf)
@@ -522,6 +536,7 @@ pub(crate) fn verify_bound_source(
     leaf: &str,
     parent_components: &[String],
     expected_parent_identity: &PlatformFileIdentity,
+    expected_version: &FileVersion,
 ) -> Result<(PlatformFileIdentity, PlatformFileIdentity), WorkAssistantError> {
     let current_root = open_root(authorized_root_path)
         .map_err(|_| WorkAssistantError::stale_preview("authorized root changed after preview"))?;
@@ -532,6 +547,9 @@ pub(crate) fn verify_bound_source(
         ));
     }
     let source_identity = identity(source)?;
+    if file_version(source)? != *expected_version {
+        return Err(WorkAssistantError::stale_preview("the source file content changed after preview"));
+    }
     if identity(parent)? != *expected_parent_identity {
         return Err(WorkAssistantError::stale_preview(
             "the source parent identity changed after preview",
@@ -564,6 +582,9 @@ pub(crate) fn verify_bound_source(
         return Err(WorkAssistantError::stale_preview(
             "the source file identity changed after preview",
         ));
+    }
+    if file_version(&current_source)? != *expected_version {
+        return Err(WorkAssistantError::stale_preview("the source file content changed after preview"));
     }
     Ok((root_identity, current_identity))
 }
@@ -787,5 +808,24 @@ fn recovery_unavailable(error: WorkAssistantError) -> WorkAssistantError {
         code: "recovery_unavailable".into(),
         message: error.message,
         recoverable: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{open_root, preflight_recovery_receipt, FAIL_RECEIPT_PROBE_SYNC_ONCE};
+    use std::{fs, sync::atomic::Ordering};
+
+    #[test]
+    fn receipt_probe_sync_failure_is_recoverable_and_leaves_no_file() {
+        let root = std::env::temp_dir().join(format!("papyrus-linux-probe-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let slot = open_root(&root).unwrap();
+        FAIL_RECEIPT_PROBE_SYNC_ONCE.store(true, Ordering::SeqCst);
+        let error = preflight_recovery_receipt(&slot).unwrap_err();
+        assert_eq!(error.code, "recovery_unavailable");
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
+        drop(slot);
+        fs::remove_dir(root).unwrap();
     }
 }

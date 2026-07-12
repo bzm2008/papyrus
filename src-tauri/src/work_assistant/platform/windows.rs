@@ -1,4 +1,4 @@
-use super::{OpenedDestination, OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles, StagedFile};
+use super::{file_version, FileVersion, OpenedDestination, OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles, StagedFile};
 use crate::work_assistant::WorkAssistantError;
 use std::{
     fs::{self, File},
@@ -44,7 +44,7 @@ pub(crate) fn open_source(
             .file_name()
             .ok_or_else(|| WorkAssistantError::blocked("source file name is missing"))?,
     );
-    let file = open_handle(&source_path, false)?;
+    let file = open_source_handle(&source_path)?;
     reject_reparse(&file, "source")?;
     let metadata = file
         .metadata()
@@ -55,6 +55,7 @@ pub(crate) fn open_source(
         ));
     }
     let source_identity = file_identity(&file)?;
+    let version = file_version(&file)?;
     let leaf = relative
         .file_name()
         .ok_or_else(|| WorkAssistantError::blocked("source file name is missing"))?
@@ -72,6 +73,7 @@ pub(crate) fn open_source(
         root_identity,
         source_identity,
         byte_len: metadata.len(),
+        version,
     })
 }
 
@@ -290,9 +292,13 @@ pub(crate) fn verify_bound_source(
     leaf: &str,
     expected_parent_identity: &PlatformFileIdentity,
     parent_path: &Path,
+    expected_version: &FileVersion,
 ) -> Result<(PlatformFileIdentity, PlatformFileIdentity), WorkAssistantError> {
     let root_identity = file_identity(root)?;
     let source_identity = file_identity(source)?;
+    if file_version(source)? != *expected_version {
+        return Err(WorkAssistantError::stale_preview("the source file content changed after preview"));
+    }
     if file_identity(parent)? != *expected_parent_identity {
         return Err(WorkAssistantError::stale_preview("the source parent identity changed after preview"));
     }
@@ -309,6 +315,9 @@ pub(crate) fn verify_bound_source(
     let current_identity = file_identity(&current)?;
     if current_identity != source_identity {
         return Err(WorkAssistantError::stale_preview("the source file identity changed after preview"));
+    }
+    if file_version(&current)? != *expected_version {
+        return Err(WorkAssistantError::stale_preview("the source file content changed after preview"));
     }
     Ok((root_identity, current_identity))
 }
@@ -409,6 +418,13 @@ fn open_read_verified_directory(path: &Path) -> Result<File, WorkAssistantError>
 
 fn open_handle(path: &Path, directory: bool) -> Result<File, WorkAssistantError> {
     open_handle_with_access(path, directory, GENERIC_READ | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE)
+}
+
+fn open_source_handle(path: &Path) -> Result<File, WorkAssistantError> {
+    // Retain DELETE access for the later atomic rename, but grant no WRITE/DELETE sharing to
+    // other handles. The verifier's read-only re-open explicitly grants DELETE sharing back to
+    // this retained handle, so freshness checks remain possible without weakening the lock.
+    open_handle_with_access(path, false, GENERIC_READ | DELETE, FILE_SHARE_READ)
 }
 
 fn open_read_handle(path: &Path, directory: bool) -> Result<File, WorkAssistantError> {
@@ -799,8 +815,8 @@ fn blocked_io(context: &'static str) -> impl FnOnce(std::io::Error) -> WorkAssis
 
 #[cfg(test)]
 mod tests {
-    use super::{open_read_verified_directory, preflight_recovery_receipt};
-    use std::{fs, path::PathBuf};
+    use super::{file_identity, file_version, open_handle, open_read_verified_directory, preflight_recovery_receipt, verify_bound_source};
+    use std::{fs, io::{Seek, SeekFrom, Write}, path::PathBuf};
 
     fn test_dir() -> PathBuf {
         std::env::temp_dir().join(format!("papyrus-recovery-probe-{}", uuid::Uuid::new_v4()))
@@ -830,5 +846,36 @@ mod tests {
         assert!(error.recoverable);
         drop(slot);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn in_place_write_with_the_same_file_identity_is_stale() {
+        let root_path = test_dir();
+        fs::create_dir_all(&root_path).unwrap();
+        let source_path = root_path.join("document.txt");
+        fs::write(&source_path, b"before\n").unwrap();
+        // The verifier accepts a retained shared source here so this test can model a writer
+        // acquired before a production snapshot. Production snapshots deny new write sharing.
+        let root = open_read_verified_directory(&root_path).unwrap();
+        let parent = open_read_verified_directory(&root_path).unwrap();
+        let source = open_handle(&source_path, false).unwrap();
+        let expected_version = file_version(&source).unwrap();
+        let parent_identity = file_identity(&parent).unwrap();
+        let mut writer = fs::OpenOptions::new().write(true).open(&source_path).unwrap();
+        writer.seek(SeekFrom::Start(0)).unwrap();
+        writer.write_all(b"after!\n").unwrap();
+        writer.sync_all().unwrap();
+
+        let error = verify_bound_source(
+            &root, &parent, &source, "document.txt", &parent_identity, &root_path,
+            &expected_version,
+        ).unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+
+        drop(writer);
+        drop(source);
+        drop(parent);
+        drop(root);
+        fs::remove_dir_all(root_path).unwrap();
     }
 }

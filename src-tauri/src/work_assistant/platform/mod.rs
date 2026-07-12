@@ -36,6 +36,17 @@ pub struct SourceSnapshotSummary {
     pub root_identity: PlatformFileIdentity,
     pub source_identity: PlatformFileIdentity,
     pub byte_len: u64,
+    pub version: FileVersion,
+}
+
+/// Portable freshness information captured with an identity-bound file handle.  File identities
+/// alone do not change for an in-place write, so all mutations require this value to match both
+/// the retained handle and a fresh handle rebound from the approved namespace.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileVersion {
+    pub byte_len: u64,
+    pub modified_unix_nanos: i128,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -87,6 +98,7 @@ struct BoundPlatformSource {
     parent_identity: PlatformFileIdentity,
     root_identity: PlatformFileIdentity,
     source_identity: PlatformFileIdentity,
+    source_version: FileVersion,
     #[cfg(windows)]
     parent_path: PathBuf,
     #[cfg(windows)]
@@ -105,6 +117,7 @@ impl PlatformSource for BoundPlatformSource {
                     &self.leaf,
                     &self.parent_identity,
                     &self.parent_path,
+                    &self.source_version,
                 )
             }
             #[cfg(target_os = "linux")]
@@ -118,6 +131,7 @@ impl PlatformSource for BoundPlatformSource {
                     &self.leaf,
                     &self.parent_components,
                     &self.parent_identity,
+                    &self.source_version,
                 )
             }
             #[cfg(target_os = "macos")]
@@ -131,6 +145,7 @@ impl PlatformSource for BoundPlatformSource {
                     &self.leaf,
                     &self.parent_components,
                     &self.parent_identity,
+                    &self.source_version,
                 )
             }
             #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -201,6 +216,7 @@ impl SourceSnapshot {
     ) -> Result<(), WorkAssistantError> {
         if self.summary.root_identity == expected.root_identity
             && self.summary.source_identity == expected.source_identity
+            && self.summary.version == expected.version
         {
             Ok(())
         } else {
@@ -304,6 +320,7 @@ pub fn open_source_snapshot(
             parent_identity: opened.parent_identity,
             root_identity: opened.root_identity.clone(),
             source_identity: opened.source_identity.clone(),
+            source_version: opened.version.clone(),
             #[cfg(windows)]
             parent_path: opened.parent_path,
             #[cfg(windows)]
@@ -314,6 +331,7 @@ pub fn open_source_snapshot(
             root_identity: opened.root_identity,
             source_identity: opened.source_identity,
             byte_len: opened.byte_len,
+            version: opened.version,
         },
     })
 }
@@ -1432,6 +1450,21 @@ pub(crate) struct OpenedPlatformSource {
     root_identity: PlatformFileIdentity,
     source_identity: PlatformFileIdentity,
     byte_len: u64,
+    version: FileVersion,
+}
+
+pub(super) fn file_version(file: &File) -> Result<FileVersion, WorkAssistantError> {
+    let metadata = file.metadata().map_err(blocked_io_version)?;
+    let modified = metadata.modified().map_err(blocked_io_version)?;
+    let modified_unix_nanos = match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos() as i128,
+        Err(error) => -(error.duration().as_nanos() as i128),
+    };
+    Ok(FileVersion { byte_len: metadata.len(), modified_unix_nanos })
+}
+
+fn blocked_io_version(error: std::io::Error) -> WorkAssistantError {
+    WorkAssistantError::blocked(format!("could not inspect approved file version: {error}"))
 }
 
 #[cfg(windows)]
@@ -1650,6 +1683,33 @@ mod tests {
         let error = snapshot.verify_snapshot().unwrap_err();
 
         assert_eq!(error.code, "stale_preview");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn in_place_source_content_change_is_reported_as_stale_preview() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("document.txt");
+        fs::write(&source, b"before\n").unwrap();
+        // Keep a writer acquired before the snapshot.  A snapshot cannot revoke a same-user
+        // writer that already exists, so content freshness must catch this mutation even though
+        // the file identity remains unchanged.
+        let mut writer_options = std::fs::OpenOptions::new();
+        writer_options.write(true);
+        let mut writer = writer_options.open(&source).unwrap();
+        let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+        writer.seek(SeekFrom::Start(0)).unwrap();
+        writer.write_all(b"after!\n").unwrap();
+        writer.sync_all().unwrap();
+
+        let error = snapshot.verify_snapshot().unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+        drop(writer);
+        drop(snapshot);
         fs::remove_dir_all(root).unwrap();
     }
 
