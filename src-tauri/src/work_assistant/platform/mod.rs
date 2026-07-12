@@ -762,6 +762,7 @@ impl PreparedFileTransaction {
                 )));
             }
             receipts.push(recovery.receipt.clone());
+            run_after_destination_recovery_hook();
         }
         if cancelled()? {
             return Err(WorkAssistantError::partial_transaction(
@@ -770,7 +771,7 @@ impl PreparedFileTransaction {
         }
         // The source may have changed while the old destination was secured.  Do not publish
         // stale staged bytes; the old destination is already recoverable in this rare case.
-        let staging = revalidate_staging_for_publish(staging, source)?;
+        let staging = revalidate_after_destination_recovery(staging, source)?;
         if let Err(error) = publish_staging(staging, destination) {
             return if receipts.is_empty() {
                 Err(error)
@@ -833,8 +834,9 @@ impl PreparedFileTransaction {
                 )));
             }
             receipts.push(recovery.receipt.clone());
+            run_after_destination_recovery_hook();
         }
-        let staging = revalidate_staging_for_publish(staging, source)?;
+        let staging = revalidate_after_destination_recovery(staging, source)?;
         if let Err(error) = publish_staging(staging, destination) {
             return if receipts.is_empty() {
                 Err(error)
@@ -1382,6 +1384,26 @@ fn revalidate_staging_for_publish(
     }
 }
 
+/// Once an overwrite destination has been moved to the private recovery vault and its receipt
+/// is durable, a source change is no longer an ordinary stale-preview no-op.  The staged file is
+/// still removed through its held capability, but callers must surface that the old destination
+/// remains recoverable and that no replacement was published.
+fn revalidate_after_destination_recovery(
+    staged: StagedFile,
+    source: &SourceSnapshot,
+) -> Result<StagedFile, WorkAssistantError> {
+    revalidate_staging_for_publish(staged, source).map_err(|error| {
+        let cleanup_note = if error.code == "partial_transaction" {
+            "; opaque staged content could not be cleaned up"
+        } else {
+            ""
+        };
+        WorkAssistantError::partial_transaction(format!(
+            "the old destination is safely recoverable and the new content was not published because the source changed after recovery{cleanup_note}"
+        ))
+    })
+}
+
 fn verify_staged_digest(staged: &StagedFile, expected: [u8; 32]) -> Result<(), WorkAssistantError> {
     if staged.digest != expected {
         return Err(WorkAssistantError::stale_preview(
@@ -1437,6 +1459,7 @@ fn remove_staging_file(file: &File, parent: &File, leaf: &str) -> Result<(), Wor
 thread_local! {
     static INJECT_RENAME_PUBLICATION_COLLISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static INJECT_AFTER_STAGING_BEFORE_PREPUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static INJECT_AFTER_DESTINATION_RECOVERY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1464,9 +1487,29 @@ fn inject_after_staging_before_prepublish(callback: impl FnOnce() + 'static) {
     });
 }
 
+#[cfg(test)]
+fn inject_after_destination_recovery(callback: impl FnOnce() + 'static) {
+    INJECT_AFTER_DESTINATION_RECOVERY.with(|value| {
+        assert!(
+            value.borrow().is_none(),
+            "only one post-recovery test hook may be pending"
+        );
+        *value.borrow_mut() = Some(Box::new(callback));
+    });
+}
+
 fn run_after_staging_before_prepublish_hook() {
     #[cfg(test)]
     INJECT_AFTER_STAGING_BEFORE_PREPUBLISH.with(|value| {
+        if let Some(callback) = value.borrow_mut().take() {
+            callback();
+        }
+    });
+}
+
+fn run_after_destination_recovery_hook() {
+    #[cfg(test)]
+    INJECT_AFTER_DESTINATION_RECOVERY.with(|value| {
         if let Some(callback) = value.borrow_mut().take() {
             callback();
         }
@@ -1812,6 +1855,8 @@ fn prepare_platform_recovery_vault(
 mod tests {
     #[cfg(not(windows))]
     use super::inject_after_staging_before_prepublish;
+    #[cfg(not(windows))]
+    use super::inject_after_destination_recovery;
     #[cfg(unix)]
     use super::{bind_destination, create_directory, stage_source};
     use super::{
@@ -2094,6 +2139,68 @@ mod tests {
                     .exists()),
             "a stale source must not create an overwrite recovery receipt"
         );
+        assert!(!fs::read_dir(&root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".papyrus-stage-")
+        }));
+        drop(writer);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn overwrite_reports_partial_transaction_when_source_changes_after_old_destination_recovery() {
+        use std::{
+            io::{Seek, SeekFrom, Write},
+            sync::{Arc, Mutex},
+        };
+
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("source.txt");
+        let destination_path = root.join("destination.txt");
+        fs::write(&source_path, b"before\n").unwrap();
+        fs::write(&destination_path, b"existing").unwrap();
+        let mut writer_options = fs::OpenOptions::new();
+        writer_options.write(true);
+        let writer = Arc::new(Mutex::new(writer_options.open(&source_path).unwrap()));
+        let operation = FileOperationRequest {
+            kind: FileOperationKind::Copy,
+            source: Some("source.txt".into()),
+            destination: Some("destination.txt".into()),
+        };
+        let transaction = prepare_file_transaction(
+            &root,
+            "preview-post-recovery-rewrite",
+            0,
+            &operation,
+            &ConflictPolicy::Overwrite,
+        )
+        .unwrap();
+        let mutating_writer = Arc::clone(&writer);
+        inject_after_destination_recovery(move || {
+            let mut writer = mutating_writer.lock().unwrap();
+            writer.seek(SeekFrom::Start(0)).unwrap();
+            writer.write_all(b"after!\n").unwrap();
+            writer.sync_all().unwrap();
+        });
+
+        let error = match transaction.execute(|| Ok(false)) {
+            Ok(_) => panic!("a post-recovery source rewrite must not publish the replacement"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "partial_transaction");
+        assert!(!destination_path.exists(), "the replacement must not be published");
+        let recovery_root = root.join(".papyrus-recovery");
+        assert!(fs::read_dir(&recovery_root).unwrap().any(|entry| entry
+            .unwrap()
+            .path()
+            .join("receipt.json")
+            .exists()));
         assert!(!fs::read_dir(&root).unwrap().any(|entry| {
             entry
                 .unwrap()
