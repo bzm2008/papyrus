@@ -715,7 +715,7 @@ pub(crate) fn prepare_file_transaction(
             }
         }
     }
-    let source_recovery = if matches!(
+    let mut source_recovery = if matches!(
         operation.kind,
         FileOperationKind::Move | FileOperationKind::Rename | FileOperationKind::Trash
     ) && !skip
@@ -728,7 +728,7 @@ pub(crate) fn prepare_file_transaction(
                 drop(source.take());
                 drop(existing_destination.take());
                 drop(destination.take());
-                if let Some(slot) = failure.slot { let _ = slot.cleanup_uncommitted(); }
+                if let Some(slot) = failure.slot { let _ = cleanup_recovery_slots(vec![slot]); }
                 return Err(failure.error);
             }
         }
@@ -750,7 +750,10 @@ pub(crate) fn prepare_file_transaction(
                     drop(source.take());
                     drop(existing_destination.take());
                     drop(destination.take());
-                    if let Some(slot) = failure.slot { let _ = slot.cleanup_uncommitted(); }
+                    let mut slots = Vec::new();
+                    if let Some(slot) = source_recovery.take() { slots.push(slot); }
+                    if let Some(slot) = failure.slot { slots.push(slot); }
+                    let _ = cleanup_recovery_slots(slots);
                     return Err(failure.error);
                 }
             }
@@ -2254,6 +2257,29 @@ mod tests {
         ) { Err(error) => error, Ok(_) => panic!("injected recovery preflight must fail") };
         assert_eq!(error.code, "recovery_unavailable");
         assert!(root.join("document.txt").is_file());
+        let vault = root.join(".papyrus-recovery");
+        assert!(!vault.exists() || fs::read_dir(&vault).unwrap().next().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_recovery_preflight_failure_reclaims_the_first_slot_too() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("source.txt"), "source").unwrap();
+        fs::write(root.join("destination.txt"), "destination").unwrap();
+        let operation = FileOperationRequest {
+            kind: FileOperationKind::Move,
+            source: Some("source.txt".into()),
+            destination: Some("destination.txt".into()),
+        };
+        super::windows::inject_receipt_probe_sync_failure_after(1);
+        let error = match prepare_file_transaction(
+            &root, "preview-second-preflight", 0, &operation, &ConflictPolicy::Overwrite,
+        ) { Err(error) => error, Ok(_) => panic!("injected second recovery preflight must fail") };
+        assert_eq!(error.code, "recovery_unavailable");
+        assert!(root.join("source.txt").is_file() && root.join("destination.txt").is_file());
         let vault = root.join(".papyrus-recovery");
         assert!(!vault.exists() || fs::read_dir(&vault).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();

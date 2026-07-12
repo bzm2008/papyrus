@@ -12,7 +12,6 @@ impl PreparedTransactions {
     fn new() -> Self { Self(Vec::new()) }
     fn push(&mut self, transaction: crate::work_assistant::platform::PreparedFileTransaction) { self.0.push(transaction); }
     fn iter_mut(&mut self) -> std::slice::IterMut<'_, crate::work_assistant::platform::PreparedFileTransaction> { self.0.iter_mut() }
-    fn len(&self) -> usize { self.0.len() }
     fn cleanup(&mut self) -> Option<WorkAssistantError> {
         let slots = self.0.iter_mut()
             .flat_map(crate::work_assistant::platform::PreparedFileTransaction::take_recovery_slots_for_cleanup)
@@ -106,16 +105,24 @@ pub fn execute_batch_file_operations(
             }
         }
     }
-    consume_approval(state, &execution, &preview, &approval, required_count)?;
+    if let Err(error) = consume_approval(state, &execution, &preview, &approval, required_count) {
+        if let Some(cleanup) = cleanup_prepared(&mut prepared) {
+            let _ = append_audit_entry(state, &AuditEntry::new("file_operation_cleanup_warning", cleanup.message));
+        }
+        return Err(error);
+    }
 
     let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false, warnings: Vec::new() };
-    let mut cleanup_from = None;
+    let mut needs_cleanup = false;
+    let mut early_error = None;
     for (index, transaction) in prepared.iter_mut().enumerate() {
         if is_run_cancelled(state, &request.run_id)? {
-            append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
+            if let Err(error) = append_cancellation_audit_once(state, &request.run_id, &preview.id) {
+                early_error = Some(error);
+            }
             result.cancelled = true;
             result.remaining.extend(remaining_items(&request.operations, index));
-            record_cleanup_warnings(state, &mut result, &mut prepared);
+            needs_cleanup = true;
             break;
         }
         match transaction.execute(|| is_run_cancelled(state, &request.run_id)) {
@@ -141,8 +148,12 @@ pub fn execute_batch_file_operations(
             }
             Err(error) => {
                 if error.code == "cancelled" {
-                    record_cancelled_transaction(state, &mut result, &request.operations, index, &error)?;
-                    append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
+                    if let Err(cancel_error) = record_cancelled_transaction(state, &mut result, &request.operations, index, &error) {
+                        early_error = Some(cancel_error);
+                    } else if let Err(audit_error) = append_cancellation_audit_once(state, &request.run_id, &preview.id) {
+                        early_error = Some(audit_error);
+                    }
+                    needs_cleanup = true;
                     break;
                 }
                 let item = item(index, safe_error_detail(&error), Some(&error), Vec::new());
@@ -151,14 +162,17 @@ pub fn execute_batch_file_operations(
                 // This transaction may own an empty recovery slot after a publish race or a
                 // failed staging step. Do not execute later prepared work after that failure;
                 // reclaim its disposable slots once the loop releases its mutable borrow.
-                cleanup_from = Some(index);
                 result.remaining.extend(remaining_items(&request.operations, index + 1));
+                needs_cleanup = true;
                 break;
             }
         }
     }
-    if cleanup_from.is_some() {
+    if needs_cleanup {
         record_cleanup_warnings(state, &mut result, &mut prepared);
+    }
+    if let Some(error) = early_error {
+        return Err(error);
     }
     Ok(result)
 }
