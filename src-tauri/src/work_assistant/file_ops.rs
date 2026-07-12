@@ -246,7 +246,11 @@ fn remaining_items(operations: &[FileOperationRequest], start: usize) -> Vec<Bat
 }
 
 fn cleanup_prepared(prepared: &mut [crate::work_assistant::platform::PreparedFileTransaction]) -> Option<WorkAssistantError> {
-    prepared.iter_mut().filter_map(|transaction| transaction.cleanup_uncommitted().err()).next()
+    let slots = prepared
+        .iter_mut()
+        .flat_map(crate::work_assistant::platform::PreparedFileTransaction::take_recovery_slots_for_cleanup)
+        .collect();
+    crate::work_assistant::platform::cleanup_recovery_slots(slots).err()
 }
 
 fn record_cleanup_warnings(state: &WorkAssistantState, result: &mut BatchExecutionResult, prepared: &mut [crate::work_assistant::platform::PreparedFileTransaction]) {

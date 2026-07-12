@@ -595,7 +595,7 @@ pub(crate) struct PreparedFileTransaction {
 }
 
 impl PreparedFileTransaction {
-    pub(crate) fn cleanup_uncommitted(&mut self) -> Result<(), WorkAssistantError> {
+    pub(crate) fn take_recovery_slots_for_cleanup(&mut self) -> Vec<PreparedRecoverySlot> {
         // Releasing source/destination capabilities first is required on Windows: their parent
         // handles deliberately deny DELETE sharing, which is the lock that prevents namespace
         // swaps during an active transaction.  Cleanup later rebinds from the authorized root.
@@ -604,14 +604,25 @@ impl PreparedFileTransaction {
         self.existing_destination.take();
         let source_recovery = self.source_recovery.take();
         let destination_recovery = self.destination_recovery.take();
-        let mut first_error = None;
-        for slot in [source_recovery, destination_recovery].into_iter().flatten() {
-            if let Err(error) = slot.cleanup_uncommitted() {
-                first_error.get_or_insert(error);
-            }
-        }
-        first_error.map_or(Ok(()), Err)
+        [source_recovery, destination_recovery]
+            .into_iter()
+            .flatten()
+            .collect()
     }
+
+    pub(crate) fn cleanup_uncommitted(&mut self) -> Result<(), WorkAssistantError> {
+        cleanup_recovery_slots(self.take_recovery_slots_for_cleanup())
+    }
+}
+
+pub(crate) fn cleanup_recovery_slots(slots: Vec<PreparedRecoverySlot>) -> Result<(), WorkAssistantError> {
+    let mut first_error = None;
+    for slot in slots {
+        if let Err(error) = slot.cleanup_uncommitted() {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 impl Drop for PreparedFileTransaction {
