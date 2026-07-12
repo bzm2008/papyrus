@@ -58,7 +58,6 @@ pub fn run() {
       work_assistant::work_assistant_validate_application_selection,
       work_assistant::work_assistant_list_applications,
       work_assistant::work_assistant_register_application_from_picker,
-      work_assistant::work_assistant_remove_application,
       work_assistant::work_assistant_launch_application,
       work_assistant::work_assistant_cancel_run,
       work_assistant::work_assistant_preview,
@@ -648,4 +647,3 @@ fn parse_bing_results(html: &str) -> Vec<WebSearchResult> {
     .take(5)
     .collect()
 }
-
