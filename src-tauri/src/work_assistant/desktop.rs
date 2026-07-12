@@ -10,7 +10,7 @@ use crate::work_assistant::{
 };
 use std::{
     fs,
-    io::Write,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::MutexGuard,
     time::{SystemTime, UNIX_EPOCH},
@@ -47,9 +47,9 @@ pub fn validate_open_url(value: &str) -> Result<(), WorkAssistantError> {
     Ok(())
 }
 
-/// Validate the extension of a path before it reaches an external opener.  Existence and root
-/// authorization are intentionally handled by `resolve_open_path`; this pure helper is useful for
-/// previews and unit tests without touching the filesystem.
+/// Validate the extension of a path before it reaches an external opener.  If the path already
+/// exists, inspect it for executable signatures as well; root authorization is handled by
+/// `resolve_open_path`, while non-existent paths remain useful for pure preview validation.
 pub fn validate_open_file(path: impl AsRef<Path>) -> Result<(), WorkAssistantError> {
     let path = path.as_ref();
     let extension = path
@@ -64,7 +64,71 @@ pub fn validate_open_file(path: impl AsRef<Path>) -> Result<(), WorkAssistantErr
             "executables and script files cannot be opened by the assistant",
         ));
     }
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => return Ok(()),
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(WorkAssistantError::blocked(
+                "only ordinary files and directories can be opened",
+            ));
+        }
+        Ok(metadata) => {
+            if file_looks_executable(path, &metadata)? {
+                return Err(WorkAssistantError::blocked(
+                    "executable and script files cannot be opened by the assistant",
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(WorkAssistantError::blocked(format!(
+                "could not inspect the file before opening it: {error}"
+            )));
+        }
+    }
     Ok(())
+}
+
+fn file_looks_executable(
+    path: &Path,
+    _metadata: &fs::Metadata,
+) -> Result<bool, WorkAssistantError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if _metadata.permissions().mode() & 0o111 != 0 {
+            return Ok(true);
+        }
+    }
+
+    let mut file = fs::File::open(path).map_err(|error| {
+        WorkAssistantError::blocked(format!("could not inspect file contents: {error}"))
+    })?;
+    let mut prefix = [0u8; 4];
+    let length = file.read(&mut prefix).map_err(|error| {
+        WorkAssistantError::blocked(format!("could not inspect file contents: {error}"))
+    })?;
+    if length >= 2 && &prefix[..2] == b"#!" {
+        return Ok(true);
+    }
+    if length >= 2 && &prefix[..2] == b"MZ" {
+        return Ok(true);
+    }
+    if length >= 4
+        && matches!(
+            prefix,
+            [0x7f, b'E', b'L', b'F']
+                | [0xfe, 0xed, 0xfa, 0xce]
+                | [0xce, 0xfa, 0xed, 0xfe]
+                | [0xfe, 0xed, 0xfa, 0xcf]
+                | [0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+                | [0xbe, 0xba, 0xfe, 0xca]
+        )
+    {
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Canonicalize a path selected by the user for an application alias.  This is intentionally a
@@ -124,6 +188,7 @@ pub fn validate_application_alias_path(
             .as_deref()
             .is_some_and(|extension| BLOCKED_OPEN_EXTENSIONS.contains(&extension))
             || metadata.permissions().mode() & 0o111 == 0
+            || file_has_shebang(&canonical)?
         {
             return Err(WorkAssistantError::blocked(
                 "Linux application aliases must target a user-selected executable",
@@ -140,6 +205,18 @@ pub fn validate_application_alias_path(
     }
 
     Ok(canonical)
+}
+
+#[cfg(target_os = "linux")]
+fn file_has_shebang(path: &Path) -> Result<bool, WorkAssistantError> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        WorkAssistantError::blocked(format!("could not inspect selected application: {error}"))
+    })?;
+    let mut prefix = [0u8; 2];
+    let length = file.read(&mut prefix).map_err(|error| {
+        WorkAssistantError::blocked(format!("could not inspect selected application: {error}"))
+    })?;
+    Ok(length == prefix.len() && &prefix == b"#!")
 }
 
 fn resolve_open_path(
@@ -373,41 +450,68 @@ fn persist_applications(
     let serialized = serde_json::to_vec_pretty(applications).map_err(|error| {
         WorkAssistantError::protocol(format!("could not serialize application aliases: {error}"))
     })?;
+    let result = persist_serialized_applications_with(
+        path,
+        &serialized,
+        write_application_temporary,
+        replace_application_file,
+    );
+    result
+}
+
+fn persist_serialized_applications_with<WriteTemporary, ReplaceTemporary>(
+    path: &Path,
+    serialized: &[u8],
+    write_temporary: WriteTemporary,
+    replace_temporary: ReplaceTemporary,
+) -> Result<(), WorkAssistantError>
+where
+    WriteTemporary: FnOnce(&Path, &[u8]) -> io::Result<()>,
+    ReplaceTemporary: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let temporary = parent.join(format!(
         ".work-assistant-applications.tmp-{}",
         Uuid::new_v4()
     ));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|error| {
-                WorkAssistantError::protocol(format!(
-                    "could not write application aliases: {error}"
-                ))
-            })?;
-        file.write_all(&serialized)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| {
-                WorkAssistantError::protocol(format!("could not sync application aliases: {error}"))
-            })?;
-        #[cfg(windows)]
-        if path.exists() {
-            fs::remove_file(path).map_err(|error| {
-                WorkAssistantError::protocol(format!(
-                    "could not replace application aliases: {error}"
-                ))
-            })?;
-        }
-        fs::rename(&temporary, path).map_err(|error| {
-            WorkAssistantError::protocol(format!("could not publish application aliases: {error}"))
+    let result = write_temporary(&temporary, serialized)
+        .map_err(|error| {
+            WorkAssistantError::protocol(format!("could not write application aliases: {error}"))
         })
-    })();
+        .and_then(|_| {
+            replace_temporary(&temporary, path).map_err(|error| {
+                WorkAssistantError::protocol(format!(
+                    "could not publish application aliases: {error}"
+                ))
+            })
+        });
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn write_application_temporary(path: &Path, serialized: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)?;
+    file.write_all(serialized)?;
+    file.sync_all()
+}
+
+fn replace_application_file(temporary_path: &Path, path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        return crate::work_assistant::replace_temporary_roots_file(temporary_path, path);
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(temporary_path, path)
+    }
 }
 
 fn unix_seconds() -> u64 {
@@ -474,6 +578,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_existing_executable_signatures_and_shebang_files_but_allows_plain_files() {
+        let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let plain = directory.join("notes.txt");
+        let pe = directory.join("binary");
+        let script = directory.join("script");
+        fs::write(&plain, b"notes").unwrap();
+        fs::write(&pe, b"MZ\x90\0").unwrap();
+        fs::write(&script, b"#!/bin/sh\necho no\n").unwrap();
+        assert!(validate_open_file(&plain).is_ok());
+        assert_eq!(validate_open_file(&pe).unwrap_err().code, "blocked");
+        assert_eq!(validate_open_file(&script).unwrap_err().code, "blocked");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = directory.join("executable");
+            fs::write(&executable, b"plain executable").unwrap();
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).unwrap();
+            assert_eq!(validate_open_file(&executable).unwrap_err().code, "blocked");
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn application_alias_validation_requires_a_user_selectable_target() {
         let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
@@ -488,6 +618,19 @@ mod tests {
         }
         if cfg!(any(windows, target_os = "linux")) {
             assert!(validate_application_alias_path(&executable).is_ok());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let script = directory.join("script");
+            fs::write(&script, b"#!/bin/sh\necho no\n").unwrap();
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).unwrap();
+            assert_eq!(
+                validate_application_alias_path(&script).unwrap_err().code,
+                "blocked"
+            );
         }
         assert!(validate_application_alias_path(directory.join("run.ps1")).is_err());
         fs::remove_dir_all(directory).unwrap();
@@ -510,9 +653,30 @@ mod tests {
         if cfg!(any(windows, target_os = "linux")) {
             let app =
                 register_application_from_picker(&state, "Editor".into(), &executable).unwrap();
+            let second_executable = directory.join(if cfg!(windows) {
+                "tool-two.exe"
+            } else {
+                "tool-two"
+            });
+            fs::write(&second_executable, b"placeholder").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::metadata(&second_executable).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&second_executable, permissions).unwrap();
+            }
+            let second = register_application_from_picker(
+                &state,
+                "Second editor".into(),
+                &second_executable,
+            )
+            .unwrap();
             let saved = load_applications(&applications_path(&state)).unwrap();
+            assert_eq!(saved.len(), 2);
             assert_eq!(saved[0].id, app.id);
             assert_eq!(saved[0].label, "Editor");
+            assert_eq!(saved[1].id, second.id);
             assert!(launch_registered_application(&state, "missing").is_err());
         }
         fs::remove_dir_all(directory).unwrap();
@@ -523,6 +687,35 @@ mod tests {
         assert_eq!(audit_page_limit(0), 50);
         assert_eq!(audit_page_limit(1), 1);
         assert_eq!(audit_page_limit(999), 200);
+    }
+
+    #[test]
+    fn failed_application_registry_replace_preserves_the_previous_file() {
+        let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("work-assistant-applications.json");
+        let previous = br#"[{"id":"old"}]"#;
+        let replacement = br#"[{"id":"new"}]"#;
+        fs::write(&path, previous).unwrap();
+
+        let error = persist_serialized_applications_with(
+            &path,
+            replacement,
+            write_application_temporary,
+            |_, _| Err(io::Error::other("injected replacement failure")),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "protocol");
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        assert!(!fs::read_dir(&directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".work-assistant-applications.tmp-")
+        }));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[allow(dead_code)]
