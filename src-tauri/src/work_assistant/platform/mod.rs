@@ -1948,8 +1948,10 @@ mod tests {
     use super::{bind_destination, create_directory, stage_source};
     use super::{
         inject_rename_publication_collision_once, open_source_snapshot, prepare_file_transaction,
-        prepare_recovery_slot, validate_recovery_leaf,
+        validate_recovery_leaf,
     };
+    #[cfg(not(windows))]
+    use super::prepare_recovery_slot;
     #[cfg(unix)]
     use super::{move_snapshot_to_recovery, persist_recovery_receipt};
     #[cfg(any(unix, windows))]
@@ -2100,6 +2102,9 @@ mod tests {
         fs::write(root.join("document.txt"), "contents").unwrap();
         {
             let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+            #[cfg(windows)]
+            let slot = prepare_recovery_slot_for_source(&snapshot, "preview-1", 3).unwrap();
+            #[cfg(not(windows))]
             let slot = prepare_recovery_slot(&root, "preview-1", 3, snapshot.summary()).unwrap();
             let receipt = slot.receipt();
 
@@ -2123,11 +2128,17 @@ mod tests {
         fs::write(root.join("document.txt"), "contents").unwrap();
 
         let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+        #[cfg(windows)]
+        let first = prepare_recovery_slot_for_source(&snapshot, "preview-1", 0).unwrap();
+        #[cfg(not(windows))]
         let first = prepare_recovery_slot(&root, "preview-1", 0, snapshot.summary()).unwrap();
         drop(first);
 
         // A second slot must accept the pre-existing vault only after its platform
         // privacy policy has been verified. Creating a fresh UUID leaf is expected.
+        #[cfg(windows)]
+        let second = prepare_recovery_slot_for_source(&snapshot, "preview-2", 1).unwrap();
+        #[cfg(not(windows))]
         let second = prepare_recovery_slot(&root, "preview-2", 1, snapshot.summary()).unwrap();
         drop(second);
         drop(snapshot);

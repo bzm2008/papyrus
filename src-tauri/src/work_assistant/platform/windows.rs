@@ -98,11 +98,11 @@ pub(crate) fn open_destination(
 ) -> Result<OpenedDestination, WorkAssistantError> {
     let root = fs::canonicalize(root).map_err(blocked_io("could not resolve authorized root"))?;
     let mut current = root.clone();
-    let mut ancestor_handles = vec![open_read_verified_directory(&root)?];
+    let mut ancestor_handles = vec![open_mutation_verified_directory(&root)?];
     let parent = relative.parent().unwrap_or_else(|| Path::new(""));
     for component in parent.components() {
         current.push(component.as_os_str());
-        ancestor_handles.push(open_read_verified_directory(&current)?);
+        ancestor_handles.push(open_mutation_verified_directory(&current)?);
     }
     let leaf = relative
         .file_name()
@@ -113,7 +113,7 @@ pub(crate) fn open_destination(
             "destination file name is invalid",
         ));
     }
-    let parent_handle = open_read_verified_directory(&current)?;
+    let parent_handle = open_mutation_verified_directory(&current)?;
     Ok(OpenedDestination {
         parent: parent_handle,
         leaf: leaf.into(),
@@ -136,7 +136,7 @@ pub(crate) fn destination_identity(
     leaf: &str,
 ) -> Result<Option<PlatformFileIdentity>, WorkAssistantError> {
     use std::os::windows::fs::MetadataExt;
-    let current_parent = open_read_verified_directory(parent_path)?;
+    let current_parent = open_snapshot_directory(parent_path)?;
     if file_identity(&current_parent)? != file_identity(parent)? {
         return Err(WorkAssistantError::stale_preview(
             "destination parent changed after preview",
@@ -170,7 +170,7 @@ pub(crate) fn stage_copy(
     parent: &File,
     parent_path: &Path,
 ) -> Result<StagedFile, WorkAssistantError> {
-    let current_parent = open_read_verified_directory(parent_path)?;
+    let current_parent = open_snapshot_directory(parent_path)?;
     if file_identity(&current_parent)? != file_identity(parent)? {
         return Err(WorkAssistantError::stale_preview(
             "destination parent changed before staging",
@@ -235,7 +235,7 @@ pub(crate) fn create_directory(
     parent_path: &Path,
     leaf: &str,
 ) -> Result<(), WorkAssistantError> {
-    let current_parent = open_read_verified_directory(parent_path)?;
+    let current_parent = open_snapshot_directory(parent_path)?;
     if file_identity(&current_parent)? != file_identity(parent)? {
         return Err(WorkAssistantError::stale_preview(
             "destination parent changed before directory creation",
@@ -404,7 +404,7 @@ pub(crate) fn verify_published(
     source: &File,
     expected_len: u64,
 ) -> Result<(), WorkAssistantError> {
-    let current_parent = open_read_verified_directory(parent_path)?;
+    let current_parent = open_snapshot_directory(parent_path)?;
     if file_identity(&current_parent)? != file_identity(parent)? {
         return Err(WorkAssistantError::stale_preview(
             "destination parent changed after publication",
@@ -665,6 +665,32 @@ fn open_verified_directory(path: &Path) -> Result<File, WorkAssistantError> {
 fn open_snapshot_directory(path: &Path) -> Result<File, WorkAssistantError> {
     let file =
         open_handle_with_access(path, true, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE)?;
+    reject_reparse(&file, "directory")?;
+    if !file
+        .metadata()
+        .map_err(blocked_io("could not inspect directory"))?
+        .is_dir()
+    {
+        return Err(WorkAssistantError::blocked(
+            "approved path component is not a directory",
+        ));
+    }
+    let _ = file_identity(&file)?;
+    Ok(file)
+}
+
+/// A retained destination parent needs read/write access for relative child creation and native
+/// rename publication, but it must not itself request DELETE.  Both source and destination
+/// parents still deny DELETE sharing, so neither can be replaced while the transaction is live;
+/// omitting DELETE access is what lets two independently locked capabilities bind the same
+/// directory without Windows rejecting their compatible share modes.
+fn open_mutation_verified_directory(path: &Path) -> Result<File, WorkAssistantError> {
+    let file = open_handle_with_access(
+        path,
+        true,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+    )?;
     reject_reparse(&file, "directory")?;
     if !file
         .metadata()
@@ -1217,6 +1243,7 @@ fn blocked_io(context: &'static str) -> impl FnOnce(std::io::Error) -> WorkAssis
 mod tests {
     use super::{
         file_identity, file_version, open_handle, open_read_verified_directory,
+        open_snapshot_directory,
         preflight_recovery_receipt, verify_bound_source,
     };
     use std::{
@@ -1263,8 +1290,8 @@ mod tests {
         fs::write(&source_path, b"before\n").unwrap();
         // The verifier accepts a retained shared source here so this test can model a writer
         // acquired before a production snapshot. Production snapshots deny new write sharing.
-        let root = open_read_verified_directory(&root_path).unwrap();
-        let parent = open_read_verified_directory(&root_path).unwrap();
+        let root = open_snapshot_directory(&root_path).unwrap();
+        let parent = open_snapshot_directory(&root_path).unwrap();
         let source = open_handle(&source_path, false).unwrap();
         let expected_version = file_version(&source).unwrap();
         let parent_identity = file_identity(&parent).unwrap();
@@ -1292,6 +1319,21 @@ mod tests {
         drop(source);
         drop(parent);
         drop(root);
+        fs::remove_dir_all(root_path).unwrap();
+    }
+
+    #[test]
+    fn destination_parent_can_be_bound_while_same_directory_source_is_locked() {
+        let root_path = test_dir();
+        fs::create_dir_all(&root_path).unwrap();
+        fs::write(root_path.join("source.txt"), b"source").unwrap();
+
+        let source = super::open_source(&root_path, std::path::Path::new("source.txt")).unwrap();
+        let destination = super::open_destination(&root_path, std::path::Path::new("destination.txt"));
+
+        assert!(destination.is_ok(), "source parent lock must permit an independently bound destination parent");
+        drop(source);
+        drop(destination);
         fs::remove_dir_all(root_path).unwrap();
     }
 }
