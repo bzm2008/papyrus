@@ -46,6 +46,7 @@ import {
 import { BrandMark } from './BrandMark'
 import { RemoteRelaySettings } from './RemoteRelaySettings'
 import { StudioSettingsSection } from './StudioSettingsSection'
+import { ComputerAssistantSettings } from './ComputerAssistantSettings'
 
 type SettingsSectionId =
   | 'general'
@@ -53,6 +54,7 @@ type SettingsSectionId =
   | 'models'
   | 'remote'
   | 'studio'
+  | 'assistant'
   | 'memory'
   | 'skills'
   | 'mcp'
@@ -458,6 +460,9 @@ export function SettingsPanel() {
                 <div id="settings-memory" className={activeSection === 'memory' ? '' : 'hidden'}>
                   <MemorySettingsSection />
                 </div>
+                <div id="settings-assistant" className={activeSection === 'assistant' ? '' : 'hidden'}>
+                  <ComputerAssistantSettings />
+                </div>
                 <div id="settings-skills" className={activeSection === 'skills' ? '' : 'hidden'}>
                   <SkillSettingsSection />
                 </div>
@@ -489,6 +494,7 @@ function SettingsSidebar({
     { id: 'models', label: '模型' },
     { id: 'remote', label: '远程连接' },
     { id: 'studio', label: '工作室' },
+    { id: 'assistant', label: '电脑助手' },
     { id: 'memory', label: '记忆' },
     { id: 'skills', label: '技能' },
     { id: 'mcp', label: 'MCP' },

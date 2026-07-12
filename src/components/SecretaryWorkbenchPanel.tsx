@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Clock3,
   FileText,
+  FolderOpen,
   Loader2,
   PanelRightClose,
   Pin,
@@ -24,7 +25,7 @@ import {
   useAppStore,
 } from '../stores/useAppStore'
 
-type WorkbenchView = 'workbench' | 'manuscript'
+export type WorkbenchView = 'run' | 'files' | 'manuscript'
 
 type WorkbenchProps = {
   todos: AgentTodo[]
@@ -37,6 +38,7 @@ type WorkbenchProps = {
   onPinnedChange: (pinned: boolean) => void
   onClose: () => void
   manuscript: ReactNode
+  files: ReactNode
   changeStat?: ReturnType<typeof useAppStore.getState>['documentChangeStats'][number]
 }
 
@@ -96,6 +98,7 @@ export function SecretaryWorkbenchPanel({
   onPinnedChange,
   onClose,
   manuscript,
+  files,
   changeStat,
 }: WorkbenchProps) {
   const snapshot = useWorkbenchSnapshot(todos, steps, traces, changeStat)
@@ -115,31 +118,38 @@ export function SecretaryWorkbenchPanel({
       <div className="flex h-full min-h-0 flex-col">
         <header className="papyrus-toolbar flex h-11 shrink-0 items-center gap-2 border-b px-3">
           <div className="grid size-7 place-items-center rounded-lg bg-[#20201d] text-[#fffefa]">
-            {activeView === 'workbench' ? <Sparkles size={14} /> : <FileText size={14} />}
+            {activeView === 'run' ? <Sparkles size={14} /> : activeView === 'files' ? <FolderOpen size={14} /> : <FileText size={14} />}
           </div>
           <div className="min-w-0 flex-1">
             <div className="truncate text-[13px] font-semibold text-[#20201d]">
-              {activeView === 'workbench' ? '执行工作台' : '文稿'}
+              {activeView === 'run' ? '执行工作台' : activeView === 'files' ? '文件工作台' : '文稿'}
             </div>
             <div className="truncate text-[11px] text-[#8f897a]">
-              {activeView === 'workbench'
+              {activeView === 'run'
                 ? runState === 'running'
                   ? '实时跟踪本轮协作'
                   : '本轮执行记录'
-                : '当前作品内容'}
+                : activeView === 'files' ? '预览与执行回执' : '当前作品内容'}
             </div>
           </div>
           <div className="inline-flex rounded-lg border border-[#e8ddc7] bg-[#f8f4ea] p-0.5">
             <button
               type="button"
-              onClick={() => onViewChange('workbench')}
+              onClick={() => onViewChange('run')}
               className={`h-6 rounded-md px-2 text-[11px] font-medium ${
-                activeView === 'workbench'
+                activeView === 'run'
                   ? 'bg-[#20201d] text-[#fffefa]'
                   : 'text-[#6f7168] hover:bg-[#fffefa] hover:text-[#20201d]'
               }`}
             >
               工作台
+            </button>
+            <button
+              type="button"
+              onClick={() => onViewChange('files')}
+              className={`h-6 rounded-md px-2 text-[11px] font-medium ${activeView === 'files' ? 'bg-[#20201d] text-[#fffefa]' : 'text-[#6f7168] hover:bg-[#fffefa] hover:text-[#20201d]'}`}
+            >
+              文件
             </button>
             <button
               type="button"
@@ -173,7 +183,7 @@ export function SecretaryWorkbenchPanel({
 
         <div className="min-h-0 flex-1 overflow-hidden">
           <AnimatePresence mode="wait" initial={false}>
-            {activeView === 'workbench' ? (
+            {activeView === 'run' ? (
               <motion.div
                 key="workbench-view"
                 initial={{ opacity: 0, x: 8 }}
@@ -186,6 +196,10 @@ export function SecretaryWorkbenchPanel({
                 <ToolCallCapsules items={snapshot.tools} />
                 <AgentActivityList activities={snapshot.agents} />
                 <ExecutionSummary snapshot={snapshot} runState={runState} />
+              </motion.div>
+            ) : activeView === 'files' ? (
+              <motion.div key="files-view" initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -8 }} className="h-full min-h-0">
+                {files}
               </motion.div>
             ) : (
               <motion.div

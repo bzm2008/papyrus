@@ -50,10 +50,11 @@ import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
 import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
 import { SecretaryToolStep } from './SecretaryToolStep'
+import { SecretaryFileWorkbench } from './SecretaryFileWorkbench'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type AgentTodos = AgentTodo[]
-type WorkbenchView = 'workbench' | 'manuscript'
+type WorkbenchView = 'run' | 'files' | 'manuscript'
 type ReceiptSnapshot = {
   todos: AgentTodo[]
   steps: AgentStep[]
@@ -65,7 +66,7 @@ export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const [rightPanelPinned, setRightPanelPinned] = useState(false)
-  const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('workbench')
+  const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('run')
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
   const autoWorkbenchTimerRef = useRef<number | undefined>(undefined)
@@ -96,6 +97,11 @@ export function FlowWorkspace() {
   const activeWorkAssistantRunId = useWorkAssistantStore((state) => state.activeRunId)
   const activeWorkAssistantRun = useWorkAssistantStore((state) => activeWorkAssistantRunId ? state.runs[activeWorkAssistantRunId] : undefined)
   const selectWorkAssistantTool = useWorkAssistantStore((state) => state.selectToolCall)
+  const selectedWorkAssistantToolId = useWorkAssistantStore((state) => state.selectedToolCallId)
+  const activeWorkAssistantCalls = activeWorkAssistantRun ? Object.values(activeWorkAssistantRun.toolCalls) : []
+  const selectedWorkAssistantCall = activeWorkAssistantCalls.find((call) => call.id === selectedWorkAssistantToolId)
+  const filePlanCall = selectedWorkAssistantCall?.name === 'file_plan_batch' ? selectedWorkAssistantCall : [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_plan_batch')
+  const fileApplyCall = [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_apply_batch')
   const updateSecretaryGoal = useAppStore((state) => state.updateSecretaryGoal)
   const clearSecretaryGoal = useAppStore((state) => state.clearSecretaryGoal)
   const goalCheckpoints = useAppStore((state) => state.goalCheckpoints)
@@ -135,7 +141,7 @@ export function FlowWorkspace() {
     const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
     const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
 
-    if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'workbench') {
+    if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'run') {
       setRightPanelOpen(false)
     }
 
@@ -149,7 +155,7 @@ export function FlowWorkspace() {
       !isBusy ||
       rightPanelOpen ||
       rightPanelPinned ||
-      rightPanelView !== 'workbench' ||
+      rightPanelView !== 'run' ||
       !shouldAutoOpenWorkbench
     ) {
       if (autoWorkbenchTimerRef.current !== undefined) {
@@ -160,7 +166,7 @@ export function FlowWorkspace() {
     }
 
     autoWorkbenchTimerRef.current = window.setTimeout(() => {
-      setRightPanelView('workbench')
+      setRightPanelView('run')
       setRightPanelOpen(true)
       autoWorkbenchTimerRef.current = undefined
     }, 420)
@@ -416,16 +422,16 @@ export function FlowWorkspace() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              title={rightPanelOpen && rightPanelView === 'workbench' ? '隐藏工作台' : '显示工作台'}
+              title={rightPanelOpen && rightPanelView === 'run' ? '隐藏工作台' : '显示工作台'}
               onClick={() => {
-                if (rightPanelOpen && rightPanelView === 'workbench') {
+                if (rightPanelOpen && rightPanelView === 'run') {
                   setRightPanelOpen(false)
                   setRightPanelPinned(false)
                   return
                 }
 
                 setRightPanelOpen(true)
-                setRightPanelView('workbench')
+                setRightPanelView('run')
               }}
               className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
             >
@@ -606,6 +612,7 @@ export function FlowWorkspace() {
             }}
             changeStat={latestRunChangeStat}
             manuscript={<EditorPane />}
+            files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
           />
         ) : null}
       </AnimatePresence>

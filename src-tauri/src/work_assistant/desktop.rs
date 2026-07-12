@@ -397,6 +397,38 @@ pub fn register_application_from_picker(
 }
 
 #[tauri::command]
+pub fn work_assistant_remove_application(
+    state: State<'_, WorkAssistantState>,
+    application_id: String,
+) -> Result<(), AssistantErrorPayload> {
+    remove_registered_application(&state, &application_id).map_err(Into::into)
+}
+
+pub fn remove_registered_application(
+    state: &WorkAssistantState,
+    application_id: &str,
+) -> Result<(), WorkAssistantError> {
+    let _guard = application_guard(state)?;
+    let path = applications_path(state);
+    let mut applications = load_applications(&path)?;
+    let previous_len = applications.len();
+    applications.retain(|application| application.id != application_id);
+    if applications.len() == previous_len {
+        return Err(WorkAssistantError::blocked("registered application was not found"));
+    }
+    persist_applications(&path, &applications)?;
+    drop(_guard);
+    let _ = append_audit_entry(
+        state,
+        &crate::work_assistant::AuditEntry::new(
+            "application_removed",
+            format!("applicationId={application_id}"),
+        ),
+    );
+    Ok(())
+}
+
+#[tauri::command]
 pub fn work_assistant_launch_application(
     state: State<'_, WorkAssistantState>,
     application_id: String,
@@ -721,6 +753,29 @@ mod tests {
             assert_eq!(saved[0].label, "Editor");
             assert_eq!(saved[1].id, second.id);
             assert!(launch_registered_application(&state, "missing").is_err());
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn removing_an_application_alias_persists_the_remaining_registry() {
+        let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let state = test_state(&directory);
+        let executable = directory.join(if cfg!(windows) { "tool.exe" } else { "tool" });
+        fs::write(&executable, b"placeholder").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).unwrap();
+        }
+        if cfg!(any(windows, target_os = "linux")) {
+            let app = register_application_from_picker(&state, "Editor".into(), &executable).unwrap();
+            remove_registered_application(&state, &app.id).unwrap();
+            assert!(load_applications(&applications_path(&state)).unwrap().is_empty());
+            assert_eq!(remove_registered_application(&state, &app.id).unwrap_err().code, "blocked");
         }
         fs::remove_dir_all(directory).unwrap();
     }

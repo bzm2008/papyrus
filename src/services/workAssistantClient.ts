@@ -108,6 +108,9 @@ export const validateApplicationSelection = (path: string) =>
 export const registerApplicationFromPicker = (label: string, path: string) =>
   invokeTyped<RegisteredApplication>('work_assistant_register_application_from_picker', { label, path })
 
+export const removeRegisteredApplication = (applicationId: string) =>
+  invokeTyped<void>('work_assistant_remove_application', { applicationId })
+
 export const launchRegisteredApplication = (applicationId: string) =>
   invokeTyped<void>('work_assistant_launch_application', { applicationId })
 
