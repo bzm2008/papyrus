@@ -8,6 +8,7 @@ use crate::work_assistant::{
     ConflictPolicy, FileOperationKind, FileOperationRequest, WorkAssistantError,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -37,6 +38,10 @@ pub struct SourceSnapshotSummary {
     pub source_identity: PlatformFileIdentity,
     pub byte_len: u64,
     pub version: FileVersion,
+    /// Integrity value retained only by the native approval capability. It is deliberately not
+    /// serialized into a UI preview, audit payload, or recovery receipt.
+    #[serde(skip)]
+    content_digest: [u8; 32],
 }
 
 /// Portable freshness information captured with an identity-bound file handle.  File identities
@@ -99,6 +104,7 @@ struct BoundPlatformSource {
     root_identity: PlatformFileIdentity,
     source_identity: PlatformFileIdentity,
     source_version: FileVersion,
+    source_digest: [u8; 32],
     #[cfg(windows)]
     parent_path: PathBuf,
     #[cfg(windows)]
@@ -217,6 +223,7 @@ impl SourceSnapshot {
         if self.summary.root_identity == expected.root_identity
             && self.summary.source_identity == expected.source_identity
             && self.summary.version == expected.version
+            && self.summary.content_digest == expected.content_digest
         {
             Ok(())
         } else {
@@ -239,6 +246,21 @@ impl SourceSnapshot {
 
     pub fn verify_snapshot(&self) -> Result<(), WorkAssistantError> {
         self.platform.verify_snapshot()
+    }
+
+    /// Verify both the namespace/version binding and the full bounded bytes still exposed by
+    /// the retained source handle. Version checks catch ordinary edits; this digest closes the
+    /// same-length/same-timestamp edge before any staged bytes are published or renamed.
+    fn verify_content_snapshot(&self) -> Result<(), WorkAssistantError> {
+        self.verify_snapshot()?;
+        let digest = digest_regular_file(&self.file, self.summary.byte_len)?;
+        if digest == self.platform.source_digest {
+            Ok(())
+        } else {
+            Err(WorkAssistantError::stale_preview(
+                "the approved source content changed after preview",
+            ))
+        }
     }
 
     pub(crate) fn copy_to_staging(&self) -> Result<(), WorkAssistantError> {
@@ -307,6 +329,14 @@ pub fn open_source_snapshot(
 ) -> Result<SourceSnapshot, WorkAssistantError> {
     let original_relative_path = normalized_relative_path(original_relative_path.as_ref())?;
     let opened = open_platform_source(authorized_root, Path::new(&original_relative_path))?;
+    let content_digest = digest_regular_file(&opened.file, opened.byte_len)?;
+    // The digest is meaningful only if the version captured by the adapter remained stable while
+    // it was streamed. Do not retry against a moving source: approval must be regenerated.
+    if file_version(&opened.file)? != opened.version {
+        return Err(WorkAssistantError::stale_preview(
+            "the approved source changed while its preview was being captured",
+        ));
+    }
     Ok(SourceSnapshot {
         file: opened.file,
         platform: BoundPlatformSource {
@@ -321,6 +351,7 @@ pub fn open_source_snapshot(
             root_identity: opened.root_identity.clone(),
             source_identity: opened.source_identity.clone(),
             source_version: opened.version.clone(),
+            source_digest: content_digest,
             #[cfg(windows)]
             parent_path: opened.parent_path,
             #[cfg(windows)]
@@ -332,6 +363,7 @@ pub fn open_source_snapshot(
             source_identity: opened.source_identity,
             byte_len: opened.byte_len,
             version: opened.version,
+            content_digest,
         },
     })
 }
@@ -846,6 +878,7 @@ pub(super) struct StagedFile {
     file: File,
     parent: File,
     leaf: String,
+    digest: [u8; 32],
     published: bool,
 }
 
@@ -992,24 +1025,34 @@ fn stage_source(
     destination: &DestinationBinding,
 ) -> Result<StagedFile, WorkAssistantError> {
     verify_destination_binding(destination)?;
-    source.verify_snapshot()?;
+    source.verify_content_snapshot()?;
     source.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     #[cfg(windows)]
-    {
+    let staged = {
         windows::stage_copy(source.file(), &destination.parent, &destination.parent_path)
-    }
+    }?;
     #[cfg(target_os = "linux")]
-    {
+    let staged = {
         linux::stage_copy(source.file(), &destination.parent)
-    }
+    }?;
     #[cfg(target_os = "macos")]
-    {
+    let staged = {
         macos::stage_copy(source.file(), &destination.parent)
-    }
+    }?;
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = destination;
-        Err(WorkAssistantError::blocked("native staging is unavailable"))
+        return Err(WorkAssistantError::blocked("native staging is unavailable"));
+    }
+    // A staged file is never published solely because it was copied successfully. Both sides
+    // must still equal the full digest captured at preview time; clean the opaque staging child
+    // through its held capability before returning a recoverable stale-preview result.
+    let verification = source
+        .verify_content_snapshot()
+        .and_then(|_| verify_staged_digest(&staged, source.summary.content_digest));
+    match verification {
+        Ok(()) => Ok(staged),
+        Err(error) => Err(cleanup_stale_staging(staged, error)),
     }
 }
 
@@ -1072,7 +1115,7 @@ fn move_snapshot_to_destination(
 ) -> Result<(), WorkAssistantError> {
     loop {
         verify_destination_binding(destination)?;
-        source.verify_snapshot()?;
+        source.verify_content_snapshot()?;
         let result = injected_rename_collision()
             .then(|| {
                 WorkAssistantError::destination_exists("injected native publication collision")
@@ -1129,7 +1172,7 @@ fn move_snapshot_to_recovery(
     source: &SourceSnapshot,
     recovery: &PreparedRecoverySlot,
 ) -> Result<(), WorkAssistantError> {
-    source.verify_snapshot()?;
+    source.verify_content_snapshot()?;
     #[cfg(windows)]
     {
         windows::move_snapshot(&source.platform.source, &recovery.slot, "content")
@@ -1297,6 +1340,42 @@ fn cleanup_cancelled_staging(mut staged: StagedFile, message: &str) -> WorkAssis
     }
 }
 
+fn cleanup_stale_staging(mut staged: StagedFile, original: WorkAssistantError) -> WorkAssistantError {
+    let cleanup = remove_staging_file(&staged.file, &staged.parent, &staged.leaf);
+    staged.published = true;
+    match cleanup {
+        Ok(()) => WorkAssistantError::stale_preview(original.message),
+        Err(error) => WorkAssistantError::partial_transaction(format!(
+            "the source changed before publication and opaque staged content could not be cleaned up: {}",
+            safe_transaction_error(&error)
+        )),
+    }
+}
+
+fn verify_staged_digest(
+    staged: &StagedFile,
+    expected: [u8; 32],
+) -> Result<(), WorkAssistantError> {
+    if staged.digest != expected {
+        return Err(WorkAssistantError::stale_preview(
+            "staged content differs from the approved source preview",
+        ));
+    }
+    let byte_len = staged
+        .file
+        .metadata()
+        .map_err(io_error)?
+        .len();
+    let digest = digest_regular_file(&staged.file, byte_len)?;
+    if digest == expected {
+        Ok(())
+    } else {
+        Err(WorkAssistantError::stale_preview(
+            "staged content differs from the approved source preview",
+        ))
+    }
+}
+
 fn safe_transaction_error(error: &WorkAssistantError) -> &'static str {
     match error.code.as_str() {
         "stale_preview" => "the filesystem changed",
@@ -1461,6 +1540,63 @@ pub(super) fn file_version(file: &File) -> Result<FileVersion, WorkAssistantErro
         Err(error) => -(error.duration().as_nanos() as i128),
     };
     Ok(FileVersion { byte_len: metadata.len(), modified_unix_nanos })
+}
+
+// Keep content capture within the existing preview operation's per-source ceiling. Hashing is
+// streamed from a retained handle; no source bytes are accumulated or surfaced to callers.
+const MAX_DIGESTED_SOURCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn digest_regular_file(file: &File, expected_len: u64) -> Result<[u8; 32], WorkAssistantError> {
+    if expected_len > MAX_DIGESTED_SOURCE_BYTES {
+        return Err(WorkAssistantError::blocked(
+            "approved source exceeds the maximum preview size",
+        ));
+    }
+    let mut reader = file
+        .try_clone()
+        .map_err(io_error)?;
+    let original_position = reader
+        .stream_position()
+        .map_err(io_error)?;
+    let result = (|| {
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(io_error)?;
+        let mut digest = Sha256::new();
+        let mut observed = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(io_error)?;
+            if read == 0 {
+                break;
+            }
+            observed = observed
+                .checked_add(read as u64)
+                .ok_or_else(|| WorkAssistantError::stale_preview("approved source size overflowed"))?;
+            if observed > MAX_DIGESTED_SOURCE_BYTES {
+                return Err(WorkAssistantError::blocked(
+                    "approved source exceeds the maximum preview size",
+                ));
+            }
+            digest.update(&buffer[..read]);
+        }
+        if observed != expected_len {
+            return Err(WorkAssistantError::stale_preview(
+                "approved source size changed during integrity verification",
+            ));
+        }
+        Ok(digest.finalize().into())
+    })();
+    let restore = reader
+        .seek(SeekFrom::Start(original_position))
+        .map_err(io_error);
+    match (result, restore) {
+        (Ok(digest), Ok(_)) => Ok(digest),
+        (Err(error), _) => Err(error),
+        (_, Err(error)) => Err(error),
+    }
 }
 
 fn blocked_io_version(error: std::io::Error) -> WorkAssistantError {
@@ -1713,6 +1849,26 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn content_digest_rejects_a_same_length_rewrite_when_version_matches() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("document.txt");
+        fs::write(&source, b"before\n").unwrap();
+        let mut snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+
+        fs::write(&source, b"after!\n").unwrap();
+        // Model a coarse timestamp filesystem (or a same-timestamp adversarial rewrite): the
+        // identity and version seam no longer distinguish the source, so the digest must.
+        snapshot.platform.source_version = file_version(snapshot.file()).unwrap();
+
+        let error = snapshot.verify_content_snapshot().unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+        drop(snapshot);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn held_windows_snapshot_prevents_source_replacement() {
@@ -1834,6 +1990,72 @@ mod tests {
             fs::read_to_string(root.join("destination (2).txt")).unwrap(),
             "contents"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn copy_rejects_a_same_length_source_rewrite_after_staging() {
+        use std::{
+            cell::{Cell, RefCell},
+            io::{Seek, SeekFrom, Write},
+        };
+
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("source.txt");
+        let destination_path = root.join("destination.txt");
+        fs::write(&source_path, b"before\n").unwrap();
+        fs::write(&destination_path, b"existing").unwrap();
+        // Keep this writer open before the preview, including on Windows where the retained
+        // preview handle correctly blocks a writer opened afterwards.
+        let mut writer_options = fs::OpenOptions::new();
+        writer_options.write(true);
+        let writer = RefCell::new(writer_options.open(&source_path).unwrap());
+        let operation = FileOperationRequest {
+            kind: FileOperationKind::Copy,
+            source: Some("source.txt".into()),
+            destination: Some("destination.txt".into()),
+        };
+        let transaction = prepare_file_transaction(
+            &root,
+            "preview-source-rewrite",
+            0,
+            &operation,
+            &ConflictPolicy::Overwrite,
+        )
+        .unwrap();
+        let checks = Cell::new(0usize);
+
+        let error = match transaction
+            .execute(|| {
+                let check = checks.get() + 1;
+                checks.set(check);
+                // `execute` checks cancellation immediately after staging. This is the exact
+                // gap where a pre-existing writer can replace the same number of bytes.
+                if check == 3 {
+                    let mut writer = writer.borrow_mut();
+                    writer.seek(SeekFrom::Start(0)).unwrap();
+                    writer.write_all(b"after!\n").unwrap();
+                    writer.sync_all().unwrap();
+                }
+                Ok(false)
+            })
+        {
+            Ok(_) => panic!("a source rewrite after staging must reject publication"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, "stale_preview");
+        assert_eq!(fs::read(&destination_path).unwrap(), b"existing");
+        assert!(!fs::read_dir(&root).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".papyrus-stage-")
+        }));
+        drop(writer);
         fs::remove_dir_all(root).unwrap();
     }
 

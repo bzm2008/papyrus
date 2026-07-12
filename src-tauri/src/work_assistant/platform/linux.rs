@@ -3,6 +3,7 @@ use super::{
     RecoveryBinding, StagedFile,
 };
 use crate::work_assistant::WorkAssistantError;
+use sha2::{Digest, Sha256};
 use std::{
     ffi::CString,
     fs::{File, OpenOptions},
@@ -139,7 +140,7 @@ pub(crate) fn stage_copy(source: &File, parent: &File) -> Result<StagedFile, Wor
         libc::openat(
             parent.as_raw_fd(),
             name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             0o600,
         )
     };
@@ -155,6 +156,7 @@ pub(crate) fn stage_copy(source: &File, parent: &File) -> Result<StagedFile, Wor
         .map_err(blocked_io("could not seek approved source"))?;
     let mut output = output;
     let mut buffer = [0u8; 64 * 1024];
+    let mut digest = Sha256::new();
     loop {
         let read = input
             .read(&mut buffer)
@@ -165,6 +167,7 @@ pub(crate) fn stage_copy(source: &File, parent: &File) -> Result<StagedFile, Wor
         output
             .write_all(&buffer[..read])
             .map_err(blocked_io("could not stage approved source"))?;
+        digest.update(&buffer[..read]);
     }
     output
         .sync_all()
@@ -175,6 +178,7 @@ pub(crate) fn stage_copy(source: &File, parent: &File) -> Result<StagedFile, Wor
             .try_clone()
             .map_err(blocked_io("could not retain staging parent"))?,
         leaf,
+        digest: digest.finalize().into(),
         published: false,
     })
 }

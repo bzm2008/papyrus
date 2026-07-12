@@ -1,5 +1,6 @@
 use super::{file_version, FileVersion, OpenedDestination, OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles, StagedFile};
 use crate::work_assistant::WorkAssistantError;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File},
     iter,
@@ -134,13 +135,15 @@ pub(crate) fn stage_copy(source: &File, parent: &File, parent_path: &Path) -> Re
     use std::io::{Read, Seek, SeekFrom, Write};
     input.seek(SeekFrom::Start(0)).map_err(blocked_io("could not seek approved source"))?;
     let mut buffer = [0u8; 64 * 1024];
+    let mut digest = Sha256::new();
     loop {
         let read = input.read(&mut buffer).map_err(blocked_io("could not read approved source"))?;
         if read == 0 { break; }
         output.write_all(&buffer[..read]).map_err(blocked_io("could not stage approved source"))?;
+        digest.update(&buffer[..read]);
     }
     output.sync_all().map_err(blocked_io("could not sync staged source"))?;
-    Ok(StagedFile { file: output, parent: parent.try_clone().map_err(blocked_io("could not retain staging parent"))?, leaf, published: false })
+    Ok(StagedFile { file: output, parent: parent.try_clone().map_err(blocked_io("could not retain staging parent"))?, leaf, digest: digest.finalize().into(), published: false })
 }
 
 pub(crate) fn publish_staging(staging: &File, parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
@@ -302,24 +305,13 @@ pub(crate) fn verify_bound_source(
     if file_identity(parent)? != *expected_parent_identity {
         return Err(WorkAssistantError::stale_preview("the source parent identity changed after preview"));
     }
-    let current = open_read_handle(&parent_path.join(leaf), false).map_err(|error| WorkAssistantError {
-        code: error.code,
-        message: format!("could not re-open retained source leaf for identity verification: {}", error.message),
-        recoverable: error.recoverable,
-    })?;
-    reject_reparse(&current, "source")?;
-    let metadata = current.metadata().map_err(blocked_io("could not inspect source"))?;
-    if !metadata.is_file() {
-        return Err(WorkAssistantError::blocked("approved source must be a regular file"));
-    }
-    let current_identity = file_identity(&current)?;
-    if current_identity != source_identity {
-        return Err(WorkAssistantError::stale_preview("the source file identity changed after preview"));
-    }
-    if file_version(&current)? != *expected_version {
-        return Err(WorkAssistantError::stale_preview("the source file content changed after preview"));
-    }
-    Ok((root_identity, current_identity))
+    // The retained source handle was opened without WRITE or DELETE sharing. It is therefore
+    // the authoritative namespace binding for this transaction: reopening the path here would
+    // only race that capability and can fail while a staged copy is active. The held handle's
+    // identity/version above plus the source digest checked by the caller are the freshness
+    // guard; no path fallback is used.
+    let _ = (parent_path, leaf);
+    Ok((root_identity, source_identity))
 }
 
 const PRIVATE_RECOVERY_DACL: &str = "D:P(A;;FA;;;OW)";
@@ -744,7 +736,7 @@ fn create_staging_file(path: &Path) -> Result<File, WorkAssistantError> {
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            GENERIC_WRITE | DELETE,
+            GENERIC_READ | GENERIC_WRITE | DELETE,
             0,
             ptr::null(),
             CREATE_NEW,
