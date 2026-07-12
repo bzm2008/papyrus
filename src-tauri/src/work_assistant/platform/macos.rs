@@ -58,7 +58,9 @@ pub(crate) fn open_source(
 }
 
 pub(crate) fn open_destination(root: &Path, relative: &Path) -> Result<OpenedDestination, WorkAssistantError> {
-    let mut directory = open_root(root)?;
+    let root = open_root(root)?;
+    let root_capability = root.try_clone().map_err(blocked_io("could not retain destination root handle"))?;
+    let mut directory = root;
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {
         let name = component_name(component.as_os_str())?;
@@ -69,7 +71,13 @@ pub(crate) fn open_destination(root: &Path, relative: &Path) -> Result<OpenedDes
             if name.as_bytes().is_empty() || name.as_bytes() == b"." || name.as_bytes() == b".." {
                 return Err(WorkAssistantError::blocked("destination file name is invalid"));
             }
-            return Ok(OpenedDestination { parent: directory, leaf: name.to_string_lossy().into_owned() });
+            let parent_identity = identity(&directory)?;
+            return Ok(OpenedDestination {
+                parent: directory,
+                leaf: name.to_string_lossy().into_owned(),
+                root: root_capability,
+                parent_identity,
+            });
         }
     }
     Err(WorkAssistantError::blocked("destination file name is missing"))
@@ -93,21 +101,6 @@ pub(crate) fn destination_identity(parent: &File, leaf: &str) -> Result<Option<P
         return Err(WorkAssistantError::blocked("destination must be a regular file"));
     }
     Ok(Some(identity_from_stat(&stat)))
-}
-
-pub(crate) fn reserve_destination_name(parent: &File, leaf: &str) -> Result<bool, WorkAssistantError> {
-    let name = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("destination leaf contains a NUL byte"))?;
-    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
-    if descriptor >= 0 {
-        unsafe { libc::close(descriptor); }
-        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-            return Err(last_os_error("could not release destination reservation"));
-        }
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::EEXIST) { return Ok(false); }
-    Err(WorkAssistantError::blocked(format!("could not reserve destination name: {error}")))
 }
 
 pub(crate) fn stage_copy(source: &File, parent: &File) -> Result<StagedFile, WorkAssistantError> {
@@ -192,7 +185,7 @@ fn rename_noreplace(from_dir: i32, from: &CString, to_dir: i32, to: &CString) ->
     if result == 0 { return Ok(()); }
     let error = std::io::Error::last_os_error();
     match error.raw_os_error() {
-        Some(libc::EEXIST) => Err(WorkAssistantError::stale_preview("destination changed before native publication")),
+        Some(libc::EEXIST) => Err(WorkAssistantError::destination_exists("destination changed before native publication")),
         Some(libc::EXDEV) => Err(WorkAssistantError { code: "cross_device".into(), message: "native rename crosses filesystem devices".into(), recoverable: true }),
         _ => Err(WorkAssistantError::blocked(format!("could not complete native relative rename: {error}"))),
     }
@@ -274,6 +267,29 @@ pub(crate) fn verify_bound_source(
         return Err(WorkAssistantError::stale_preview("the source file identity changed after preview"));
     }
     Ok((root_identity, current_identity))
+}
+
+/// Re-walk a destination parent from the authorized root.  POSIX descriptors remain valid after
+/// a rename, so identity comparison must happen at the live root namespace before every write.
+pub(crate) fn verify_bound_destination(
+    root: &File,
+    parent: &File,
+    parent_components: &[String],
+    expected_parent_identity: &PlatformFileIdentity,
+) -> Result<(), WorkAssistantError> {
+    let mut current = root.try_clone().map_err(blocked_io("could not retain destination root handle"))?;
+    for component in parent_components {
+        let name = CString::new(component.as_str())
+            .map_err(|_| WorkAssistantError::stale_preview("destination ancestor is invalid"))?;
+        validate_directory_at(current.as_raw_fd(), &name)
+            .map_err(|_| WorkAssistantError::stale_preview("destination ancestor changed after preview"))?;
+        current = openat_directory(current.as_raw_fd(), &name)
+            .map_err(|_| WorkAssistantError::stale_preview("destination ancestor changed after preview"))?;
+    }
+    if identity(&current)? != *expected_parent_identity || identity(parent)? != *expected_parent_identity {
+        return Err(WorkAssistantError::stale_preview("destination parent changed after preview"));
+    }
+    Ok(())
 }
 
 fn open_root(root: &Path) -> Result<File, WorkAssistantError> {

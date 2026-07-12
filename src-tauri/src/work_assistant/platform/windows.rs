@@ -120,10 +120,6 @@ pub(crate) fn destination_identity(parent: &File, parent_path: &Path, leaf: &str
     }
 }
 
-pub(crate) fn reserve_destination_name(parent: &File, parent_path: &Path, leaf: &str) -> Result<bool, WorkAssistantError> {
-    Ok(destination_identity(parent, parent_path, leaf)?.is_none())
-}
-
 pub(crate) fn stage_copy(source: &File, parent: &File, parent_path: &Path) -> Result<StagedFile, WorkAssistantError> {
     let current_parent = open_read_verified_directory(parent_path)?;
     if file_identity(&current_parent)? != file_identity(parent)? {
@@ -519,7 +515,7 @@ fn rename_handle_without_replace(source: &File, destination_parent: &File, leaf:
     };
     if status < 0 {
         return match status as u32 {
-            0xC000_0035 => Err(WorkAssistantError::stale_preview("destination changed before native publication")),
+            0xC000_0035 => Err(WorkAssistantError::destination_exists("destination changed before native publication")),
             0xC000_00D4 => Err(WorkAssistantError { code: "cross_device".into(), message: "native rename crosses filesystem devices".into(), recoverable: true }),
             value => Err(WorkAssistantError::blocked(format!("could not complete native relative rename (NTSTATUS 0x{value:08X})"))),
         };
@@ -585,20 +581,24 @@ fn create_staging_file(path: &Path) -> Result<File, WorkAssistantError> {
 fn create_child_file(parent: &File, leaf: &str) -> Result<File, WorkAssistantError> {
     // CreateFileW has no root-directory handle argument.  The receipt is instead written through
     // a handle-derived final path in the adapter; callers never receive that path.
+    let mut path = path_from_handle(parent, "could not resolve private recovery slot")?;
+    path.push(leaf);
+    open_receipt_file(&path)
+}
+
+fn path_from_handle(parent: &File, context: &str) -> Result<std::path::PathBuf, WorkAssistantError> {
     use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
     let mut capacity = 512usize;
-    let mut path = loop {
+    loop {
         let mut buffer = vec![0u16; capacity];
         let length = unsafe { windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW(parent.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
-        if length == 0 { return Err(last_native_error("could not resolve private recovery slot")); }
+        if length == 0 { return Err(last_native_error(context)); }
         if (length as usize) < buffer.len() {
-            break std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+            return Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize])));
         }
         capacity = capacity.checked_mul(2).ok_or_else(|| WorkAssistantError::blocked("private recovery slot path is too long"))?;
         if capacity > 32768 { return Err(WorkAssistantError::blocked("private recovery slot path is too long")); }
-    };
-    path.push(leaf);
-    open_receipt_file(&path)
+    }
 }
 
 fn open_receipt_file(path: &Path) -> Result<File, WorkAssistantError> {

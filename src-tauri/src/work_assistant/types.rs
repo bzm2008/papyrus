@@ -232,6 +232,27 @@ impl WorkAssistantError {
         }
     }
 
+    /// Cancellation is distinct from a stale filesystem preview: callers can safely retain the
+    /// approval audit trail and report unfinished items without treating the operation as a
+    /// failed mutation.
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            code: "cancelled".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    /// Internal native no-replace collision.  The rename policy retries this error with the next
+    /// bounded suffix; it must never be surfaced as a stale preview.
+    pub(crate) fn destination_exists(message: impl Into<String>) -> Self {
+        Self {
+            code: "destination_exists".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
     pub fn partial_transaction(message: impl Into<String>) -> Self {
         Self {
             code: "partial_transaction".into(),

@@ -97,6 +97,10 @@ pub fn execute_batch_file_operations(
                 result.completed.push(item);
             }
             Err(error) => {
+                if error.code == "cancelled" {
+                    record_cancelled_transaction(state, &mut result, &request.operations, index, &error)?;
+                    break;
+                }
                 let item = item(index, safe_error_detail(&error), Some(&error));
                 append_item_audit(state, "failed", &item)?;
                 result.failed.push(item);
@@ -104,6 +108,22 @@ pub fn execute_batch_file_operations(
         }
     }
     Ok(result)
+}
+
+fn record_cancelled_transaction(
+    state: &WorkAssistantState,
+    result: &mut BatchExecutionResult,
+    operations: &[FileOperationRequest],
+    index: usize,
+    error: &WorkAssistantError,
+) -> Result<(), WorkAssistantError> {
+    let item = item(index, "operation cancelled".into(), Some(error));
+    append_item_audit(state, "cancelled", &item)?;
+    result.cancelled = true;
+    // The active operation did not publish a mutation: include it alongside later work so the UI
+    // can offer a deliberate retry without manufacturing a failure item.
+    result.remaining.extend(remaining_items(operations, index));
+    Ok(())
 }
 
 fn item(index: usize, detail: String, error: Option<&WorkAssistantError>) -> BatchItemResult {
@@ -121,6 +141,7 @@ fn safe_error_detail(error: &WorkAssistantError) -> String {
         "stale_preview" => "preview is no longer current; create a new preview".into(),
         "partial_transaction" => "a recoverable transaction step needs attention".into(),
         "recovery_unavailable" => "private recovery storage is unavailable on this volume".into(),
+        "cancelled" => "operation cancelled".into(),
         _ => "approved file operation could not be completed".into(),
     }
 }
@@ -219,6 +240,34 @@ mod tests {
         let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "source").unwrap();
         let result = run(&state(&path), vec![operation(FileOperationKind::Move, Some("source.txt"), Some("moved.txt"))], ConflictPolicy::Skip);
         assert_eq!(result.completed.len(), 1); assert!(!path.join("source.txt").exists()); assert_eq!(fs::read_to_string(path.join("moved.txt")).unwrap(), "source");
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn cancellation_after_staging_is_cancelled_not_failed_and_leaves_no_staging_file() {
+        let path = directory();
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("source.txt"), "source").unwrap();
+        let operation = operation(FileOperationKind::Copy, Some("source.txt"), Some("destination.txt"));
+        let transaction = prepare_file_transaction(&path, "preview", 0, &operation, &ConflictPolicy::Skip).unwrap();
+        let calls = std::cell::Cell::new(0u8);
+        let error = match transaction.execute(|| {
+            calls.set(calls.get() + 1);
+            Ok(calls.get() >= 3)
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("cancellation after staging must not complete the operation"),
+        };
+        assert_eq!(error.code, "cancelled");
+        assert!(!path.join("destination.txt").exists());
+        assert!(!fs::read_dir(&path).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(".papyrus-stage-")));
+
+        let state = state(&path);
+        let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false };
+        record_cancelled_transaction(&state, &mut result, &[operation], 0, &error).unwrap();
+        assert!(result.cancelled);
+        assert!(result.failed.is_empty());
+        assert_eq!(result.remaining.len(), 1);
         fs::remove_dir_all(path).unwrap();
     }
 }

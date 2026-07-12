@@ -337,10 +337,26 @@ pub(crate) fn validate_recovery_leaf(value: &str) -> Result<(), WorkAssistantErr
 struct DestinationBinding {
     parent: File,
     leaf: String,
+    // POSIX directory descriptors remain usable after a directory is renamed.  Retain the
+    // authorized root and the exact parent walk so each mutation can prove that this capability
+    // still names the approved namespace, rather than merely a directory with a live FD.
+    #[cfg(unix)]
+    root: File,
+    #[cfg(unix)]
+    parent_components: Vec<String>,
+    #[cfg(unix)]
+    parent_identity: PlatformFileIdentity,
     #[cfg(windows)]
     parent_path: PathBuf,
     #[cfg(windows)]
     ancestor_handles: Vec<File>,
+    rename_candidate: Option<RenameCandidate>,
+}
+
+struct RenameCandidate {
+    stem: String,
+    extension: Option<String>,
+    next_number: u32,
 }
 
 pub(crate) struct PreparedFileTransaction {
@@ -424,10 +440,10 @@ impl PreparedFileTransaction {
         if self.skip {
             return Ok(TransactionExecution { detail: "destination already exists".into(), receipts: Vec::new() });
         }
-        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled before execution")); }
+        if cancelled()? { return Err(WorkAssistantError::cancelled("operation was cancelled before execution")); }
         if let Some(source) = &self.source { source.verify_snapshot()?; }
         if let Some(destination) = &self.existing_destination { destination.verify_snapshot()?; }
-        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled before staging")); }
+        if cancelled()? { return Err(WorkAssistantError::cancelled("operation was cancelled before staging")); }
 
         match self.kind {
             FileOperationKind::CreateDirectory => {
@@ -456,7 +472,7 @@ impl PreparedFileTransaction {
     fn copy_or_overwrite<F>(&mut self, cancelled: &F, _move_after: bool) -> Result<TransactionExecution, WorkAssistantError>
     where F: Fn() -> Result<bool, WorkAssistantError> {
         let source = self.source.as_mut().expect("source is required");
-        let destination = self.destination.as_ref().expect("destination is required");
+        let destination = self.destination.as_mut().expect("destination is required");
         let staging = stage_source(source, destination)?;
         if cancelled()? {
             return Err(cleanup_cancelled_staging(staging, "operation was cancelled after staging"));
@@ -486,7 +502,7 @@ impl PreparedFileTransaction {
     fn move_or_rename<F>(&mut self, cancelled: &F) -> Result<TransactionExecution, WorkAssistantError>
     where F: Fn() -> Result<bool, WorkAssistantError> {
         let source = self.source.as_mut().expect("source is required");
-        let destination = self.destination.as_ref().expect("destination is required");
+        let destination = self.destination.as_mut().expect("destination is required");
         if self.existing_destination.is_none() {
             match move_snapshot_to_destination(source, destination) {
                 Ok(()) => return Ok(TransactionExecution { detail: "renamed regular file".into(), receipts: Vec::new() }),
@@ -539,6 +555,10 @@ impl PreparedFileTransaction {
 pub(super) struct OpenedDestination {
     parent: File,
     leaf: String,
+    #[cfg(unix)]
+    root: File,
+    #[cfg(unix)]
+    parent_identity: PlatformFileIdentity,
     #[cfg(windows)]
     parent_path: PathBuf,
     #[cfg(windows)]
@@ -565,10 +585,17 @@ fn bind_destination(root: &Path, relative: &Path) -> Result<DestinationBinding, 
     Ok(DestinationBinding {
         parent: opened.parent,
         leaf: opened.leaf,
+        #[cfg(unix)]
+        root: opened.root,
+        #[cfg(unix)]
+        parent_components: normalized_parent_components(&normalized_relative_path(relative)?),
+        #[cfg(unix)]
+        parent_identity: opened.parent_identity,
         #[cfg(windows)]
         parent_path: opened.parent_path,
         #[cfg(windows)]
         ancestor_handles: opened.ancestor_handles,
+        rename_candidate: None,
     })
 }
 
@@ -587,20 +614,33 @@ fn destination_entry_identity(destination: &DestinationBinding) -> Result<Option
 }
 
 fn reserve_renamed_destination(destination: &mut DestinationBinding) -> Result<(), WorkAssistantError> {
+    verify_destination_binding(destination)?;
     let (stem, extension) = split_leaf(&destination.leaf)?;
-    for number in 1..=10_000 {
-        let candidate = match extension { Some(value) => format!("{stem} ({number}).{value}"), None => format!("{stem} ({number})") };
-        #[cfg(windows)]
-        let available = windows::reserve_destination_name(&destination.parent, &destination.parent_path, &candidate)?;
-        #[cfg(target_os = "linux")]
-        let available = linux::reserve_destination_name(&destination.parent, &candidate)?;
-        #[cfg(target_os = "macos")]
-        let available = macos::reserve_destination_name(&destination.parent, &candidate)?;
-        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-        let available = false;
-        if available { destination.leaf = candidate; return Ok(()); }
+    destination.rename_candidate = Some(RenameCandidate {
+        stem: stem.into(),
+        extension: extension.map(str::to_owned),
+        next_number: 1,
+    });
+    advance_renamed_destination(destination)
+}
+
+/// Candidate existence is intentionally not probed then unlinked.  Publication uses the native
+/// no-replace primitive; a collision advances this bounded sequence and retries with the same
+/// staged/held source capability.
+fn advance_renamed_destination(destination: &mut DestinationBinding) -> Result<(), WorkAssistantError> {
+    verify_destination_binding(destination)?;
+    let candidate = destination.rename_candidate.as_mut()
+        .ok_or_else(|| WorkAssistantError::blocked("rename candidate state is unavailable"))?;
+    if candidate.next_number > 10_000 {
+        return Err(WorkAssistantError::blocked("could not reserve an available destination name"));
     }
-    Err(WorkAssistantError::blocked("could not reserve an available destination name"))
+    let number = candidate.next_number;
+    candidate.next_number += 1;
+    destination.leaf = match &candidate.extension {
+        Some(extension) => format!("{} ({number}).{extension}", candidate.stem),
+        None => format!("{} ({number})", candidate.stem),
+    };
+    Ok(())
 }
 
 fn split_leaf(value: &str) -> Result<(&str, Option<&str>), WorkAssistantError> {
@@ -613,6 +653,7 @@ fn split_leaf(value: &str) -> Result<(&str, Option<&str>), WorkAssistantError> {
 }
 
 fn stage_source(source: &mut SourceSnapshot, destination: &DestinationBinding) -> Result<StagedFile, WorkAssistantError> {
+    verify_destination_binding(destination)?;
     source.verify_snapshot()?;
     source.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     #[cfg(windows)] { windows::stage_copy(source.file(), &destination.parent, &destination.parent_path) }
@@ -621,25 +662,39 @@ fn stage_source(source: &mut SourceSnapshot, destination: &DestinationBinding) -
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = destination; Err(WorkAssistantError::blocked("native staging is unavailable")) }
 }
 
-fn publish_staging(mut staged: StagedFile, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
-    let result = {
-        #[cfg(windows)] { windows::publish_staging(&staged.file, &destination.parent, &destination.leaf) }
-        #[cfg(target_os = "linux")] { linux::publish_staging(&staged, &destination.parent, &destination.leaf) }
-        #[cfg(target_os = "macos")] { macos::publish_staging(&staged, &destination.parent, &destination.leaf) }
-        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (&staged, destination); Err(WorkAssistantError::blocked("native publication is unavailable")) }
-    };
-    if result.is_ok() {
-        staged.published = true;
+fn publish_staging(mut staged: StagedFile, destination: &mut DestinationBinding) -> Result<(), WorkAssistantError> {
+    loop {
+        verify_destination_binding(destination)?;
+        let result = injected_rename_collision().then(|| WorkAssistantError::destination_exists("injected native publication collision")).map_or_else(|| {
+            #[cfg(windows)] { windows::publish_staging(&staged.file, &destination.parent, &destination.leaf) }
+            #[cfg(target_os = "linux")] { linux::publish_staging(&staged, &destination.parent, &destination.leaf) }
+            #[cfg(target_os = "macos")] { macos::publish_staging(&staged, &destination.parent, &destination.leaf) }
+            #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (&staged, destination); Err(WorkAssistantError::blocked("native publication is unavailable")) }
+        }, Err);
+        match result {
+            Ok(()) => { staged.published = true; return Ok(()); }
+            Err(error) if error.code == "destination_exists" && destination.rename_candidate.is_some() => advance_renamed_destination(destination)?,
+            Err(error) => return Err(error),
+        }
     }
-    result
 }
 
-fn move_snapshot_to_destination(source: &SourceSnapshot, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
-    source.verify_snapshot()?;
-    #[cfg(windows)] { windows::move_snapshot(&source.platform.source, &destination.parent, &destination.leaf) }
-    #[cfg(target_os = "linux")] { linux::move_snapshot(&source.platform.parent, &source.platform.leaf, &destination.parent, &destination.leaf) }
-    #[cfg(target_os = "macos")] { macos::move_snapshot(&source.platform.parent, &source.platform.leaf, &destination.parent, &destination.leaf) }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (source, destination); Err(WorkAssistantError::blocked("native rename is unavailable")) }
+fn move_snapshot_to_destination(source: &SourceSnapshot, destination: &mut DestinationBinding) -> Result<(), WorkAssistantError> {
+    loop {
+        verify_destination_binding(destination)?;
+        source.verify_snapshot()?;
+        let result = injected_rename_collision().then(|| WorkAssistantError::destination_exists("injected native publication collision")).map_or_else(|| {
+            #[cfg(windows)] { windows::move_snapshot(&source.platform.source, &destination.parent, &destination.leaf) }
+            #[cfg(target_os = "linux")] { linux::move_snapshot(&source.platform.parent, &source.platform.leaf, &destination.parent, &destination.leaf) }
+            #[cfg(target_os = "macos")] { macos::move_snapshot(&source.platform.parent, &source.platform.leaf, &destination.parent, &destination.leaf) }
+            #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (source, destination); Err(WorkAssistantError::blocked("native rename is unavailable")) }
+        }, Err);
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if error.code == "destination_exists" && destination.rename_candidate.is_some() => advance_renamed_destination(destination)?,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn move_snapshot_to_recovery(source: &SourceSnapshot, recovery: &PreparedRecoverySlot) -> Result<(), WorkAssistantError> {
@@ -651,10 +706,44 @@ fn move_snapshot_to_recovery(source: &SourceSnapshot, recovery: &PreparedRecover
 }
 
 fn create_directory(destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
+    verify_destination_binding(destination)?;
     #[cfg(windows)] { windows::create_directory(&destination.parent, &destination.parent_path, &destination.leaf) }
     #[cfg(target_os = "linux")] { linux::create_directory(&destination.parent, &destination.leaf) }
     #[cfg(target_os = "macos")] { macos::create_directory(&destination.parent, &destination.leaf) }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = destination; Err(WorkAssistantError::blocked("native directory creation is unavailable")) }
+}
+
+/// Re-walk the destination from the retained authorized-root capability immediately before a
+/// write.  A descriptor for a moved POSIX directory is otherwise still valid and could mutate a
+/// location that has been renamed outside the workspace.
+fn verify_destination_binding(destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
+    #[cfg(target_os = "linux")]
+    {
+        return linux::verify_bound_destination(
+            &destination.root,
+            &destination.parent,
+            &destination.parent_components,
+            &destination.parent_identity,
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return macos::verify_bound_destination(
+            &destination.root,
+            &destination.parent,
+            &destination.parent_components,
+            &destination.parent_identity,
+        );
+    }
+    #[cfg(windows)]
+    {
+        // Windows adapter methods independently reopen and compare the path-backed parent
+        // before every mutation; retained handles carry no DELETE share.
+        let _ = destination;
+        return Ok(());
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    Err(WorkAssistantError::blocked("native destination validation is unavailable"))
 }
 
 fn persist_recovery_receipt(recovery: &PreparedRecoverySlot) -> Result<(), WorkAssistantError> {
@@ -673,7 +762,7 @@ fn cleanup_cancelled_staging(mut staged: StagedFile, message: &str) -> WorkAssis
     let result = remove_staging_file(&staged.file, &staged.parent, &staged.leaf);
     staged.published = true;
     match result {
-        Ok(()) => WorkAssistantError::stale_preview(message),
+        Ok(()) => WorkAssistantError::cancelled(message),
         Err(error) => WorkAssistantError::partial_transaction(format!(
             "{message}; staged content could not be cleaned up: {}",
             safe_transaction_error(&error)
@@ -687,6 +776,7 @@ fn safe_transaction_error(error: &WorkAssistantError) -> &'static str {
         "cross_device" => "the filesystem devices differ",
         "recovery_unavailable" => "private recovery storage is unavailable",
         "partial_transaction" => "a recoverable transaction step failed",
+        "cancelled" => "the operation was cancelled",
         _ => "the native filesystem operation failed",
     }
 }
@@ -696,6 +786,23 @@ fn remove_staging_file(file: &File, parent: &File, leaf: &str) -> Result<(), Wor
     #[cfg(target_os = "linux")] { linux::remove_staging(parent, leaf) }
     #[cfg(target_os = "macos")] { macos::remove_staging(parent, leaf) }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (file, parent, leaf); Err(WorkAssistantError::blocked("native staging cleanup is unavailable")) }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECT_RENAME_PUBLICATION_COLLISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn inject_rename_publication_collision_once() {
+    INJECT_RENAME_PUBLICATION_COLLISION.with(|value| value.set(true));
+}
+
+fn injected_rename_collision() -> bool {
+    #[cfg(test)]
+    { return INJECT_RENAME_PUBLICATION_COLLISION.with(|value| value.replace(false)); }
+    #[cfg(not(test))]
+    false
 }
 
 fn verify_published_copy(source: &SourceSnapshot, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
@@ -863,7 +970,10 @@ fn prepare_platform_recovery_vault(_: &Path, _: &str) -> Result<PreparedRecovery
 
 #[cfg(test)]
 mod tests {
-    use super::{open_source_snapshot, prepare_recovery_slot, validate_recovery_leaf};
+    #[cfg(unix)]
+    use super::{bind_destination, create_directory, stage_source};
+    use super::{inject_rename_publication_collision_once, open_source_snapshot, prepare_file_transaction, prepare_recovery_slot, validate_recovery_leaf};
+    use crate::work_assistant::{ConflictPolicy, FileOperationKind, FileOperationRequest};
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
 
@@ -997,6 +1107,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rename_publish_collision_retries_the_next_bounded_suffix() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("source.txt"), "contents").unwrap();
+        fs::write(root.join("destination.txt"), "existing").unwrap();
+        let operation = FileOperationRequest {
+            kind: FileOperationKind::Copy,
+            source: Some("source.txt".into()),
+            destination: Some("destination.txt".into()),
+        };
+        let transaction = prepare_file_transaction(
+            &root,
+            "preview-collision",
+            0,
+            &operation,
+            &ConflictPolicy::Rename,
+        )
+        .unwrap();
+
+        inject_rename_publication_collision_once();
+        transaction.execute(|| Ok(false)).unwrap();
+
+        assert!(!root.join("destination (1).txt").exists());
+        assert_eq!(fs::read_to_string(root.join("destination (2).txt")).unwrap(), "contents");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_reparse_attribute_is_rejected() {
@@ -1101,5 +1239,30 @@ mod tests {
         drop(snapshot);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn moved_destination_ancestor_cannot_receive_staging_or_directory_creation() {
+        let root = test_dir();
+        let outside = test_dir();
+        fs::create_dir_all(root.join("subdir")).unwrap();
+        fs::write(root.join("source.txt"), "contents").unwrap();
+        let mut source = open_source_snapshot(&root, "source.txt").unwrap();
+        let destination = bind_destination(&root, std::path::Path::new("subdir/new.txt")).unwrap();
+
+        fs::rename(root.join("subdir"), &outside).unwrap();
+
+        let stage_error = stage_source(&mut source, &destination).unwrap_err();
+        assert_eq!(stage_error.code, "stale_preview");
+        let directory_error = create_directory(&destination).unwrap_err();
+        assert_eq!(directory_error.code, "stale_preview");
+        assert!(!outside.join("new.txt").exists());
+        assert!(fs::read_dir(&outside).unwrap().next().is_none());
+
+        drop(destination);
+        drop(source);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
 }
