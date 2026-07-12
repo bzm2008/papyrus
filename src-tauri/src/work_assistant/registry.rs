@@ -266,6 +266,7 @@ mod tests {
             previews: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             cancelled_runs: Mutex::new(HashSet::new()),
+            cancelled_execution_audits: Mutex::new(HashSet::new()),
             audit_path: PathBuf::from("unused-audit-path"),
             audit_guard: Mutex::new(()),
         }

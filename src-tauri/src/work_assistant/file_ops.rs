@@ -53,6 +53,7 @@ pub fn execute_batch_file_operations(
         .map_err(|_| WorkAssistantError::blocked("preview has too many operations"))?;
     let approval = validate_approval(state, &execution, required_count)?;
     if is_run_cancelled(state, &request.run_id)? {
+        append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
         return Ok(cancelled_result(&request.operations, 0));
     }
     let root = state.roots.read()
@@ -65,7 +66,10 @@ pub fn execute_batch_file_operations(
     // or unavailable same-device vault must not charge an approval or mutate a file.
     let mut prepared = Vec::with_capacity(request.operations.len());
     for (index, operation) in request.operations.iter().enumerate() {
-        if is_run_cancelled(state, &request.run_id)? { return Ok(cancelled_result(&request.operations, index)); }
+        if is_run_cancelled(state, &request.run_id)? {
+            append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
+            return Ok(cancelled_result(&request.operations, index));
+        }
         prepared.push(prepare_file_transaction(
             &root, &preview.id, index, operation, &request.conflict_policy,
         )?);
@@ -75,6 +79,7 @@ pub fn execute_batch_file_operations(
     let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false };
     for (index, transaction) in prepared.into_iter().enumerate() {
         if is_run_cancelled(state, &request.run_id)? {
+            append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
             result.cancelled = true;
             result.remaining.extend(remaining_items(&request.operations, index));
             break;
@@ -99,6 +104,7 @@ pub fn execute_batch_file_operations(
             Err(error) => {
                 if error.code == "cancelled" {
                     record_cancelled_transaction(state, &mut result, &request.operations, index, &error)?;
+                    append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
                     break;
                 }
                 let item = item(index, safe_error_detail(&error), Some(&error));
@@ -123,6 +129,36 @@ fn record_cancelled_transaction(
     // The active operation did not publish a mutation: include it alongside later work so the UI
     // can offer a deliberate retry without manufacturing a failure item.
     result.remaining.extend(remaining_items(operations, index));
+    Ok(())
+}
+
+fn append_cancellation_audit_once(
+    state: &WorkAssistantState,
+    run_id: &str,
+    preview_id: &str,
+) -> Result<(), WorkAssistantError> {
+    // These are opaque application identifiers, never filesystem paths.  Insert before append so
+    // repeated cancellation observations cannot produce duplicate receipts; if persistence fails,
+    // remove the marker so a later retry can record the audit event.
+    let key = format!("{run_id}\u{0}{preview_id}");
+    {
+        let mut recorded = state
+            .cancelled_execution_audits
+            .lock()
+            .map_err(|_| WorkAssistantError::protocol("cancellation audit lock is unavailable"))?;
+        if !recorded.insert(key.clone()) {
+            return Ok(());
+        }
+    }
+    if let Err(error) = append_audit_entry(
+        state,
+        &AuditEntry::new("file_operation_cancelled", format!("run={run_id};preview={preview_id}")),
+    ) {
+        if let Ok(mut recorded) = state.cancelled_execution_audits.lock() {
+            recorded.remove(&key);
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -199,7 +235,7 @@ mod tests {
 
     fn directory() -> PathBuf { std::env::temp_dir().join(format!("papyrus-transaction-{}", Uuid::new_v4())) }
     fn root(path: &Path) -> AuthorizedRoot { AuthorizedRoot { id: "root".into(), label: "test".into(), path: fs::canonicalize(path).unwrap(), kind: AuthorizedRootKind::Workspace, created_at: 1 } }
-    fn state(path: &Path) -> WorkAssistantState { WorkAssistantState { roots: RwLock::new(vec![root(path)]), previews: Mutex::new(HashMap::new()), approvals: Mutex::new(HashMap::new()), cancelled_runs: Mutex::new(HashSet::new()), audit_path: path.join("audit.jsonl"), audit_guard: Mutex::new(()) } }
+    fn state(path: &Path) -> WorkAssistantState { WorkAssistantState { roots: RwLock::new(vec![root(path)]), previews: Mutex::new(HashMap::new()), approvals: Mutex::new(HashMap::new()), cancelled_runs: Mutex::new(HashSet::new()), cancelled_execution_audits: Mutex::new(HashSet::new()), audit_path: path.join("audit.jsonl"), audit_guard: Mutex::new(()) } }
     fn operation(kind: FileOperationKind, source: Option<&str>, destination: Option<&str>) -> FileOperationRequest { FileOperationRequest { kind, source: source.map(str::to_string), destination: destination.map(str::to_string) } }
     fn run(state: &WorkAssistantState, operations: Vec<FileOperationRequest>, policy: ConflictPolicy) -> BatchExecutionResult {
         let preview = create_batch_preview(state, BatchPreviewRequest { run_id: "run".into(), root_id: "root".into(), operations, conflict_policy: policy }).unwrap();
@@ -268,6 +304,32 @@ mod tests {
         assert!(result.cancelled);
         assert!(result.failed.is_empty());
         assert_eq!(result.remaining.len(), 1);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn preflight_cancellation_is_audited_once_without_a_failed_item() {
+        let path = directory();
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("source.txt"), "source").unwrap();
+        let state = state(&path);
+        let preview = create_batch_preview(&state, BatchPreviewRequest {
+            run_id: "cancelled-run".into(), root_id: "root".into(),
+            operations: vec![operation(FileOperationKind::Copy, Some("source.txt"), Some("destination.txt"))],
+            conflict_policy: ConflictPolicy::Skip,
+        }).unwrap();
+        let grant = approve_batch_preview(&state, &preview.preview_id, "cancelled-run", ApprovalChoice::Once).unwrap();
+        state.cancelled_runs.lock().unwrap().insert("cancelled-run".into());
+        let request = BatchExecutionRequest { preview_id: preview.preview_id.clone(), revision: preview.revision, token: grant.token.clone() };
+
+        let first = execute_batch_file_operations(&state, request.clone()).unwrap();
+        let second = execute_batch_file_operations(&state, request).unwrap();
+        assert!(first.cancelled && second.cancelled);
+        assert!(first.failed.is_empty() && second.failed.is_empty());
+        assert_eq!(first.remaining.len(), 1);
+        let audit = crate::work_assistant::read_audit_entries(&state.audit_path).unwrap();
+        assert_eq!(audit.iter().filter(|entry| entry.event == "file_operation_cancelled").count(), 1);
+        assert!(audit.iter().any(|entry| entry.detail == format!("run=cancelled-run;preview={}", preview.preview_id)));
         fs::remove_dir_all(path).unwrap();
     }
 }

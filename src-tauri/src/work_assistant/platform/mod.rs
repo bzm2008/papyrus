@@ -76,6 +76,8 @@ trait PlatformSource {
 /// revalidate identities before publishing.
 struct BoundPlatformSource {
     root: File,
+    #[cfg(unix)]
+    authorized_root_path: PathBuf,
     parent: File,
     source: File,
     leaf: String,
@@ -95,9 +97,9 @@ impl PlatformSource for BoundPlatformSource {
             #[cfg(windows)]
             { windows::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_identity, &self.parent_path) }
             #[cfg(target_os = "linux")]
-            { linux::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_components, &self.parent_identity) }
+            { linux::verify_bound_source(&self.root, &self.authorized_root_path, &self.root_identity, &self.parent, &self.source, &self.leaf, &self.parent_components, &self.parent_identity) }
             #[cfg(target_os = "macos")]
-            { macos::verify_bound_source(&self.root, &self.parent, &self.source, &self.leaf, &self.parent_components, &self.parent_identity) }
+            { macos::verify_bound_source(&self.root, &self.authorized_root_path, &self.root_identity, &self.parent, &self.source, &self.leaf, &self.parent_components, &self.parent_identity) }
             #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
             { Err(WorkAssistantError::blocked("identity-bound source snapshots are not available on this platform")) }
         };
@@ -211,6 +213,8 @@ pub fn open_source_snapshot(
         file: opened.file,
         platform: BoundPlatformSource {
             root: opened.root,
+            #[cfg(unix)]
+            authorized_root_path: authorized_root.to_path_buf(),
             parent: opened.parent,
             source: opened.source,
             leaf: opened.leaf,
@@ -342,6 +346,13 @@ struct DestinationBinding {
     // still names the approved namespace, rather than merely a directory with a live FD.
     #[cfg(unix)]
     root: File,
+    /// Canonical pathname captured from the approved root at preview time.  A directory file
+    /// descriptor alone can outlive a rename, so POSIX mutations re-open this pathname before
+    /// every write and compare it with `root_identity`.
+    #[cfg(unix)]
+    authorized_root_path: PathBuf,
+    #[cfg(unix)]
+    root_identity: PlatformFileIdentity,
     #[cfg(unix)]
     parent_components: Vec<String>,
     #[cfg(unix)]
@@ -558,6 +569,8 @@ pub(super) struct OpenedDestination {
     #[cfg(unix)]
     root: File,
     #[cfg(unix)]
+    root_identity: PlatformFileIdentity,
+    #[cfg(unix)]
     parent_identity: PlatformFileIdentity,
     #[cfg(windows)]
     parent_path: PathBuf,
@@ -587,6 +600,10 @@ fn bind_destination(root: &Path, relative: &Path) -> Result<DestinationBinding, 
         leaf: opened.leaf,
         #[cfg(unix)]
         root: opened.root,
+        #[cfg(unix)]
+        authorized_root_path: root.to_path_buf(),
+        #[cfg(unix)]
+        root_identity: opened.root_identity,
         #[cfg(unix)]
         parent_components: normalized_parent_components(&normalized_relative_path(relative)?),
         #[cfg(unix)]
@@ -721,6 +738,8 @@ fn verify_destination_binding(destination: &DestinationBinding) -> Result<(), Wo
     {
         return linux::verify_bound_destination(
             &destination.root,
+            &destination.authorized_root_path,
+            &destination.root_identity,
             &destination.parent,
             &destination.parent_components,
             &destination.parent_identity,
@@ -730,6 +749,8 @@ fn verify_destination_binding(destination: &DestinationBinding) -> Result<(), Wo
     {
         return macos::verify_bound_destination(
             &destination.root,
+            &destination.authorized_root_path,
+            &destination.root_identity,
             &destination.parent,
             &destination.parent_components,
             &destination.parent_identity,
@@ -1264,5 +1285,31 @@ mod tests {
         drop(source);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_authorized_root_cannot_receive_a_bound_destination_mutation() {
+        let root = test_dir();
+        let moved_root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("source.txt"), "contents").unwrap();
+        let mut source = open_source_snapshot(&root, "source.txt").unwrap();
+        let destination = bind_destination(&root, std::path::Path::new("new.txt")).unwrap();
+
+        // A retained directory FD remains usable after this rename. The mutation must instead
+        // bind the original root pathname again and reject the replacement root.
+        fs::rename(&root, &moved_root).unwrap();
+        fs::create_dir_all(&root).unwrap();
+
+        let error = stage_source(&mut source, &destination).unwrap_err();
+        assert_eq!(error.code, "stale_preview");
+        assert!(!root.join("new.txt").exists());
+        assert!(!moved_root.join("new.txt").exists());
+
+        drop(destination);
+        drop(source);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(moved_root).unwrap();
     }
 }

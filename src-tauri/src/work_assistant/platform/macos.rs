@@ -59,6 +59,7 @@ pub(crate) fn open_source(
 
 pub(crate) fn open_destination(root: &Path, relative: &Path) -> Result<OpenedDestination, WorkAssistantError> {
     let root = open_root(root)?;
+    let root_identity = identity(&root)?;
     let root_capability = root.try_clone().map_err(blocked_io("could not retain destination root handle"))?;
     let mut directory = root;
     let mut components = relative.components().peekable();
@@ -76,6 +77,7 @@ pub(crate) fn open_destination(root: &Path, relative: &Path) -> Result<OpenedDes
                 parent: directory,
                 leaf: name.to_string_lossy().into_owned(),
                 root: root_capability,
+                root_identity,
                 parent_identity,
             });
         }
@@ -235,18 +237,25 @@ pub(crate) fn prepare_recovery_vault_at_parent(
 /// The retained parent descriptor is the only namespace used for the leaf re-open.
 pub(crate) fn verify_bound_source(
     root: &File,
+    authorized_root_path: &Path,
+    expected_root_identity: &PlatformFileIdentity,
     parent: &File,
     source: &File,
     leaf: &str,
     parent_components: &[String],
     expected_parent_identity: &PlatformFileIdentity,
 ) -> Result<(PlatformFileIdentity, PlatformFileIdentity), WorkAssistantError> {
-    let root_identity = identity(root)?;
+    let current_root = open_root(authorized_root_path)
+        .map_err(|_| WorkAssistantError::stale_preview("authorized root changed after preview"))?;
+    let root_identity = identity(&current_root)?;
+    if root_identity != *expected_root_identity || identity(root)? != *expected_root_identity {
+        return Err(WorkAssistantError::stale_preview("authorized root changed after preview"));
+    }
     let source_identity = identity(source)?;
     if identity(parent)? != *expected_parent_identity {
         return Err(WorkAssistantError::stale_preview("the source parent identity changed after preview"));
     }
-    let mut current = root.try_clone().map_err(blocked_io("could not retain root handle"))?;
+    let mut current = current_root;
     for component in parent_components {
         let name = CString::new(component.as_str()).map_err(|_| WorkAssistantError::blocked("invalid source parent component"))?;
         validate_directory_at(current.as_raw_fd(), &name)
@@ -273,11 +282,21 @@ pub(crate) fn verify_bound_source(
 /// a rename, so identity comparison must happen at the live root namespace before every write.
 pub(crate) fn verify_bound_destination(
     root: &File,
+    authorized_root_path: &Path,
+    expected_root_identity: &PlatformFileIdentity,
     parent: &File,
     parent_components: &[String],
     expected_parent_identity: &PlatformFileIdentity,
 ) -> Result<(), WorkAssistantError> {
-    let mut current = root.try_clone().map_err(blocked_io("could not retain destination root handle"))?;
+    // Reopen the canonical approved root before every mutation: POSIX descriptors remain live
+    // after a rename. A same-identity actor can still race after this rebind, but replacement or
+    // disappearance of the root pathname is detected before the handle-backed write.
+    let current_root = open_root(authorized_root_path)
+        .map_err(|_| WorkAssistantError::stale_preview("authorized root changed after preview"))?;
+    if identity(&current_root)? != *expected_root_identity || identity(root)? != *expected_root_identity {
+        return Err(WorkAssistantError::stale_preview("authorized root changed after preview"));
+    }
+    let mut current = current_root;
     for component in parent_components {
         let name = CString::new(component.as_str())
             .map_err(|_| WorkAssistantError::stale_preview("destination ancestor is invalid"))?;
