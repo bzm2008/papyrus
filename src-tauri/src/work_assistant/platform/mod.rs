@@ -614,6 +614,16 @@ impl PreparedFileTransaction {
     }
 }
 
+impl Drop for PreparedFileTransaction {
+    fn drop(&mut self) {
+        // Error-returning paths in the batch executor can be triggered by audit persistence or
+        // lock failures after preflight. Keep disposable recovery slots from leaking there too.
+        // Explicit cleanup paths report failures to the caller; Drop can only make a best-effort
+        // attempt and intentionally leaves committed recovery content untouched.
+        let _ = self.cleanup_uncommitted();
+    }
+}
+
 pub(crate) struct TransactionExecution {
     pub(crate) detail: String,
     pub(crate) receipts: Vec<RecoveryReceipt>,

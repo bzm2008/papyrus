@@ -88,6 +88,7 @@ pub fn execute_batch_file_operations(
     consume_approval(state, &execution, &preview, &approval, required_count)?;
 
     let mut result = BatchExecutionResult { completed: Vec::new(), skipped: Vec::new(), failed: Vec::new(), remaining: Vec::new(), cancelled: false, warnings: Vec::new() };
+    let mut cleanup_from = None;
     for (index, transaction) in prepared.iter_mut().enumerate() {
         if is_run_cancelled(state, &request.run_id)? {
             append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
@@ -126,8 +127,17 @@ pub fn execute_batch_file_operations(
                 let item = item(index, safe_error_detail(&error), Some(&error), Vec::new());
                 append_item_audit(state, "failed", &item)?;
                 result.failed.push(item);
+                // This transaction may own an empty recovery slot after a publish race or a
+                // failed staging step. Do not execute later prepared work after that failure;
+                // reclaim its disposable slots once the loop releases its mutable borrow.
+                cleanup_from = Some(index);
+                result.remaining.extend(remaining_items(&request.operations, index + 1));
+                break;
             }
         }
+    }
+    if let Some(index) = cleanup_from {
+        record_cleanup_warnings(state, &mut result, &mut prepared[index..]);
     }
     Ok(result)
 }
