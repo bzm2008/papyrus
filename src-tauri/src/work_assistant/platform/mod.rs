@@ -742,6 +742,11 @@ impl PreparedFileTransaction {
                 "operation was cancelled after staging",
             ));
         }
+        // Validate the approved source and the opaque staged bytes again at the last safe
+        // point before an overwrite can displace the current destination.  In particular, do
+        // this before creating a recovery receipt: a stale preview must be a no-op.
+        run_after_staging_before_prepublish_hook();
+        let staging = revalidate_staging_for_publish(staging, source)?;
         let mut receipts = Vec::new();
         if let Some(old) = &self.existing_destination {
             let recovery = self
@@ -763,6 +768,9 @@ impl PreparedFileTransaction {
                 "the old destination is safely recoverable; publication was cancelled",
             ));
         }
+        // The source may have changed while the old destination was secured.  Do not publish
+        // stale staged bytes; the old destination is already recoverable in this rare case.
+        let staging = revalidate_staging_for_publish(staging, source)?;
         if let Err(error) = publish_staging(staging, destination) {
             return if receipts.is_empty() {
                 Err(error)
@@ -806,6 +814,10 @@ impl PreparedFileTransaction {
                 "operation was cancelled after staging",
             ));
         }
+        // Cross-device moves publish a copy before recovering the source.  Revalidate while
+        // both the source and any overwrite destination remain untouched.
+        run_after_staging_before_prepublish_hook();
+        let staging = revalidate_staging_for_publish(staging, source)?;
         let mut receipts = Vec::new();
         if let Some(old) = &self.existing_destination {
             let recovery = self
@@ -822,6 +834,7 @@ impl PreparedFileTransaction {
             }
             receipts.push(recovery.receipt.clone());
         }
+        let staging = revalidate_staging_for_publish(staging, source)?;
         if let Err(error) = publish_staging(staging, destination) {
             return if receipts.is_empty() {
                 Err(error)
@@ -840,6 +853,9 @@ impl PreparedFileTransaction {
                 "the new copy was published; the original was not moved to recovery",
             ));
         }
+        // Re-check immediately before recovering the original.  If it changed after
+        // publication, preserve it in place instead of claiming a successful move.
+        source.verify_content_snapshot()?;
         let recovery = self
             .source_recovery
             .as_ref()
@@ -1028,17 +1044,12 @@ fn stage_source(
     source.verify_content_snapshot()?;
     source.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
     #[cfg(windows)]
-    let staged = {
-        windows::stage_copy(source.file(), &destination.parent, &destination.parent_path)
-    }?;
+    let staged =
+        { windows::stage_copy(source.file(), &destination.parent, &destination.parent_path) }?;
     #[cfg(target_os = "linux")]
-    let staged = {
-        linux::stage_copy(source.file(), &destination.parent)
-    }?;
+    let staged = { linux::stage_copy(source.file(), &destination.parent) }?;
     #[cfg(target_os = "macos")]
-    let staged = {
-        macos::stage_copy(source.file(), &destination.parent)
-    }?;
+    let staged = { macos::stage_copy(source.file(), &destination.parent) }?;
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = destination;
@@ -1340,7 +1351,10 @@ fn cleanup_cancelled_staging(mut staged: StagedFile, message: &str) -> WorkAssis
     }
 }
 
-fn cleanup_stale_staging(mut staged: StagedFile, original: WorkAssistantError) -> WorkAssistantError {
+fn cleanup_stale_staging(
+    mut staged: StagedFile,
+    original: WorkAssistantError,
+) -> WorkAssistantError {
     let cleanup = remove_staging_file(&staged.file, &staged.parent, &staged.leaf);
     staged.published = true;
     match cleanup {
@@ -1352,20 +1366,29 @@ fn cleanup_stale_staging(mut staged: StagedFile, original: WorkAssistantError) -
     }
 }
 
-fn verify_staged_digest(
-    staged: &StagedFile,
-    expected: [u8; 32],
-) -> Result<(), WorkAssistantError> {
+/// Revalidate immediately before a staged file can affect a destination.  Keeping ownership of
+/// `StagedFile` here is deliberate: a stale source or tampered staging file is unlinked through
+/// the already-held capability rather than by resolving its name again.
+fn revalidate_staging_for_publish(
+    staged: StagedFile,
+    source: &SourceSnapshot,
+) -> Result<StagedFile, WorkAssistantError> {
+    match source
+        .verify_content_snapshot()
+        .and_then(|_| verify_staged_digest(&staged, source.summary.content_digest))
+    {
+        Ok(()) => Ok(staged),
+        Err(error) => Err(cleanup_stale_staging(staged, error)),
+    }
+}
+
+fn verify_staged_digest(staged: &StagedFile, expected: [u8; 32]) -> Result<(), WorkAssistantError> {
     if staged.digest != expected {
         return Err(WorkAssistantError::stale_preview(
             "staged content differs from the approved source preview",
         ));
     }
-    let byte_len = staged
-        .file
-        .metadata()
-        .map_err(io_error)?
-        .len();
+    let byte_len = staged.file.metadata().map_err(io_error)?.len();
     let digest = digest_regular_file(&staged.file, byte_len)?;
     if digest == expected {
         Ok(())
@@ -1413,6 +1436,7 @@ fn remove_staging_file(file: &File, parent: &File, leaf: &str) -> Result<(), Wor
 #[cfg(test)]
 thread_local! {
     static INJECT_RENAME_PUBLICATION_COLLISION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static INJECT_AFTER_STAGING_BEFORE_PREPUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1427,6 +1451,26 @@ fn injected_rename_collision() -> bool {
     }
     #[cfg(not(test))]
     false
+}
+
+#[cfg(test)]
+fn inject_after_staging_before_prepublish(callback: impl FnOnce() + 'static) {
+    INJECT_AFTER_STAGING_BEFORE_PREPUBLISH.with(|value| {
+        assert!(
+            value.borrow().is_none(),
+            "only one prepublish test hook may be pending"
+        );
+        *value.borrow_mut() = Some(Box::new(callback));
+    });
+}
+
+fn run_after_staging_before_prepublish_hook() {
+    #[cfg(test)]
+    INJECT_AFTER_STAGING_BEFORE_PREPUBLISH.with(|value| {
+        if let Some(callback) = value.borrow_mut().take() {
+            callback();
+        }
+    });
 }
 
 fn verify_published_copy(
@@ -1539,7 +1583,10 @@ pub(super) fn file_version(file: &File) -> Result<FileVersion, WorkAssistantErro
         Ok(duration) => duration.as_nanos() as i128,
         Err(error) => -(error.duration().as_nanos() as i128),
     };
-    Ok(FileVersion { byte_len: metadata.len(), modified_unix_nanos })
+    Ok(FileVersion {
+        byte_len: metadata.len(),
+        modified_unix_nanos,
+    })
 }
 
 // Keep content capture within the existing preview operation's per-source ceiling. Hashing is
@@ -1552,29 +1599,21 @@ fn digest_regular_file(file: &File, expected_len: u64) -> Result<[u8; 32], WorkA
             "approved source exceeds the maximum preview size",
         ));
     }
-    let mut reader = file
-        .try_clone()
-        .map_err(io_error)?;
-    let original_position = reader
-        .stream_position()
-        .map_err(io_error)?;
+    let mut reader = file.try_clone().map_err(io_error)?;
+    let original_position = reader.stream_position().map_err(io_error)?;
     let result = (|| {
-        reader
-            .seek(SeekFrom::Start(0))
-            .map_err(io_error)?;
+        reader.seek(SeekFrom::Start(0)).map_err(io_error)?;
         let mut digest = Sha256::new();
         let mut observed = 0u64;
         let mut buffer = [0u8; 64 * 1024];
         loop {
-            let read = reader
-                .read(&mut buffer)
-                .map_err(io_error)?;
+            let read = reader.read(&mut buffer).map_err(io_error)?;
             if read == 0 {
                 break;
             }
-            observed = observed
-                .checked_add(read as u64)
-                .ok_or_else(|| WorkAssistantError::stale_preview("approved source size overflowed"))?;
+            observed = observed.checked_add(read as u64).ok_or_else(|| {
+                WorkAssistantError::stale_preview("approved source size overflowed")
+            })?;
             if observed > MAX_DIGESTED_SOURCE_BYTES {
                 return Err(WorkAssistantError::blocked(
                     "approved source exceeds the maximum preview size",
@@ -1771,6 +1810,8 @@ fn prepare_platform_recovery_vault(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
+    use super::inject_after_staging_before_prepublish;
     #[cfg(unix)]
     use super::{bind_destination, create_directory, stage_source};
     use super::{
@@ -1997,8 +2038,8 @@ mod tests {
     #[cfg(not(windows))]
     fn copy_rejects_a_same_length_source_rewrite_after_staging() {
         use std::{
-            cell::{Cell, RefCell},
             io::{Seek, SeekFrom, Write},
+            sync::{Arc, Mutex},
         };
 
         let root = test_dir();
@@ -2011,7 +2052,7 @@ mod tests {
         // preview handle correctly blocks a writer opened afterwards.
         let mut writer_options = fs::OpenOptions::new();
         writer_options.write(true);
-        let writer = RefCell::new(writer_options.open(&source_path).unwrap());
+        let writer = Arc::new(Mutex::new(writer_options.open(&source_path).unwrap()));
         let operation = FileOperationRequest {
             kind: FileOperationKind::Copy,
             source: Some("source.txt".into()),
@@ -2025,29 +2066,34 @@ mod tests {
             &ConflictPolicy::Overwrite,
         )
         .unwrap();
-        let checks = Cell::new(0usize);
+        // This hook runs after `stage_source` has completed (including its digest check) and
+        // directly before the pre-publish validation.  It therefore exercises the exact race
+        // that must leave both destination and recovery state untouched.
+        let mutating_writer = Arc::clone(&writer);
+        inject_after_staging_before_prepublish(move || {
+            let mut writer = mutating_writer.lock().unwrap();
+            writer.seek(SeekFrom::Start(0)).unwrap();
+            writer.write_all(b"after!\n").unwrap();
+            writer.sync_all().unwrap();
+        });
 
-        let error = match transaction
-            .execute(|| {
-                let check = checks.get() + 1;
-                checks.set(check);
-                // `execute` checks cancellation immediately after staging. This is the exact
-                // gap where a pre-existing writer can replace the same number of bytes.
-                if check == 3 {
-                    let mut writer = writer.borrow_mut();
-                    writer.seek(SeekFrom::Start(0)).unwrap();
-                    writer.write_all(b"after!\n").unwrap();
-                    writer.sync_all().unwrap();
-                }
-                Ok(false)
-            })
-        {
+        let error = match transaction.execute(|| Ok(false)) {
             Ok(_) => panic!("a source rewrite after staging must reject publication"),
             Err(error) => error,
         };
 
         assert_eq!(error.code, "stale_preview");
         assert_eq!(fs::read(&destination_path).unwrap(), b"existing");
+        let recovery_root = root.join(".papyrus-recovery");
+        assert!(
+            !recovery_root.exists()
+                || !fs::read_dir(&recovery_root).unwrap().any(|entry| entry
+                    .unwrap()
+                    .path()
+                    .join("receipt.json")
+                    .exists()),
+            "a stale source must not create an overwrite recovery receipt"
+        );
         assert!(!fs::read_dir(&root).unwrap().any(|entry| {
             entry
                 .unwrap()
