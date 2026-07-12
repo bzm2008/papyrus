@@ -2204,6 +2204,10 @@ mod tests {
             fs::read_to_string(root.join("destination (2).txt")).unwrap(),
             "contents"
         );
+        // The transaction deliberately retains no-DELETE-share source/destination parents until
+        // its lifecycle ends. Release those capabilities before asking the test harness to
+        // remove the workspace tree.
+        drop(transaction);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2277,6 +2281,9 @@ mod tests {
                     .to_string_lossy()
                     .starts_with(".papyrus-stage-")
             }));
+            // A committed recovery receipt keeps its transaction capabilities live until this
+            // scope releases them; cleanup must model the completed transaction lifecycle.
+            drop(transaction);
             fs::remove_dir_all(root).unwrap();
         }
     }
