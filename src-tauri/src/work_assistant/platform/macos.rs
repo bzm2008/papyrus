@@ -1,8 +1,9 @@
-use super::{OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles};
+use super::{OpenedDestination, OpenedPlatformSource, PlatformFileIdentity, PreparedRecoveryHandles, StagedFile};
 use crate::work_assistant::WorkAssistantError;
 use std::{
     ffi::CString,
     fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{
@@ -54,6 +55,153 @@ pub(crate) fn open_source(
         }
     }
     Err(WorkAssistantError::blocked("source file name is missing"))
+}
+
+pub(crate) fn open_destination(root: &Path, relative: &Path) -> Result<OpenedDestination, WorkAssistantError> {
+    let mut directory = open_root(root)?;
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let name = component_name(component.as_os_str())?;
+        if components.peek().is_some() {
+            validate_directory_at(directory.as_raw_fd(), &name)?;
+            directory = openat_directory(directory.as_raw_fd(), &name)?;
+        } else {
+            if name.as_bytes().is_empty() || name.as_bytes() == b"." || name.as_bytes() == b".." {
+                return Err(WorkAssistantError::blocked("destination file name is invalid"));
+            }
+            return Ok(OpenedDestination { parent: directory, leaf: name.to_string_lossy().into_owned() });
+        }
+    }
+    Err(WorkAssistantError::blocked("destination file name is missing"))
+}
+
+pub(crate) fn destination_exists(parent: &File, leaf: &str) -> Result<bool, WorkAssistantError> {
+    Ok(destination_identity(parent, leaf)?.is_some())
+}
+
+pub(crate) fn destination_identity(parent: &File, leaf: &str) -> Result<Option<PlatformFileIdentity>, WorkAssistantError> {
+    let name = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("destination leaf contains a NUL byte"))?;
+    let stat = match stat_at(parent.as_raw_fd(), &name) {
+        Ok(stat) => stat,
+        Err(error) if error.code == "not_found" => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if is_symlink(stat.st_mode) {
+        return Err(WorkAssistantError::stale_preview("destination is a symbolic link"));
+    }
+    if !is_regular(stat.st_mode) {
+        return Err(WorkAssistantError::blocked("destination must be a regular file"));
+    }
+    Ok(Some(identity_from_stat(&stat)))
+}
+
+pub(crate) fn reserve_destination_name(parent: &File, leaf: &str) -> Result<bool, WorkAssistantError> {
+    let name = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("destination leaf contains a NUL byte"))?;
+    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+    if descriptor >= 0 {
+        unsafe { libc::close(descriptor); }
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(last_os_error("could not release destination reservation"));
+        }
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) { return Ok(false); }
+    Err(WorkAssistantError::blocked(format!("could not reserve destination name: {error}")))
+}
+
+pub(crate) fn stage_copy(source: &File, parent: &File) -> Result<StagedFile, WorkAssistantError> {
+    let leaf = format!(".papyrus-stage-{}", uuid::Uuid::new_v4());
+    let name = CString::new(leaf.as_str()).expect("uuid staging leaf has no NUL");
+    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+    if descriptor < 0 { return Err(last_os_error("could not create opaque staging file")); }
+    let mut output = unsafe { File::from_raw_fd(descriptor) };
+    let mut input = source.try_clone().map_err(blocked_io("could not clone approved source handle"))?;
+    input.seek(SeekFrom::Start(0)).map_err(blocked_io("could not seek approved source"))?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer).map_err(blocked_io("could not read approved source"))?;
+        if read == 0 { break; }
+        output.write_all(&buffer[..read]).map_err(blocked_io("could not stage approved source"))?;
+    }
+    output.sync_all().map_err(blocked_io("could not sync staged source"))?;
+    Ok(StagedFile { file: output, parent: parent.try_clone().map_err(blocked_io("could not retain staging parent"))?, leaf, published: false })
+}
+
+pub(crate) fn publish_staging(staged: &StagedFile, parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
+    let old_name = CString::new(staged.leaf.as_str()).map_err(|_| WorkAssistantError::blocked("staging leaf contains a NUL byte"))?;
+    let new_name = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("destination leaf contains a NUL byte"))?;
+    rename_noreplace(staged.parent.as_raw_fd(), &old_name, parent.as_raw_fd(), &new_name)
+}
+
+pub(crate) fn move_snapshot(source_parent: &File, source_leaf: &str, destination_parent: &File, destination_leaf: &str) -> Result<(), WorkAssistantError> {
+    let source_name = CString::new(source_leaf).map_err(|_| WorkAssistantError::blocked("source leaf contains a NUL byte"))?;
+    let destination_name = CString::new(destination_leaf).map_err(|_| WorkAssistantError::blocked("destination leaf contains a NUL byte"))?;
+    rename_noreplace(source_parent.as_raw_fd(), &source_name, destination_parent.as_raw_fd(), &destination_name)
+}
+
+pub(crate) fn create_directory(parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
+    let name = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("destination leaf contains a NUL byte"))?;
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o755) } == 0 { return Ok(()); }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) { return Err(WorkAssistantError::stale_preview("destination changed before directory creation")); }
+    Err(WorkAssistantError::blocked(format!("could not create destination directory: {error}")))
+}
+
+pub(crate) fn write_recovery_receipt(slot: &File, receipt: &[u8]) -> Result<(), WorkAssistantError> {
+    let name = CString::new("receipt.json").expect("static receipt name has no NUL");
+    let descriptor = unsafe { libc::openat(slot.as_raw_fd(), name.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+    if descriptor < 0 { return Err(last_os_error("could not open recovery receipt")); }
+    let mut file = unsafe { File::from_raw_fd(descriptor) };
+    file.write_all(receipt).map_err(blocked_io("could not write recovery receipt"))?;
+    file.sync_all().map_err(blocked_io("could not sync recovery receipt"))
+}
+
+pub(crate) fn remove_staging(parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
+    let name = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("staging leaf contains a NUL byte"))?;
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } == 0 { return Ok(()); }
+    if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) { return Ok(()); }
+    Err(last_os_error("could not clean up staged content"))
+}
+
+pub(crate) fn verify_published(parent: &File, leaf: &str, source: &File, expected_len: u64) -> Result<(), WorkAssistantError> {
+    let name = CString::new(leaf).map_err(|_| WorkAssistantError::blocked("destination leaf contains a NUL byte"))?;
+    let destination = openat_regular(parent.as_raw_fd(), &name)?;
+    let metadata = destination.metadata().map_err(blocked_io("could not inspect published destination"))?;
+    if metadata.len() != expected_len { return Err(WorkAssistantError::stale_preview("published destination size differs from source")); }
+    compare_contents(source, &destination)
+}
+
+fn compare_contents(source: &File, destination: &File) -> Result<(), WorkAssistantError> {
+    let mut left = source.try_clone().map_err(blocked_io("could not clone approved source handle"))?;
+    let mut right = destination.try_clone().map_err(blocked_io("could not clone published destination handle"))?;
+    left.seek(SeekFrom::Start(0)).map_err(blocked_io("could not seek approved source"))?;
+    right.seek(SeekFrom::Start(0)).map_err(blocked_io("could not seek published destination"))?;
+    let mut a = [0u8; 64 * 1024];
+    let mut b = [0u8; 64 * 1024];
+    loop {
+        let an = left.read(&mut a).map_err(blocked_io("could not read approved source"))?;
+        let bn = right.read(&mut b).map_err(blocked_io("could not read published destination"))?;
+        if an != bn || a[..an] != b[..bn] { return Err(WorkAssistantError::stale_preview("published destination content differs from source")); }
+        if an == 0 { return Ok(()); }
+    }
+}
+
+fn rename_noreplace(from_dir: i32, from: &CString, to_dir: i32, to: &CString) -> Result<(), WorkAssistantError> {
+    let result = unsafe { renameatx_np(from_dir, from.as_ptr(), to_dir, to.as_ptr(), RENAME_EXCL) };
+    if result == 0 { return Ok(()); }
+    let error = std::io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::EEXIST) => Err(WorkAssistantError::stale_preview("destination changed before native publication")),
+        Some(libc::EXDEV) => Err(WorkAssistantError { code: "cross_device".into(), message: "native rename crosses filesystem devices".into(), recoverable: true }),
+        _ => Err(WorkAssistantError::blocked(format!("could not complete native relative rename: {error}"))),
+    }
+}
+
+const RENAME_EXCL: u32 = 0x0000_0004;
+
+extern "C" {
+    fn renameatx_np(fromfd: libc::c_int, from: *const libc::c_char, tofd: libc::c_int, to: *const libc::c_char, flags: u32) -> libc::c_int;
 }
 
 pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
@@ -192,6 +340,9 @@ fn validate_regular_at(parent: i32, name: &CString) -> Result<(), WorkAssistantE
 fn stat_at(parent: i32, name: &CString) -> Result<libc::stat, WorkAssistantError> {
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     if unsafe { libc::fstatat(parent, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            return Err(WorkAssistantError { code: "not_found".into(), message: String::new(), recoverable: true });
+        }
         return Err(last_os_error("could not inspect approved path component"));
     }
     Ok(stat)
@@ -258,6 +409,13 @@ fn identity_from_metadata(metadata: &std::fs::Metadata) -> PlatformFileIdentity 
         platform: "macos".into(),
         volume: format!("{:x}", metadata.dev()),
         file_id: format!("{:x}", metadata.ino()),
+    }
+}
+fn identity_from_stat(stat: &libc::stat) -> PlatformFileIdentity {
+    PlatformFileIdentity {
+        platform: "macos".into(),
+        volume: format!("{:x}", stat.st_dev),
+        file_id: format!("{:x}", stat.st_ino),
     }
 }
 fn is_symlink(mode: libc::mode_t) -> bool {

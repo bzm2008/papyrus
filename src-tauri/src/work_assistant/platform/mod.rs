@@ -85,6 +85,8 @@ struct BoundPlatformSource {
     source_identity: PlatformFileIdentity,
     #[cfg(windows)]
     parent_path: PathBuf,
+    #[cfg(windows)]
+    ancestor_handles: Vec<File>,
 }
 
 impl PlatformSource for BoundPlatformSource {
@@ -177,6 +179,7 @@ impl SourceSnapshot {
 /// private; the serializable receipt contains only a fixed relative original path and UUID leaf.
 pub struct PreparedRecoverySlot {
     receipt: RecoveryReceipt,
+    receipt_bytes: Vec<u8>,
     root: File,
     vault: File,
     slot: File,
@@ -217,6 +220,8 @@ pub fn open_source_snapshot(
             source_identity: opened.source_identity.clone(),
             #[cfg(windows)]
             parent_path: opened.parent_path,
+            #[cfg(windows)]
+            ancestor_handles: opened.ancestor_handles,
         },
         summary: SourceSnapshotSummary {
             original_relative_path,
@@ -254,19 +259,25 @@ pub fn prepare_recovery_slot(
     validate_recovery_leaf(&recovery_leaf)?;
     let handles = prepare_platform_recovery_vault(authorized_root, &recovery_leaf)?;
 
-    Ok(PreparedRecoverySlot {
-        receipt: RecoveryReceipt {
+    let receipt = RecoveryReceipt {
             preview_id: preview_id.into(),
             index,
             original_relative_path: source.original_relative_path.clone(),
             recovery_leaf,
             vault_scope: uuid::Uuid::new_v4().to_string(),
             platform_source_identity: source.source_identity.clone(),
-        },
+        };
+    let receipt_bytes = serde_json::to_vec(&receipt)
+        .map_err(|_| WorkAssistantError::protocol("could not encode recovery receipt"))?;
+    let slot = PreparedRecoverySlot {
+        receipt,
+        receipt_bytes,
         root: handles.root,
         vault: handles.vault,
         slot: handles.slot,
-    })
+    };
+    preflight_recovery_receipt(&slot)?;
+    Ok(slot)
 }
 
 /// Prepares recovery beside the held source parent rather than blindly under the workspace root.
@@ -283,19 +294,25 @@ pub(crate) fn prepare_recovery_slot_for_source(
     let recovery_leaf = uuid::Uuid::new_v4().to_string();
     validate_recovery_leaf(&recovery_leaf)?;
     let handles = prepare_platform_recovery_vault_for_source(&source.platform, &recovery_leaf)?;
-    Ok(PreparedRecoverySlot {
-        receipt: RecoveryReceipt {
+    let receipt = RecoveryReceipt {
             preview_id: preview_id.into(),
             index,
             original_relative_path: source.summary.original_relative_path.clone(),
             recovery_leaf,
             vault_scope: uuid::Uuid::new_v4().to_string(),
             platform_source_identity: source.summary.source_identity.clone(),
-        },
+        };
+    let receipt_bytes = serde_json::to_vec(&receipt)
+        .map_err(|_| WorkAssistantError::protocol("could not encode recovery receipt"))?;
+    let slot = PreparedRecoverySlot {
+        receipt,
+        receipt_bytes,
         root: handles.root,
         vault: handles.vault,
         slot: handles.slot,
-    })
+    };
+    preflight_recovery_receipt(&slot)?;
+    Ok(slot)
 }
 
 pub(crate) fn validate_recovery_leaf(value: &str) -> Result<(), WorkAssistantError> {
@@ -322,6 +339,8 @@ struct DestinationBinding {
     leaf: String,
     #[cfg(windows)]
     parent_path: PathBuf,
+    #[cfg(windows)]
+    ancestor_handles: Vec<File>,
 }
 
 pub(crate) struct PreparedFileTransaction {
@@ -418,8 +437,15 @@ impl PreparedFileTransaction {
             FileOperationKind::Trash => {
                 let source = self.source.as_ref().expect("source is required");
                 let recovery = self.source_recovery.as_ref().expect("recovery is required");
-                move_snapshot_to_recovery(source, recovery)?;
-                persist_recovery_receipt(recovery)?;
+                if let Err(error) = move_snapshot_to_recovery(source, recovery) {
+                    return Err(error);
+                }
+                if let Err(error) = persist_recovery_receipt(recovery) {
+                    return Err(WorkAssistantError::partial_transaction(format!(
+                        "source moved to private recovery but receipt persistence failed: {}",
+                        safe_transaction_error(&error)
+                    )));
+                }
                 Ok(TransactionExecution { detail: "moved file to private recovery".into(), receipts: vec![recovery.receipt.clone()] })
             }
             FileOperationKind::Copy => self.copy_or_overwrite(&cancelled, false),
@@ -432,16 +458,25 @@ impl PreparedFileTransaction {
         let source = self.source.as_mut().expect("source is required");
         let destination = self.destination.as_ref().expect("destination is required");
         let staging = stage_source(source, destination)?;
-        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled after staging")); }
+        if cancelled()? {
+            return Err(cleanup_cancelled_staging(staging, "operation was cancelled after staging"));
+        }
         let mut receipts = Vec::new();
         if let Some(old) = &self.existing_destination {
             let recovery = self.destination_recovery.as_ref().expect("overwrite recovery is required");
             old.verify_snapshot()?;
             move_snapshot_to_recovery(old, recovery)?;
-            persist_recovery_receipt(recovery)?;
+            if let Err(error) = persist_recovery_receipt(recovery) {
+                return Err(WorkAssistantError::partial_transaction(format!(
+                    "old destination is recoverable but its receipt could not be persisted: {}",
+                    safe_transaction_error(&error)
+                )));
+            }
             receipts.push(recovery.receipt.clone());
         }
-        if cancelled()? { return Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable; publication was cancelled")); }
+        if cancelled()? {
+            return Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable; publication was cancelled"));
+        }
         if let Err(error) = publish_staging(staging, destination) {
             return if receipts.is_empty() { Err(error) } else { Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable but the replacement was not published")) };
         }
@@ -462,37 +497,67 @@ impl PreparedFileTransaction {
         // Cross-device moves copy and publish before touching the original.  An overwrite first
         // secures the old destination in its own recovery vault.
         let staging = stage_source(source, destination)?;
-        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled after staging")); }
+        if cancelled()? {
+            return Err(cleanup_cancelled_staging(staging, "operation was cancelled after staging"));
+        }
         let mut receipts = Vec::new();
         if let Some(old) = &self.existing_destination {
             let recovery = self.destination_recovery.as_ref().expect("overwrite recovery is required");
             old.verify_snapshot()?;
             move_snapshot_to_recovery(old, recovery)?;
-            persist_recovery_receipt(recovery)?;
+            if let Err(error) = persist_recovery_receipt(recovery) {
+                return Err(WorkAssistantError::partial_transaction(format!(
+                    "old destination is recoverable but its receipt could not be persisted: {}",
+                    safe_transaction_error(&error)
+                )));
+            }
             receipts.push(recovery.receipt.clone());
         }
-        if let Err(_) = publish_staging(staging, destination) {
-            return if receipts.is_empty() { Err(WorkAssistantError::stale_preview("the destination changed before publication")) } else { Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable but the moved file was not published")) };
+        if let Err(error) = publish_staging(staging, destination) {
+            return if receipts.is_empty() { Err(error) } else { Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable but the moved file was not published")) };
+        }
+        if let Err(error) = verify_published_copy(source, destination) {
+            return Err(WorkAssistantError::partial_transaction(format!(
+                "the new copy was published but could not be verified; the original remains in place: {}",
+                safe_transaction_error(&error)
+            )));
         }
         if cancelled()? { return Err(WorkAssistantError::partial_transaction("the new copy was published; the original was not moved to recovery")); }
         let recovery = self.source_recovery.as_ref().expect("source recovery is required");
         move_snapshot_to_recovery(source, recovery)?;
-        persist_recovery_receipt(recovery)?;
+        if let Err(error) = persist_recovery_receipt(recovery) {
+            return Err(WorkAssistantError::partial_transaction(format!(
+                "the original was moved to private recovery but its receipt could not be persisted: {}",
+                safe_transaction_error(&error)
+            )));
+        }
         receipts.push(recovery.receipt.clone());
         Ok(TransactionExecution { detail: "copied and recovered original across devices".into(), receipts })
     }
 }
 
-struct OpenedDestination {
+pub(super) struct OpenedDestination {
     parent: File,
     leaf: String,
     #[cfg(windows)]
     parent_path: PathBuf,
+    #[cfg(windows)]
+    ancestor_handles: Vec<File>,
 }
 
-struct StagedFile {
+pub(super) struct StagedFile {
     file: File,
+    parent: File,
     leaf: String,
+    published: bool,
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = remove_staging_file(&self.file, &self.parent, &self.leaf);
+        }
+    }
 }
 
 fn bind_destination(root: &Path, relative: &Path) -> Result<DestinationBinding, WorkAssistantError> {
@@ -502,6 +567,8 @@ fn bind_destination(root: &Path, relative: &Path) -> Result<DestinationBinding, 
         leaf: opened.leaf,
         #[cfg(windows)]
         parent_path: opened.parent_path,
+        #[cfg(windows)]
+        ancestor_handles: opened.ancestor_handles,
     })
 }
 
@@ -554,11 +621,17 @@ fn stage_source(source: &mut SourceSnapshot, destination: &DestinationBinding) -
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = destination; Err(WorkAssistantError::blocked("native staging is unavailable")) }
 }
 
-fn publish_staging(staged: StagedFile, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
-    #[cfg(windows)] { windows::publish_staging(&staged.file, &destination.parent, &destination.leaf) }
-    #[cfg(target_os = "linux")] { linux::publish_staging(&staged.file, &destination.parent, &staged.leaf, &destination.leaf) }
-    #[cfg(target_os = "macos")] { macos::publish_staging(&staged.file, &destination.parent, &staged.leaf, &destination.leaf) }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (staged, destination); Err(WorkAssistantError::blocked("native publication is unavailable")) }
+fn publish_staging(mut staged: StagedFile, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
+    let result = {
+        #[cfg(windows)] { windows::publish_staging(&staged.file, &destination.parent, &destination.leaf) }
+        #[cfg(target_os = "linux")] { linux::publish_staging(&staged, &destination.parent, &destination.leaf) }
+        #[cfg(target_os = "macos")] { macos::publish_staging(&staged, &destination.parent, &destination.leaf) }
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (&staged, destination); Err(WorkAssistantError::blocked("native publication is unavailable")) }
+    };
+    if result.is_ok() {
+        staged.published = true;
+    }
+    result
 }
 
 fn move_snapshot_to_destination(source: &SourceSnapshot, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
@@ -585,11 +658,51 @@ fn create_directory(destination: &DestinationBinding) -> Result<(), WorkAssistan
 }
 
 fn persist_recovery_receipt(recovery: &PreparedRecoverySlot) -> Result<(), WorkAssistantError> {
-    let bytes = serde_json::to_vec(recovery.receipt()).map_err(|_| WorkAssistantError::protocol("could not encode recovery receipt"))?;
-    #[cfg(windows)] { windows::write_recovery_receipt(&recovery.slot, &bytes) }
-    #[cfg(target_os = "linux")] { linux::write_recovery_receipt(&recovery.slot, &bytes) }
-    #[cfg(target_os = "macos")] { macos::write_recovery_receipt(&recovery.slot, &bytes) }
+    let bytes = &recovery.receipt_bytes;
+    #[cfg(windows)] { windows::write_recovery_receipt(&recovery.slot, bytes) }
+    #[cfg(target_os = "linux")] { linux::write_recovery_receipt(&recovery.slot, bytes) }
+    #[cfg(target_os = "macos")] { macos::write_recovery_receipt(&recovery.slot, bytes) }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = bytes; Err(WorkAssistantError::blocked("native recovery receipts are unavailable")) }
+}
+
+fn preflight_recovery_receipt(recovery: &PreparedRecoverySlot) -> Result<(), WorkAssistantError> {
+    persist_recovery_receipt(recovery)
+}
+
+fn cleanup_cancelled_staging(mut staged: StagedFile, message: &str) -> WorkAssistantError {
+    let result = remove_staging_file(&staged.file, &staged.parent, &staged.leaf);
+    staged.published = true;
+    match result {
+        Ok(()) => WorkAssistantError::stale_preview(message),
+        Err(error) => WorkAssistantError::partial_transaction(format!(
+            "{message}; staged content could not be cleaned up: {}",
+            safe_transaction_error(&error)
+        )),
+    }
+}
+
+fn safe_transaction_error(error: &WorkAssistantError) -> &'static str {
+    match error.code.as_str() {
+        "stale_preview" => "the filesystem changed",
+        "cross_device" => "the filesystem devices differ",
+        "recovery_unavailable" => "private recovery storage is unavailable",
+        "partial_transaction" => "a recoverable transaction step failed",
+        _ => "the native filesystem operation failed",
+    }
+}
+
+fn remove_staging_file(file: &File, parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
+    #[cfg(windows)] { let _ = (parent, leaf); windows::remove_staging(file) }
+    #[cfg(target_os = "linux")] { linux::remove_staging(parent, leaf) }
+    #[cfg(target_os = "macos")] { macos::remove_staging(parent, leaf) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (file, parent, leaf); Err(WorkAssistantError::blocked("native staging cleanup is unavailable")) }
+}
+
+fn verify_published_copy(source: &SourceSnapshot, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
+    #[cfg(windows)] { windows::verify_published(&destination.parent, &destination.parent_path, &destination.leaf, source.file(), source.summary.byte_len) }
+    #[cfg(target_os = "linux")] { linux::verify_published(&destination.parent, &destination.leaf, source.file(), source.summary.byte_len) }
+    #[cfg(target_os = "macos")] { macos::verify_published(&destination.parent, &destination.leaf, source.file(), source.summary.byte_len) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (source, destination); Err(WorkAssistantError::blocked("native publication verification is unavailable")) }
 }
 
 fn is_cross_device(error: &WorkAssistantError) -> bool { error.code == "cross_device" }
@@ -634,6 +747,8 @@ pub(crate) struct OpenedPlatformSource {
     parent_identity: PlatformFileIdentity,
     #[cfg(windows)]
     parent_path: PathBuf,
+    #[cfg(windows)]
+    ancestor_handles: Vec<File>,
     root_identity: PlatformFileIdentity,
     source_identity: PlatformFileIdentity,
     byte_len: u64,

@@ -68,6 +68,7 @@ pub(crate) fn open_source(
         leaf,
         parent_identity: file_identity(directories.last().unwrap())?,
         parent_path: current,
+        ancestor_handles: directories,
         root_identity,
         source_identity,
         byte_len: metadata.len(),
@@ -80,17 +81,18 @@ pub(crate) fn open_destination(
 ) -> Result<OpenedDestination, WorkAssistantError> {
     let root = fs::canonicalize(root).map_err(blocked_io("could not resolve authorized root"))?;
     let mut current = root.clone();
+    let mut ancestor_handles = vec![open_read_verified_directory(&root)?];
     let parent = relative.parent().unwrap_or_else(|| Path::new(""));
     for component in parent.components() {
         current.push(component.as_os_str());
-        let _ = open_read_verified_directory(&current)?;
+        ancestor_handles.push(open_read_verified_directory(&current)?);
     }
     let leaf = relative.file_name().and_then(|part| part.to_str()).ok_or_else(|| WorkAssistantError::blocked("destination file name is missing"))?;
     if leaf.is_empty() || leaf == "." || leaf == ".." {
         return Err(WorkAssistantError::blocked("destination file name is invalid"));
     }
     let parent_handle = open_read_verified_directory(&current)?;
-    Ok(OpenedDestination { parent: parent_handle, leaf: leaf.into(), parent_path: current })
+    Ok(OpenedDestination { parent: parent_handle, leaf: leaf.into(), parent_path: current, ancestor_handles })
 }
 
 pub(crate) fn destination_exists(parent: &File, parent_path: &Path, leaf: &str) -> Result<bool, WorkAssistantError> {
@@ -140,7 +142,7 @@ pub(crate) fn stage_copy(source: &File, parent: &File, parent_path: &Path) -> Re
         output.write_all(&buffer[..read]).map_err(blocked_io("could not stage approved source"))?;
     }
     output.sync_all().map_err(blocked_io("could not sync staged source"))?;
-    Ok(StagedFile { file: output, leaf })
+    Ok(StagedFile { file: output, parent: parent.try_clone().map_err(blocked_io("could not retain staging parent"))?, leaf, published: false })
 }
 
 pub(crate) fn publish_staging(staging: &File, parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
@@ -169,6 +171,50 @@ pub(crate) fn write_recovery_receipt(slot: &File, receipt: &[u8]) -> Result<(), 
     use std::io::Write;
     file.write_all(receipt).map_err(blocked_io("could not write recovery receipt"))?;
     file.sync_all().map_err(blocked_io("could not sync recovery receipt"))
+}
+
+pub(crate) fn remove_staging(staging: &File) -> Result<(), WorkAssistantError> {
+    use std::os::windows::io::AsRawHandle;
+    let mut info = NtFileDispositionInformation { delete_file: 1 };
+    let mut io_status = NtIoStatusBlock { status: 0, information: 0 };
+    let status = unsafe {
+        NtSetInformationFile(
+            staging.as_raw_handle(),
+            &mut io_status,
+            (&mut info as *mut NtFileDispositionInformation).cast(),
+            std::mem::size_of::<NtFileDispositionInformation>() as u32,
+            NT_FILE_DISPOSITION_INFORMATION,
+        )
+    };
+    if status < 0 {
+        return Err(WorkAssistantError::partial_transaction("could not remove opaque staging file"));
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_published(parent: &File, parent_path: &Path, leaf: &str, source: &File, expected_len: u64) -> Result<(), WorkAssistantError> {
+    let current_parent = open_read_verified_directory(parent_path)?;
+    if file_identity(&current_parent)? != file_identity(parent)? {
+        return Err(WorkAssistantError::stale_preview("destination parent changed after publication"));
+    }
+    let destination_path = parent_path.join(leaf);
+    let destination = open_read_handle(&destination_path, false)?;
+    reject_reparse(&destination, "published destination")?;
+    let metadata = destination.metadata().map_err(blocked_io("could not inspect published destination"))?;
+    if metadata.len() != expected_len { return Err(WorkAssistantError::stale_preview("published destination size differs from source")); }
+    let mut left = source.try_clone().map_err(blocked_io("could not clone approved source handle"))?;
+    let mut right = destination.try_clone().map_err(blocked_io("could not clone published destination handle"))?;
+    use std::io::{Read, Seek, SeekFrom};
+    left.seek(SeekFrom::Start(0)).map_err(blocked_io("could not seek approved source"))?;
+    right.seek(SeekFrom::Start(0)).map_err(blocked_io("could not seek published destination"))?;
+    let mut a = [0u8; 64 * 1024];
+    let mut b = [0u8; 64 * 1024];
+    loop {
+        let an = left.read(&mut a).map_err(blocked_io("could not read approved source"))?;
+        let bn = right.read(&mut b).map_err(blocked_io("could not read published destination"))?;
+        if an != bn || a[..an] != b[..bn] { return Err(WorkAssistantError::stale_preview("published destination content differs from source")); }
+        if an == 0 { return Ok(()); }
+    }
 }
 
 pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
@@ -321,13 +367,13 @@ fn open_snapshot_directory(path: &Path) -> Result<File, WorkAssistantError> {
 }
 
 fn open_read_verified_directory(path: &Path) -> Result<File, WorkAssistantError> {
-    // FILE_RENAME_INFO uses this as RootDirectory, which requires mutation rights on the
-    // directory namespace.  It still shares DELETE so it can coexist with the retained source.
+    // FILE_RENAME_INFO uses this as RootDirectory.  Denying DELETE sharing prevents an
+    // ancestor/destination reparse swap while path-derived helper APIs are in flight.
     let file = open_handle_with_access(
         path,
         true,
         GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
     )?;
     reject_reparse(&file, "directory")?;
     if !file.metadata().map_err(blocked_io("could not inspect directory"))?.is_dir() {
@@ -501,6 +547,13 @@ struct NtFileRenameInformation {
     file_name: [u16; 1],
 }
 
+#[repr(C)]
+struct NtFileDispositionInformation {
+    delete_file: u8,
+}
+
+const NT_FILE_DISPOSITION_INFORMATION: u32 = 13;
+
 #[link(name = "ntdll")]
 extern "system" {
     fn NtSetInformationFile(
@@ -533,12 +586,41 @@ fn create_child_file(parent: &File, leaf: &str) -> Result<File, WorkAssistantErr
     // CreateFileW has no root-directory handle argument.  The receipt is instead written through
     // a handle-derived final path in the adapter; callers never receive that path.
     use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
-    let mut buffer = vec![0u16; 512];
-    let length = unsafe { windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW(parent.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
-    if length == 0 || length as usize >= buffer.len() { return Err(last_native_error("could not resolve private recovery slot")); }
-    let mut path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+    let mut capacity = 512usize;
+    let mut path = loop {
+        let mut buffer = vec![0u16; capacity];
+        let length = unsafe { windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW(parent.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
+        if length == 0 { return Err(last_native_error("could not resolve private recovery slot")); }
+        if (length as usize) < buffer.len() {
+            break std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        }
+        capacity = capacity.checked_mul(2).ok_or_else(|| WorkAssistantError::blocked("private recovery slot path is too long"))?;
+        if capacity > 32768 { return Err(WorkAssistantError::blocked("private recovery slot path is too long")); }
+    };
     path.push(leaf);
-    create_staging_file(&path)
+    open_receipt_file(&path)
+}
+
+fn open_receipt_file(path: &Path) -> Result<File, WorkAssistantError> {
+    let wide = path.as_os_str().encode_wide().chain(iter::once(0)).collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            windows_sys::Win32::Storage::FileSystem::OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE { return Err(last_native_error("could not open private recovery receipt")); }
+    let mut file = unsafe { File::from_raw_handle(handle as *mut std::ffi::c_void) };
+    reject_reparse(&file, "recovery receipt")?;
+    file.set_len(0).map_err(blocked_io("could not truncate recovery receipt"))?;
+    use std::io::{Seek, SeekFrom};
+    file.seek(SeekFrom::Start(0)).map_err(blocked_io("could not seek recovery receipt"))?;
+    Ok(file)
 }
 
 fn last_native_error(context: &str) -> WorkAssistantError {
