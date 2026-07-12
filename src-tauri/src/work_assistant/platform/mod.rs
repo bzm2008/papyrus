@@ -331,16 +331,22 @@ impl PreparedRecoverySlot {
     /// parent capabilities intentionally deny DELETE sharing; those capabilities must be gone
     /// before the cleanup code re-opens the approved namespace.
     fn cleanup_uncommitted(self) -> Result<(), WorkAssistantError> {
+        let mut bindings = Vec::new();
+        if let Some(binding) = self.take_binding_for_cleanup() {
+            bindings.push(binding);
+        }
+        cleanup_recovery_bindings(bindings)
+    }
+
+    fn take_binding_for_cleanup(self) -> Option<RecoveryBinding> {
         if self.committed {
-            return Ok(());
+            return None;
         }
         let binding = self.binding;
-        // Drop all original recovery handles before the fresh, identity-checked walk.  They are
-        // capabilities for the prepared transaction, never cleanup parents.
         drop(self.root);
         drop(self.vault);
         drop(self.slot);
-        remove_recovery_slot(&binding)
+        Some(binding)
     }
 }
 
@@ -616,23 +622,21 @@ impl PreparedFileTransaction {
 }
 
 pub(crate) fn cleanup_recovery_slots(slots: Vec<PreparedRecoverySlot>) -> Result<(), WorkAssistantError> {
+    let bindings = slots
+        .into_iter()
+        .filter_map(PreparedRecoverySlot::take_binding_for_cleanup)
+        .collect();
+    cleanup_recovery_bindings(bindings)
+}
+
+fn cleanup_recovery_bindings(bindings: Vec<RecoveryBinding>) -> Result<(), WorkAssistantError> {
     let mut first_error = None;
-    for slot in slots {
-        if let Err(error) = slot.cleanup_uncommitted() {
+    for binding in bindings {
+        if let Err(error) = remove_recovery_slot(&binding) {
             first_error.get_or_insert(error);
         }
     }
     first_error.map_or(Ok(()), Err)
-}
-
-impl Drop for PreparedFileTransaction {
-    fn drop(&mut self) {
-        // Error-returning paths in the batch executor can be triggered by audit persistence or
-        // lock failures after preflight. Keep disposable recovery slots from leaking there too.
-        // Explicit cleanup paths report failures to the caller; Drop can only make a best-effort
-        // attempt and intentionally leaves committed recovery content untouched.
-        let _ = self.cleanup_uncommitted();
-    }
 }
 
 pub(crate) struct TransactionExecution {

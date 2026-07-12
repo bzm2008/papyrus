@@ -6,6 +6,27 @@ use crate::work_assistant::{
 };
 use tauri::State;
 
+struct PreparedTransactions(Vec<crate::work_assistant::platform::PreparedFileTransaction>);
+
+impl PreparedTransactions {
+    fn new() -> Self { Self(Vec::new()) }
+    fn push(&mut self, transaction: crate::work_assistant::platform::PreparedFileTransaction) { self.0.push(transaction); }
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, crate::work_assistant::platform::PreparedFileTransaction> { self.0.iter_mut() }
+    fn len(&self) -> usize { self.0.len() }
+    fn cleanup(&mut self) -> Option<WorkAssistantError> {
+        let slots = self.0.iter_mut()
+            .flat_map(crate::work_assistant::platform::PreparedFileTransaction::take_recovery_slots_for_cleanup)
+            .collect();
+        crate::work_assistant::platform::cleanup_recovery_slots(slots).err()
+    }
+}
+
+impl Drop for PreparedTransactions {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
 #[tauri::command]
 pub fn work_assistant_preview(
     state: State<'_, WorkAssistantState>,
@@ -64,7 +85,7 @@ pub fn execute_batch_file_operations(
 
     // Preflight is deliberately all-or-nothing.  A bad source, reparse point, stale destination,
     // or unavailable same-device vault must not charge an approval or mutate a file.
-    let mut prepared = Vec::with_capacity(request.operations.len());
+    let mut prepared = PreparedTransactions::new();
     for (index, operation) in request.operations.iter().enumerate() {
         if is_run_cancelled(state, &request.run_id)? {
             let mut result = cancelled_result(&request.operations, index);
@@ -136,8 +157,8 @@ pub fn execute_batch_file_operations(
             }
         }
     }
-    if let Some(index) = cleanup_from {
-        record_cleanup_warnings(state, &mut result, &mut prepared[index..]);
+    if cleanup_from.is_some() {
+        record_cleanup_warnings(state, &mut result, &mut prepared);
     }
     Ok(result)
 }
@@ -245,15 +266,11 @@ fn remaining_items(operations: &[FileOperationRequest], start: usize) -> Vec<Bat
     operations.iter().enumerate().skip(start).map(|(index, _)| item(index, "operation pending".into(), None, Vec::new())).collect()
 }
 
-fn cleanup_prepared(prepared: &mut [crate::work_assistant::platform::PreparedFileTransaction]) -> Option<WorkAssistantError> {
-    let slots = prepared
-        .iter_mut()
-        .flat_map(crate::work_assistant::platform::PreparedFileTransaction::take_recovery_slots_for_cleanup)
-        .collect();
-    crate::work_assistant::platform::cleanup_recovery_slots(slots).err()
+fn cleanup_prepared(prepared: &mut PreparedTransactions) -> Option<WorkAssistantError> {
+    prepared.cleanup()
 }
 
-fn record_cleanup_warnings(state: &WorkAssistantState, result: &mut BatchExecutionResult, prepared: &mut [crate::work_assistant::platform::PreparedFileTransaction]) {
+fn record_cleanup_warnings(state: &WorkAssistantState, result: &mut BatchExecutionResult, prepared: &mut PreparedTransactions) {
     if let Some(error) = cleanup_prepared(prepared) {
         let warning = item(usize::MAX, "uncommitted recovery cleanup needs attention".into(), Some(&WorkAssistantError { code: "recovery_cleanup_unavailable".into(), message: String::new(), recoverable: true }), Vec::new());
         let _ = append_audit_entry(state, &AuditEntry::new("file_operation_cleanup_warning", error.message));
@@ -379,6 +396,21 @@ mod tests {
         let slot = path.join(".papyrus-recovery").join(&execution.receipts[0].recovery_leaf);
         assert!(slot.join("content").exists());
         drop(committed); fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn batch_guard_releases_multiple_prepared_transactions_before_cleanup() {
+        let path = directory(); fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("first.txt"), "one").unwrap();
+        fs::write(path.join("second.txt"), "two").unwrap();
+        let mut prepared = PreparedTransactions::new();
+        prepared.push(prepare_file_transaction(&path, "preview", 0, &operation(FileOperationKind::Trash, Some("first.txt"), None), &ConflictPolicy::Skip).unwrap());
+        prepared.push(prepare_file_transaction(&path, "preview", 1, &operation(FileOperationKind::Trash, Some("second.txt"), None), &ConflictPolicy::Skip).unwrap());
+        drop(prepared);
+        let vault = path.join(".papyrus-recovery");
+        assert!(!vault.exists() || fs::read_dir(vault).unwrap().next().is_none());
+        assert!(path.join("first.txt").exists() && path.join("second.txt").exists());
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
