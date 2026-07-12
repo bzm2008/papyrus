@@ -836,6 +836,18 @@ impl PreparedFileTransaction {
             receipts.push(recovery.receipt.clone());
             run_after_destination_recovery_hook();
         }
+        if cancelled()? {
+            return if receipts.is_empty() {
+                Err(cleanup_cancelled_staging(
+                    staging,
+                    "operation was cancelled before publication",
+                ))
+            } else {
+                Err(cleanup_recoverable_staging_after_destination_recovery(
+                    staging,
+                ))
+            };
+        }
         let staging = revalidate_after_destination_recovery(staging, source)?;
         if let Err(error) = publish_staging(staging, destination) {
             return if receipts.is_empty() {
@@ -1353,6 +1365,22 @@ fn cleanup_cancelled_staging(mut staged: StagedFile, message: &str) -> WorkAssis
     }
 }
 
+fn cleanup_recoverable_staging_after_destination_recovery(
+    mut staged: StagedFile,
+) -> WorkAssistantError {
+    let cleanup = remove_staging_file(&staged.file, &staged.parent, &staged.leaf);
+    staged.published = true;
+    match cleanup {
+        Ok(()) => WorkAssistantError::partial_transaction(
+            "the old destination is safely recoverable; the replacement was not published because the operation was cancelled",
+        ),
+        Err(error) => WorkAssistantError::partial_transaction(format!(
+            "the old destination is safely recoverable; the replacement was not published because the operation was cancelled, and staged content could not be cleaned up: {}",
+            safe_transaction_error(&error)
+        )),
+    }
+}
+
 fn cleanup_stale_staging(
     mut staged: StagedFile,
     original: WorkAssistantError,
@@ -1853,10 +1881,9 @@ fn prepare_platform_recovery_vault(
 
 #[cfg(test)]
 mod tests {
+    use super::inject_after_destination_recovery;
     #[cfg(not(windows))]
     use super::inject_after_staging_before_prepublish;
-    #[cfg(not(windows))]
-    use super::inject_after_destination_recovery;
     #[cfg(unix)]
     use super::{bind_destination, create_directory, stage_source};
     use super::{
@@ -1868,7 +1895,14 @@ mod tests {
         move_snapshot_to_recovery, persist_recovery_receipt, prepare_recovery_slot_for_source,
     };
     use crate::work_assistant::{ConflictPolicy, FileOperationKind, FileOperationRequest};
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+    };
     use uuid::Uuid;
 
     fn test_dir() -> PathBuf {
@@ -2080,6 +2114,80 @@ mod tests {
     }
 
     #[test]
+    fn overwrite_move_or_rename_cancellation_after_destination_recovery_keeps_recovery_and_cleans_staging(
+    ) {
+        for (label, kind) in [
+            ("move", FileOperationKind::Move),
+            ("rename", FileOperationKind::Rename),
+        ] {
+            let root = test_dir();
+            fs::create_dir_all(&root).unwrap();
+            let source_path = root.join("source.txt");
+            let destination_path = root.join("destination.txt");
+            fs::write(&source_path, b"new contents").unwrap();
+            fs::write(&destination_path, b"old contents").unwrap();
+            let operation = FileOperationRequest {
+                kind,
+                source: Some("source.txt".into()),
+                destination: Some("destination.txt".into()),
+            };
+            let transaction = prepare_file_transaction(
+                &root,
+                &format!("preview-cancel-after-recovery-{label}"),
+                0,
+                &operation,
+                &ConflictPolicy::Overwrite,
+            )
+            .unwrap();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let cancel_after_recovery = Arc::clone(&cancelled);
+            inject_after_destination_recovery(move || {
+                cancel_after_recovery.store(true, Ordering::SeqCst);
+            });
+
+            let error = match transaction.execute(|| Ok(cancelled.load(Ordering::SeqCst))) {
+                Ok(_) => {
+                    panic!("{label}: cancellation after recovery must not publish the replacement")
+                }
+                Err(error) => error,
+            };
+
+            assert_eq!(error.code, "partial_transaction", "{label}");
+            assert!(
+                error
+                    .message
+                    .contains("old destination is safely recoverable"),
+                "{label}: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("replacement was not published"),
+                "{label}: {}",
+                error.message
+            );
+            assert!(
+                !destination_path.exists(),
+                "{label}: the replacement must not be published"
+            );
+            assert_eq!(fs::read(&source_path).unwrap(), b"new contents", "{label}");
+            let recovery_root = root.join(".papyrus-recovery");
+            assert!(fs::read_dir(&recovery_root).unwrap().any(|entry| entry
+                .unwrap()
+                .path()
+                .join("receipt.json")
+                .exists()));
+            assert!(!fs::read_dir(&root).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".papyrus-stage-")
+            }));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
     #[cfg(not(windows))]
     fn copy_rejects_a_same_length_source_rewrite_after_staging() {
         use std::{
@@ -2194,7 +2302,10 @@ mod tests {
         };
 
         assert_eq!(error.code, "partial_transaction");
-        assert!(!destination_path.exists(), "the replacement must not be published");
+        assert!(
+            !destination_path.exists(),
+            "the replacement must not be published"
+        );
         let recovery_root = root.join(".papyrus-recovery");
         assert!(fs::read_dir(&recovery_root).unwrap().any(|entry| entry
             .unwrap()
