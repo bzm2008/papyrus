@@ -73,6 +73,25 @@ pub(crate) fn prepare_recovery_vault(root: &Path, leaf: &str) -> Result<Prepared
     Ok(PreparedRecoveryHandles { root, vault, slot: leaf_directory })
 }
 
+pub(crate) fn prepare_recovery_vault_at_parent(
+    parent: &File,
+    leaf: &str,
+) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
+    let root = parent.try_clone().map_err(blocked_io("could not retain source parent capability"))?;
+    let vault_name = CString::new(RECOVERY_DIRECTORY).expect("static recovery name has no NUL");
+    mkdirat_private(root.as_raw_fd(), &vault_name, true)
+        .map_err(recovery_unavailable)?;
+    validate_directory_at(root.as_raw_fd(), &vault_name).map_err(recovery_unavailable)?;
+    let vault = openat_directory(root.as_raw_fd(), &vault_name).map_err(recovery_unavailable)?;
+    ensure_private_directory(&vault).map_err(recovery_unavailable)?;
+    let leaf = CString::new(leaf).map_err(|_| WorkAssistantError::stale_preview("invalid recovery leaf"))?;
+    mkdirat_private(vault.as_raw_fd(), &leaf, false).map_err(recovery_unavailable)?;
+    validate_directory_at(vault.as_raw_fd(), &leaf).map_err(recovery_unavailable)?;
+    let slot = openat_directory(vault.as_raw_fd(), &leaf).map_err(recovery_unavailable)?;
+    ensure_private_directory(&slot).map_err(recovery_unavailable)?;
+    Ok(PreparedRecoveryHandles { root, vault, slot })
+}
+
 /// The retained parent descriptor is the only namespace used for the leaf re-open.
 pub(crate) fn verify_bound_source(
     root: &File,
@@ -262,4 +281,8 @@ fn last_os_error(context: &str) -> WorkAssistantError {
 }
 fn blocked_io(context: &'static str) -> impl FnOnce(std::io::Error) -> WorkAssistantError {
     move |error| WorkAssistantError::blocked(format!("{context}: {error}"))
+}
+
+fn recovery_unavailable(error: WorkAssistantError) -> WorkAssistantError {
+    WorkAssistantError { code: "recovery_unavailable".into(), message: error.message, recoverable: true }
 }

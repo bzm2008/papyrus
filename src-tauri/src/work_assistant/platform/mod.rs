@@ -4,7 +4,7 @@
 //! stale previews, and ordinary concurrent filesystem changes. It deliberately does not claim to
 //! revoke a destructive handle that a same-identity local process acquired before this code did.
 
-use crate::work_assistant::WorkAssistantError;
+use crate::work_assistant::{ConflictPolicy, FileOperationKind, FileOperationRequest, WorkAssistantError};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -43,6 +43,9 @@ pub struct RecoveryReceipt {
     pub index: usize,
     pub original_relative_path: String,
     pub recovery_leaf: String,
+    /// Opaque adapter-generated identifier for the private vault's device scope.  It is useful
+    /// for audit correlation but deliberately cannot be turned back into a filesystem path.
+    pub vault_scope: String,
     pub platform_source_identity: PlatformFileIdentity,
 }
 
@@ -98,7 +101,12 @@ impl PlatformSource for BoundPlatformSource {
         };
         match identities {
             Ok((root, source)) if root == self.root_identity && source == self.source_identity => Ok(()),
-            _ => Err(WorkAssistantError::stale_preview("the workspace or source changed after preview")),
+            Ok(_) => Err(WorkAssistantError::stale_preview("the workspace or source changed after preview")),
+            Err(error) => Err(WorkAssistantError {
+                code: error.code,
+                message: format!("snapshot verification could not complete: {}", error.message),
+                recoverable: error.recoverable,
+            }),
         }
     }
     fn copy_to_staging(&self) -> Result<(), WorkAssistantError> { unavailable_operation("copy_to_staging") }
@@ -252,7 +260,37 @@ pub fn prepare_recovery_slot(
             index,
             original_relative_path: source.original_relative_path.clone(),
             recovery_leaf,
+            vault_scope: uuid::Uuid::new_v4().to_string(),
             platform_source_identity: source.source_identity.clone(),
+        },
+        root: handles.root,
+        vault: handles.vault,
+        slot: handles.slot,
+    })
+}
+
+/// Prepares recovery beside the held source parent rather than blindly under the workspace root.
+/// This is the only safe way to recover a source located below a nested mount/device.
+pub(crate) fn prepare_recovery_slot_for_source(
+    source: &SourceSnapshot,
+    preview_id: &str,
+    index: usize,
+) -> Result<PreparedRecoverySlot, WorkAssistantError> {
+    if preview_id.trim().is_empty() || preview_id.contains('\0') {
+        return Err(WorkAssistantError::protocol("recovery receipt requires a valid preview id"));
+    }
+    source.verify_snapshot()?;
+    let recovery_leaf = uuid::Uuid::new_v4().to_string();
+    validate_recovery_leaf(&recovery_leaf)?;
+    let handles = prepare_platform_recovery_vault_for_source(&source.platform, &recovery_leaf)?;
+    Ok(PreparedRecoverySlot {
+        receipt: RecoveryReceipt {
+            preview_id: preview_id.into(),
+            index,
+            original_relative_path: source.summary.original_relative_path.clone(),
+            recovery_leaf,
+            vault_scope: uuid::Uuid::new_v4().to_string(),
+            platform_source_identity: source.summary.source_identity.clone(),
         },
         root: handles.root,
         vault: handles.vault,
@@ -275,6 +313,286 @@ pub(crate) fn validate_recovery_leaf(value: &str) -> Result<(), WorkAssistantErr
     }
     Ok(())
 }
+
+/// A destination whose parent capability is held by the adapter.  The only name retained is the
+/// final, validated leaf from the immutable preview; callers cannot substitute a filesystem path
+/// once preflight has completed.
+struct DestinationBinding {
+    parent: File,
+    leaf: String,
+    #[cfg(windows)]
+    parent_path: PathBuf,
+}
+
+pub(crate) struct PreparedFileTransaction {
+    kind: FileOperationKind,
+    source: Option<SourceSnapshot>,
+    destination: Option<DestinationBinding>,
+    existing_destination: Option<SourceSnapshot>,
+    source_recovery: Option<PreparedRecoverySlot>,
+    destination_recovery: Option<PreparedRecoverySlot>,
+    skip: bool,
+}
+
+pub(crate) struct TransactionExecution {
+    pub(crate) detail: String,
+    pub(crate) receipts: Vec<RecoveryReceipt>,
+}
+
+/// Performs all model-path interpretation once, while the stored preview is still fresh.  The
+/// returned object owns every source handle and recovery slot needed by execution.
+pub(crate) fn prepare_file_transaction(
+    root: &Path,
+    preview_id: &str,
+    index: usize,
+    operation: &FileOperationRequest,
+    conflict: &ConflictPolicy,
+) -> Result<PreparedFileTransaction, WorkAssistantError> {
+    let source = match operation.kind {
+        FileOperationKind::Copy | FileOperationKind::Move | FileOperationKind::Rename | FileOperationKind::Trash => {
+            let value = operation.source.as_deref().ok_or_else(|| WorkAssistantError::blocked("source is required for this operation"))?;
+            Some(open_source_snapshot(root, value)?)
+        }
+        FileOperationKind::CreateDirectory => None,
+    };
+    let mut destination = match operation.kind {
+        FileOperationKind::Copy | FileOperationKind::Move | FileOperationKind::Rename | FileOperationKind::CreateDirectory => {
+            let value = operation.destination.as_deref().ok_or_else(|| WorkAssistantError::blocked("destination is required for this operation"))?;
+            Some(bind_destination(root, Path::new(value))?)
+        }
+        FileOperationKind::Trash => None,
+    };
+    if let (Some(source), Some(destination)) = (&source, &destination) {
+        if destination_entry_identity(destination)?
+            .is_some_and(|identity| source.summary.source_identity == identity)
+        {
+            return Err(WorkAssistantError::blocked("source and destination must be different files"));
+        }
+    }
+    let mut existing_destination = if let (Some(destination), Some(value)) = (&destination, operation.destination.as_deref()) {
+        if destination_exists(destination)? { Some(open_source_snapshot(root, value)?) } else { None }
+    } else { None };
+    let mut skip = false;
+    if existing_destination.is_some() {
+        match conflict {
+            ConflictPolicy::Skip => skip = true,
+            ConflictPolicy::Rename => {
+                let destination_ref = destination.as_mut().expect("destination is present");
+                reserve_renamed_destination(destination_ref)?;
+                existing_destination = None;
+            }
+            ConflictPolicy::Overwrite => {
+                if operation.kind == FileOperationKind::CreateDirectory {
+                    return Err(WorkAssistantError::blocked("directories cannot overwrite an existing entry"));
+                }
+            }
+        }
+    }
+    let source_recovery = if matches!(operation.kind, FileOperationKind::Move | FileOperationKind::Rename | FileOperationKind::Trash) && !skip {
+        Some(prepare_recovery_slot_for_source(source.as_ref().expect("source is required"), preview_id, index)?)
+    } else { None };
+    let destination_recovery = if matches!(conflict, ConflictPolicy::Overwrite) && existing_destination.is_some() && !skip {
+        Some(prepare_recovery_slot_for_source(existing_destination.as_ref().expect("destination snapshot is present"), preview_id, index)?)
+    } else { None };
+    Ok(PreparedFileTransaction { kind: operation.kind.clone(), source, destination, existing_destination, source_recovery, destination_recovery, skip })
+}
+
+impl PreparedFileTransaction {
+    pub(crate) fn execute<F>(mut self, cancelled: F) -> Result<TransactionExecution, WorkAssistantError>
+    where
+        F: Fn() -> Result<bool, WorkAssistantError>,
+    {
+        if self.skip {
+            return Ok(TransactionExecution { detail: "destination already exists".into(), receipts: Vec::new() });
+        }
+        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled before execution")); }
+        if let Some(source) = &self.source { source.verify_snapshot()?; }
+        if let Some(destination) = &self.existing_destination { destination.verify_snapshot()?; }
+        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled before staging")); }
+
+        match self.kind {
+            FileOperationKind::CreateDirectory => {
+                create_directory(self.destination.as_ref().expect("destination is required"))?;
+                Ok(TransactionExecution { detail: "created directory".into(), receipts: Vec::new() })
+            }
+            FileOperationKind::Trash => {
+                let source = self.source.as_ref().expect("source is required");
+                let recovery = self.source_recovery.as_ref().expect("recovery is required");
+                move_snapshot_to_recovery(source, recovery)?;
+                persist_recovery_receipt(recovery)?;
+                Ok(TransactionExecution { detail: "moved file to private recovery".into(), receipts: vec![recovery.receipt.clone()] })
+            }
+            FileOperationKind::Copy => self.copy_or_overwrite(&cancelled, false),
+            FileOperationKind::Move | FileOperationKind::Rename => self.move_or_rename(&cancelled),
+        }
+    }
+
+    fn copy_or_overwrite<F>(&mut self, cancelled: &F, _move_after: bool) -> Result<TransactionExecution, WorkAssistantError>
+    where F: Fn() -> Result<bool, WorkAssistantError> {
+        let source = self.source.as_mut().expect("source is required");
+        let destination = self.destination.as_ref().expect("destination is required");
+        let staging = stage_source(source, destination)?;
+        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled after staging")); }
+        let mut receipts = Vec::new();
+        if let Some(old) = &self.existing_destination {
+            let recovery = self.destination_recovery.as_ref().expect("overwrite recovery is required");
+            old.verify_snapshot()?;
+            move_snapshot_to_recovery(old, recovery)?;
+            persist_recovery_receipt(recovery)?;
+            receipts.push(recovery.receipt.clone());
+        }
+        if cancelled()? { return Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable; publication was cancelled")); }
+        if let Err(error) = publish_staging(staging, destination) {
+            return if receipts.is_empty() { Err(error) } else { Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable but the replacement was not published")) };
+        }
+        Ok(TransactionExecution { detail: "copied regular file".into(), receipts })
+    }
+
+    fn move_or_rename<F>(&mut self, cancelled: &F) -> Result<TransactionExecution, WorkAssistantError>
+    where F: Fn() -> Result<bool, WorkAssistantError> {
+        let source = self.source.as_mut().expect("source is required");
+        let destination = self.destination.as_ref().expect("destination is required");
+        if self.existing_destination.is_none() {
+            match move_snapshot_to_destination(source, destination) {
+                Ok(()) => return Ok(TransactionExecution { detail: "renamed regular file".into(), receipts: Vec::new() }),
+                Err(error) if is_cross_device(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        // Cross-device moves copy and publish before touching the original.  An overwrite first
+        // secures the old destination in its own recovery vault.
+        let staging = stage_source(source, destination)?;
+        if cancelled()? { return Err(WorkAssistantError::stale_preview("operation was cancelled after staging")); }
+        let mut receipts = Vec::new();
+        if let Some(old) = &self.existing_destination {
+            let recovery = self.destination_recovery.as_ref().expect("overwrite recovery is required");
+            old.verify_snapshot()?;
+            move_snapshot_to_recovery(old, recovery)?;
+            persist_recovery_receipt(recovery)?;
+            receipts.push(recovery.receipt.clone());
+        }
+        if let Err(_) = publish_staging(staging, destination) {
+            return if receipts.is_empty() { Err(WorkAssistantError::stale_preview("the destination changed before publication")) } else { Err(WorkAssistantError::partial_transaction("the old destination is safely recoverable but the moved file was not published")) };
+        }
+        if cancelled()? { return Err(WorkAssistantError::partial_transaction("the new copy was published; the original was not moved to recovery")); }
+        let recovery = self.source_recovery.as_ref().expect("source recovery is required");
+        move_snapshot_to_recovery(source, recovery)?;
+        persist_recovery_receipt(recovery)?;
+        receipts.push(recovery.receipt.clone());
+        Ok(TransactionExecution { detail: "copied and recovered original across devices".into(), receipts })
+    }
+}
+
+struct OpenedDestination {
+    parent: File,
+    leaf: String,
+    #[cfg(windows)]
+    parent_path: PathBuf,
+}
+
+struct StagedFile {
+    file: File,
+    leaf: String,
+}
+
+fn bind_destination(root: &Path, relative: &Path) -> Result<DestinationBinding, WorkAssistantError> {
+    let opened = open_platform_destination(root, relative)?;
+    Ok(DestinationBinding {
+        parent: opened.parent,
+        leaf: opened.leaf,
+        #[cfg(windows)]
+        parent_path: opened.parent_path,
+    })
+}
+
+fn destination_exists(destination: &DestinationBinding) -> Result<bool, WorkAssistantError> {
+    #[cfg(windows)] { windows::destination_exists(&destination.parent, &destination.parent_path, &destination.leaf) }
+    #[cfg(target_os = "linux")] { linux::destination_exists(&destination.parent, &destination.leaf) }
+    #[cfg(target_os = "macos")] { macos::destination_exists(&destination.parent, &destination.leaf) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = destination; Err(WorkAssistantError::blocked("native destination capability is unavailable")) }
+}
+
+fn destination_entry_identity(destination: &DestinationBinding) -> Result<Option<PlatformFileIdentity>, WorkAssistantError> {
+    #[cfg(windows)] { windows::destination_identity(&destination.parent, &destination.parent_path, &destination.leaf) }
+    #[cfg(target_os = "linux")] { linux::destination_identity(&destination.parent, &destination.leaf) }
+    #[cfg(target_os = "macos")] { macos::destination_identity(&destination.parent, &destination.leaf) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = destination; Err(WorkAssistantError::blocked("native destination capability is unavailable")) }
+}
+
+fn reserve_renamed_destination(destination: &mut DestinationBinding) -> Result<(), WorkAssistantError> {
+    let (stem, extension) = split_leaf(&destination.leaf)?;
+    for number in 1..=10_000 {
+        let candidate = match extension { Some(value) => format!("{stem} ({number}).{value}"), None => format!("{stem} ({number})") };
+        #[cfg(windows)]
+        let available = windows::reserve_destination_name(&destination.parent, &destination.parent_path, &candidate)?;
+        #[cfg(target_os = "linux")]
+        let available = linux::reserve_destination_name(&destination.parent, &candidate)?;
+        #[cfg(target_os = "macos")]
+        let available = macos::reserve_destination_name(&destination.parent, &candidate)?;
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        let available = false;
+        if available { destination.leaf = candidate; return Ok(()); }
+    }
+    Err(WorkAssistantError::blocked("could not reserve an available destination name"))
+}
+
+fn split_leaf(value: &str) -> Result<(&str, Option<&str>), WorkAssistantError> {
+    if value.is_empty() || value == "." || value == ".." || value.contains(['/', '\\', '\0']) {
+        return Err(WorkAssistantError::blocked("destination leaf is invalid"));
+    }
+    let path = Path::new(value);
+    let stem = path.file_stem().and_then(|value| value.to_str()).ok_or_else(|| WorkAssistantError::blocked("destination leaf is not valid unicode"))?;
+    Ok((stem, path.extension().and_then(|value| value.to_str())))
+}
+
+fn stage_source(source: &mut SourceSnapshot, destination: &DestinationBinding) -> Result<StagedFile, WorkAssistantError> {
+    source.verify_snapshot()?;
+    source.file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+    #[cfg(windows)] { windows::stage_copy(source.file(), &destination.parent, &destination.parent_path) }
+    #[cfg(target_os = "linux")] { linux::stage_copy(source.file(), &destination.parent) }
+    #[cfg(target_os = "macos")] { macos::stage_copy(source.file(), &destination.parent) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = destination; Err(WorkAssistantError::blocked("native staging is unavailable")) }
+}
+
+fn publish_staging(staged: StagedFile, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
+    #[cfg(windows)] { windows::publish_staging(&staged.file, &destination.parent, &destination.leaf) }
+    #[cfg(target_os = "linux")] { linux::publish_staging(&staged.file, &destination.parent, &staged.leaf, &destination.leaf) }
+    #[cfg(target_os = "macos")] { macos::publish_staging(&staged.file, &destination.parent, &staged.leaf, &destination.leaf) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (staged, destination); Err(WorkAssistantError::blocked("native publication is unavailable")) }
+}
+
+fn move_snapshot_to_destination(source: &SourceSnapshot, destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
+    source.verify_snapshot()?;
+    #[cfg(windows)] { windows::move_snapshot(&source.platform.source, &destination.parent, &destination.leaf) }
+    #[cfg(target_os = "linux")] { linux::move_snapshot(&source.platform.parent, &source.platform.leaf, &destination.parent, &destination.leaf) }
+    #[cfg(target_os = "macos")] { macos::move_snapshot(&source.platform.parent, &source.platform.leaf, &destination.parent, &destination.leaf) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (source, destination); Err(WorkAssistantError::blocked("native rename is unavailable")) }
+}
+
+fn move_snapshot_to_recovery(source: &SourceSnapshot, recovery: &PreparedRecoverySlot) -> Result<(), WorkAssistantError> {
+    source.verify_snapshot()?;
+    #[cfg(windows)] { windows::move_snapshot(&source.platform.source, &recovery.slot, "content") }
+    #[cfg(target_os = "linux")] { linux::move_snapshot(&source.platform.parent, &source.platform.leaf, &recovery.slot, "content") }
+    #[cfg(target_os = "macos")] { macos::move_snapshot(&source.platform.parent, &source.platform.leaf, &recovery.slot, "content") }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = (source, recovery); Err(WorkAssistantError::blocked("native recovery move is unavailable")) }
+}
+
+fn create_directory(destination: &DestinationBinding) -> Result<(), WorkAssistantError> {
+    #[cfg(windows)] { windows::create_directory(&destination.parent, &destination.parent_path, &destination.leaf) }
+    #[cfg(target_os = "linux")] { linux::create_directory(&destination.parent, &destination.leaf) }
+    #[cfg(target_os = "macos")] { macos::create_directory(&destination.parent, &destination.leaf) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = destination; Err(WorkAssistantError::blocked("native directory creation is unavailable")) }
+}
+
+fn persist_recovery_receipt(recovery: &PreparedRecoverySlot) -> Result<(), WorkAssistantError> {
+    let bytes = serde_json::to_vec(recovery.receipt()).map_err(|_| WorkAssistantError::protocol("could not encode recovery receipt"))?;
+    #[cfg(windows)] { windows::write_recovery_receipt(&recovery.slot, &bytes) }
+    #[cfg(target_os = "linux")] { linux::write_recovery_receipt(&recovery.slot, &bytes) }
+    #[cfg(target_os = "macos")] { macos::write_recovery_receipt(&recovery.slot, &bytes) }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))] { let _ = bytes; Err(WorkAssistantError::blocked("native recovery receipts are unavailable")) }
+}
+
+fn is_cross_device(error: &WorkAssistantError) -> bool { error.code == "cross_device" }
 
 fn normalized_relative_path(path: &Path) -> Result<String, WorkAssistantError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
@@ -353,8 +671,62 @@ fn open_platform_source(_: &Path, _: &Path) -> Result<OpenedPlatformSource, Work
 }
 
 #[cfg(windows)]
+fn open_platform_destination(root: &Path, relative: &Path) -> Result<OpenedDestination, WorkAssistantError> {
+    windows::open_destination(root, relative)
+}
+
+#[cfg(target_os = "linux")]
+fn open_platform_destination(root: &Path, relative: &Path) -> Result<OpenedDestination, WorkAssistantError> {
+    linux::open_destination(root, relative)
+}
+
+#[cfg(target_os = "macos")]
+fn open_platform_destination(root: &Path, relative: &Path) -> Result<OpenedDestination, WorkAssistantError> {
+    macos::open_destination(root, relative)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn open_platform_destination(_: &Path, _: &Path) -> Result<OpenedDestination, WorkAssistantError> {
+    Err(WorkAssistantError::blocked("native destination capability is unavailable on this platform"))
+}
+
+#[cfg(windows)]
 fn prepare_platform_recovery_vault(root: &Path, leaf: &str) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
     windows::prepare_recovery_vault(root, leaf)
+}
+
+#[cfg(windows)]
+fn prepare_platform_recovery_vault_for_source(
+    source: &BoundPlatformSource,
+    leaf: &str,
+) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
+    windows::prepare_recovery_vault_at_parent(&source.parent, &source.parent_path, leaf)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_platform_recovery_vault_for_source(
+    source: &BoundPlatformSource,
+    leaf: &str,
+) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
+    linux::prepare_recovery_vault_at_parent(&source.parent, leaf)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_platform_recovery_vault_for_source(
+    source: &BoundPlatformSource,
+    leaf: &str,
+) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
+    macos::prepare_recovery_vault_at_parent(&source.parent, leaf)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn prepare_platform_recovery_vault_for_source(
+    _: &BoundPlatformSource,
+    _: &str,
+) -> Result<PreparedRecoveryHandles, WorkAssistantError> {
+    Err(WorkAssistantError::stale_preview(
+        "a same-device private recovery vault is not available on this platform",
+    ))
 }
 
 #[cfg(target_os = "linux")]

@@ -550,20 +550,6 @@ pub(crate) fn build_batch_preview(
     for operation in &request.operations {
         let source = resolve_operation_source(&policy, &request.root_id, operation)?;
         let destination = resolve_operation_destination(&policy, &request.root_id, operation)?;
-        if operation.kind == FileOperationKind::Trash {
-            return Err(WorkAssistantError::blocked(
-                "trash is unavailable until it supports handle-bound deletion",
-            ));
-        }
-        #[cfg(not(windows))]
-        if matches!(
-            operation.kind,
-            FileOperationKind::Move | FileOperationKind::Rename
-        ) {
-            return Err(WorkAssistantError::blocked(
-                "move and rename are unavailable without a no-replace relative operation",
-            ));
-        }
         digest.update([operation_kind_byte(&operation.kind)]);
         digest.update(operation.source.as_deref().unwrap_or_default().as_bytes());
         digest.update([0]);

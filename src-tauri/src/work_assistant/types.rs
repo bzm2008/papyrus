@@ -168,6 +168,10 @@ pub struct BatchExecutionRequest {
 pub struct BatchItemResult {
     pub index: usize,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recoverable: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -223,6 +227,14 @@ impl WorkAssistantError {
     pub fn stale_preview(message: impl Into<String>) -> Self {
         Self {
             code: "stale_preview".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    pub fn partial_transaction(message: impl Into<String>) -> Self {
+        Self {
+            code: "partial_transaction".into(),
             message: message.into(),
             recoverable: true,
         }
