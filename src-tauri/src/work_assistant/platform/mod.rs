@@ -94,7 +94,6 @@ trait PlatformSource {
 /// revalidate identities before publishing.
 struct BoundPlatformSource {
     root: File,
-    #[cfg(unix)]
     authorized_root_path: PathBuf,
     parent: File,
     source: File,
@@ -285,14 +284,15 @@ pub struct PreparedRecoverySlot {
     root: File,
     vault: File,
     slot: File,
+    // A slot is disposable until it contains recovered data. Once a recovery move succeeds it
+    // must survive every later error so the operation remains recoverable.
+    committed: bool,
     // A recovery slot is a write capability.  POSIX directory descriptors survive renames, so
     // retain the original approved namespace and every identity needed to re-bind it before a
     // vault or receipt mutation.  The retained FDs are never used for POSIX writes directly.
-    #[cfg(unix)]
     binding: RecoveryBinding,
 }
 
-#[cfg(unix)]
 pub(crate) struct RecoveryBinding {
     pub(crate) authorized_root_path: PathBuf,
     pub(crate) root_identity: PlatformFileIdentity,
@@ -311,15 +311,33 @@ impl PreparedRecoverySlot {
     pub(crate) fn vault(&self) -> &File {
         &self.slot
     }
+
+    fn mark_committed(&mut self) {
+        self.committed = true;
+    }
+
+    /// Consume a never-committed slot before attempting cleanup.  In particular Windows source
+    /// parent capabilities intentionally deny DELETE sharing; those capabilities must be gone
+    /// before the cleanup code re-opens the approved namespace.
+    fn cleanup_uncommitted(self) -> Result<(), WorkAssistantError> {
+        if self.committed {
+            return Ok(());
+        }
+        let binding = self.binding;
+        // Drop all original recovery handles before the fresh, identity-checked walk.  They are
+        // capabilities for the prepared transaction, never cleanup parents.
+        drop(self.root);
+        drop(self.vault);
+        drop(self.slot);
+        remove_recovery_slot(&binding)
+    }
 }
 
 pub(crate) struct PreparedRecoveryHandles {
     pub(crate) root: File,
     pub(crate) vault: File,
     pub(crate) slot: File,
-    #[cfg(unix)]
     pub(crate) vault_identity: PlatformFileIdentity,
-    #[cfg(unix)]
     pub(crate) slot_identity: PlatformFileIdentity,
 }
 
@@ -341,7 +359,6 @@ pub fn open_source_snapshot(
         file: opened.file,
         platform: BoundPlatformSource {
             root: opened.root,
-            #[cfg(unix)]
             authorized_root_path: canonical_authorized_root_path(authorized_root)?,
             parent: opened.parent,
             source: opened.source,
@@ -409,7 +426,6 @@ pub(crate) fn prepare_recovery_slot(
     };
     let receipt_bytes = serde_json::to_vec(&receipt)
         .map_err(|_| WorkAssistantError::protocol("could not encode recovery receipt"))?;
-    #[cfg(unix)]
     let slot_leaf = receipt.recovery_leaf.clone();
     let slot = PreparedRecoverySlot {
         receipt,
@@ -417,7 +433,7 @@ pub(crate) fn prepare_recovery_slot(
         root: handles.root,
         vault: handles.vault,
         slot: handles.slot,
-        #[cfg(unix)]
+        committed: false,
         binding: RecoveryBinding {
             authorized_root_path: canonical_authorized_root_path(authorized_root)?,
             root_identity: source.root_identity.clone(),
@@ -467,7 +483,6 @@ pub(crate) fn prepare_recovery_slot_for_source(
     };
     let receipt_bytes = serde_json::to_vec(&receipt)
         .map_err(|_| WorkAssistantError::protocol("could not encode recovery receipt"))?;
-    #[cfg(unix)]
     let slot_leaf = receipt.recovery_leaf.clone();
     let slot = PreparedRecoverySlot {
         receipt,
@@ -475,7 +490,7 @@ pub(crate) fn prepare_recovery_slot_for_source(
         root: handles.root,
         vault: handles.vault,
         slot: handles.slot,
-        #[cfg(unix)]
+        committed: false,
         binding: RecoveryBinding {
             authorized_root_path: source.platform.authorized_root_path.clone(),
             root_identity: source.platform.root_identity.clone(),
@@ -549,6 +564,26 @@ pub(crate) struct PreparedFileTransaction {
     source_recovery: Option<PreparedRecoverySlot>,
     destination_recovery: Option<PreparedRecoverySlot>,
     skip: bool,
+}
+
+impl PreparedFileTransaction {
+    pub(crate) fn cleanup_uncommitted(&mut self) -> Result<(), WorkAssistantError> {
+        // Releasing source/destination capabilities first is required on Windows: their parent
+        // handles deliberately deny DELETE sharing, which is the lock that prevents namespace
+        // swaps during an active transaction.  Cleanup later rebinds from the authorized root.
+        self.source.take();
+        self.destination.take();
+        self.existing_destination.take();
+        let source_recovery = self.source_recovery.take();
+        let destination_recovery = self.destination_recovery.take();
+        let mut first_error = None;
+        for slot in [source_recovery, destination_recovery].into_iter().flatten() {
+            if let Err(error) = slot.cleanup_uncommitted() {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
 }
 
 pub(crate) struct TransactionExecution {
@@ -666,7 +701,7 @@ pub(crate) fn prepare_file_transaction(
 
 impl PreparedFileTransaction {
     pub(crate) fn execute<F>(
-        mut self,
+        &mut self,
         cancelled: F,
     ) -> Result<TransactionExecution, WorkAssistantError>
     where
@@ -705,10 +740,11 @@ impl PreparedFileTransaction {
             }
             FileOperationKind::Trash => {
                 let source = self.source.as_ref().expect("source is required");
-                let recovery = self.source_recovery.as_ref().expect("recovery is required");
+                let recovery = self.source_recovery.as_mut().expect("recovery is required");
                 if let Err(error) = move_snapshot_to_recovery(source, recovery) {
                     return Err(error);
                 }
+                recovery.mark_committed();
                 if let Err(error) = persist_recovery_receipt(recovery) {
                     return Err(WorkAssistantError::partial_transaction(format!(
                         "source moved to private recovery but receipt persistence failed: {}",
@@ -751,10 +787,11 @@ impl PreparedFileTransaction {
         if let Some(old) = &self.existing_destination {
             let recovery = self
                 .destination_recovery
-                .as_ref()
+                .as_mut()
                 .expect("overwrite recovery is required");
             old.verify_snapshot()?;
             move_snapshot_to_recovery(old, recovery)?;
+            recovery.mark_committed();
             if let Err(error) = persist_recovery_receipt(recovery) {
                 return Err(WorkAssistantError::partial_transaction(format!(
                     "old destination is recoverable but its receipt could not be persisted: {}",
@@ -823,10 +860,11 @@ impl PreparedFileTransaction {
         if let Some(old) = &self.existing_destination {
             let recovery = self
                 .destination_recovery
-                .as_ref()
+                .as_mut()
                 .expect("overwrite recovery is required");
             old.verify_snapshot()?;
             move_snapshot_to_recovery(old, recovery)?;
+            recovery.mark_committed();
             if let Err(error) = persist_recovery_receipt(recovery) {
                 return Err(WorkAssistantError::partial_transaction(format!(
                     "old destination is recoverable but its receipt could not be persisted: {}",
@@ -872,9 +910,10 @@ impl PreparedFileTransaction {
         source.verify_content_snapshot()?;
         let recovery = self
             .source_recovery
-            .as_ref()
+            .as_mut()
             .expect("source recovery is required");
         move_snapshot_to_recovery(source, recovery)?;
+        recovery.mark_committed();
         if let Err(error) = persist_recovery_receipt(recovery) {
             return Err(WorkAssistantError::partial_transaction(format!(
                 "the original was moved to private recovery but its receipt could not be persisted: {}",
@@ -1327,6 +1366,28 @@ fn persist_recovery_receipt(recovery: &PreparedRecoverySlot) -> Result<(), WorkA
     }
 }
 
+/// Remove an empty, never-committed slot through freshly verified namespace capabilities. This
+/// deliberately never uses a caller path or a generic filesystem deletion API.
+fn remove_recovery_slot(binding: &RecoveryBinding) -> Result<(), WorkAssistantError> {
+    #[cfg(windows)]
+    {
+        windows::remove_empty_recovery_slot(binding)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::remove_empty_recovery_slot(binding)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::remove_empty_recovery_slot(binding)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        let _ = binding;
+        Err(WorkAssistantError::blocked("native recovery cleanup is unavailable"))
+    }
+}
+
 fn preflight_recovery_receipt(recovery: &PreparedRecoverySlot) -> Result<(), WorkAssistantError> {
     // Do not create a receipt during preparation. Besides leaving orphan metadata for an
     // abandoned approval, that would write through a slot before the execution-time rebind.
@@ -1617,7 +1678,6 @@ fn normalized_relative_path(path: &Path) -> Result<String, WorkAssistantError> {
 /// Keep the physical approved root pathname captured at snapshot time.  POSIX rebinds this
 /// pathname with `O_DIRECTORY|O_NOFOLLOW` before every recovery mutation; comparing its handle
 /// identity then detects a moved or replaced workspace root.
-#[cfg(unix)]
 fn canonical_authorized_root_path(root: &Path) -> Result<PathBuf, WorkAssistantError> {
     std::fs::canonicalize(root).map_err(|error| {
         WorkAssistantError::blocked(format!("could not canonicalize authorized root: {error}"))
@@ -1891,9 +1951,9 @@ mod tests {
         prepare_recovery_slot, validate_recovery_leaf,
     };
     #[cfg(unix)]
-    use super::{
-        move_snapshot_to_recovery, persist_recovery_receipt, prepare_recovery_slot_for_source,
-    };
+    use super::{move_snapshot_to_recovery, persist_recovery_receipt};
+    #[cfg(any(unix, windows))]
+    use super::prepare_recovery_slot_for_source;
     use crate::work_assistant::{ConflictPolicy, FileOperationKind, FileOperationRequest};
     use std::{
         fs,
@@ -2074,6 +2134,29 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn recovery_cleanup_rebind_mismatch_leaves_the_slot_untouched() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("document.txt"), "contents").unwrap();
+        let snapshot = open_source_snapshot(&root, "document.txt").unwrap();
+        let mut slot = prepare_recovery_slot_for_source(&snapshot, "preview-1", 0).unwrap();
+        let slot_path = root
+            .join(".papyrus-recovery")
+            .join(&slot.receipt.recovery_leaf);
+        // This models a namespace replacement detected by the fresh cleanup rebind. The cleanup
+        // path must not delete merely by UUID name when any captured identity disagrees.
+        slot.binding.slot_identity.file_id.push('x');
+        drop(snapshot);
+
+        let error = slot.cleanup_uncommitted().unwrap_err();
+
+        assert_eq!(error.code, "stale_preview");
+        assert!(slot_path.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn recovery_leaf_rejects_model_controlled_separators_and_nuls() {
         for value in ["model/name", "model\\name", "model\0name", ".."] {
@@ -2093,7 +2176,7 @@ mod tests {
             source: Some("source.txt".into()),
             destination: Some("destination.txt".into()),
         };
-        let transaction = prepare_file_transaction(
+        let mut transaction = prepare_file_transaction(
             &root,
             "preview-collision",
             0,
@@ -2131,7 +2214,7 @@ mod tests {
                 source: Some("source.txt".into()),
                 destination: Some("destination.txt".into()),
             };
-            let transaction = prepare_file_transaction(
+            let mut transaction = prepare_file_transaction(
                 &root,
                 &format!("preview-cancel-after-recovery-{label}"),
                 0,
