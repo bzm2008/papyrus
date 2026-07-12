@@ -1,8 +1,8 @@
 use crate::work_assistant::{
     append_audit_entry, platform::prepare_file_transaction, validate_preview_fresh, ApprovalChoice,
     AssistantErrorPayload, AuditEntry, BatchExecutionRequest, BatchExecutionResult, BatchItemResult,
-    BatchPreview, BatchPreviewRequest, FileOperationRequest, StoredApproval, StoredPreview,
-    WorkAssistantError, WorkAssistantState,
+    AssistantToolPreview, FileOperationRequest,
+    NativePreviewRequest, StoredApproval, StoredPreview, WorkAssistantError, WorkAssistantState,
 };
 use tauri::State;
 
@@ -29,9 +29,9 @@ impl Drop for PreparedTransactions {
 #[tauri::command]
 pub fn work_assistant_preview(
     state: State<'_, WorkAssistantState>,
-    request: BatchPreviewRequest,
-) -> Result<BatchPreview, AssistantErrorPayload> {
-    crate::work_assistant::create_batch_preview(&state, request).map_err(Into::into)
+    request: NativePreviewRequest,
+) -> Result<AssistantToolPreview, AssistantErrorPayload> {
+    crate::work_assistant::create_native_file_preview(&state, request).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -52,13 +52,15 @@ pub fn work_assistant_execute(
     approval_token: Option<String>,
 ) -> Result<BatchExecutionResult, AssistantErrorPayload> {
     let token = approval_token
-        .ok_or_else(|| WorkAssistantError::blocked("a native approval token is required"))?;
-    let (preview, _) = crate::work_assistant::validate_preview_by_id_fresh(&state, &preview_id)?;
+        .ok_or_else(|| WorkAssistantError::blocked("a native approval token is required"))
+        .map_err(AssistantErrorPayload::from)?;
+    let (preview, _) = crate::work_assistant::validate_preview_by_id_fresh(&state, &preview_id)
+        .map_err(safe_command_error)?;
     execute_batch_file_operations(
         &state,
         BatchExecutionRequest { preview_id: preview.id, revision: preview.revision, token },
     )
-    .map_err(Into::into)
+    .map_err(safe_command_error)
 }
 
 /// Executes only the opaque, approval-bound preview.  No model path is accepted here: the
@@ -244,6 +246,14 @@ fn safe_error_detail(error: &WorkAssistantError) -> String {
     }
 }
 
+fn safe_command_error(error: WorkAssistantError) -> AssistantErrorPayload {
+    AssistantErrorPayload {
+        code: error.code.clone(),
+        message: safe_error_detail(&error),
+        recoverable: error.recoverable,
+    }
+}
+
 fn validate_approval(state: &WorkAssistantState, execution: &BatchExecutionRequest, required_count: u32) -> Result<StoredApproval, WorkAssistantError> {
     let approval = state.approvals.lock().map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?
         .get(&execution.token).cloned().ok_or_else(|| WorkAssistantError::blocked("a valid native approval token is required"))?;
@@ -303,7 +313,7 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::work_assistant::{approve_batch_preview, create_batch_preview, AuthorizedRoot, AuthorizedRootKind, ConflictPolicy, FileOperationKind, WorkAssistantState};
+    use crate::work_assistant::{approve_batch_preview, create_batch_preview, AuthorizedRoot, AuthorizedRootKind, BatchPreviewRequest, ConflictPolicy, FileOperationKind, WorkAssistantState};
     use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, sync::{Mutex, RwLock}};
     use uuid::Uuid;
 
@@ -344,6 +354,17 @@ mod tests {
         assert_eq!(result.warnings[0].recoverable, Some(true));
         assert!(result.failed.is_empty());
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn command_errors_redact_native_paths() {
+        let payload = safe_command_error(WorkAssistantError::blocked(
+            r"could not open approved file: C:\Users\Administrator\secret.txt",
+        ));
+
+        assert_eq!(payload.code, "blocked");
+        assert_eq!(payload.message, "approved file operation could not be completed");
+        assert!(!payload.message.contains(r"C:\Users\Administrator"));
     }
 
     #[test]

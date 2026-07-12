@@ -165,6 +165,21 @@ pub struct BatchExecutionRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NativeApprovalRequest {
+    pub preview_id: String,
+    pub run_id: String,
+    pub choice: ApprovalChoice,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeExecuteRequest {
+    pub preview_id: String,
+    pub approval_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BatchItemResult {
     pub index: usize,
     pub detail: String,
@@ -355,5 +370,42 @@ mod tests {
         assert_eq!(request_value["toolCallId"], "call-1");
         assert_eq!(preview_value["expiresAt"], 1);
         assert_eq!(preview_value["risk"], "reversible");
+    }
+
+    #[test]
+    fn native_approval_and_execute_contracts_use_camel_case_fields() {
+        let approval = NativeApprovalRequest {
+            preview_id: "preview-1".into(),
+            run_id: "run-1".into(),
+            choice: ApprovalChoice::Once,
+        };
+        let execute = NativeExecuteRequest {
+            preview_id: "preview-1".into(),
+            approval_token: Some("token-1".into()),
+        };
+
+        let approval_value = serde_json::to_value(approval).unwrap();
+        let execute_value = serde_json::to_value(execute).unwrap();
+        assert_eq!(approval_value["previewId"], "preview-1");
+        assert_eq!(approval_value["runId"], "run-1");
+        assert_eq!(approval_value["choice"], "once");
+        assert_eq!(execute_value["previewId"], "preview-1");
+        assert_eq!(execute_value["approvalToken"], "token-1");
+
+        let parsed_approval: NativeApprovalRequest = serde_json::from_value(serde_json::json!({
+            "previewId": "preview-2",
+            "runId": "run-2",
+            "choice": "run",
+        }))
+        .unwrap();
+        let parsed_execute: NativeExecuteRequest = serde_json::from_value(serde_json::json!({
+            "previewId": "preview-2",
+            "approvalToken": null,
+        }))
+        .unwrap();
+        assert_eq!(parsed_approval.preview_id, "preview-2");
+        assert_eq!(parsed_approval.choice, ApprovalChoice::Run);
+        assert_eq!(parsed_execute.preview_id, "preview-2");
+        assert!(parsed_execute.approval_token.is_none());
     }
 }

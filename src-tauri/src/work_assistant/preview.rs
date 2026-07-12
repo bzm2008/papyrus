@@ -260,6 +260,17 @@ mod tests {
         assert!(directory.join("source-directory").is_dir());
         fs::remove_dir_all(directory).unwrap();
     }
+
+    #[test]
+    fn native_preview_errors_redact_adapter_paths() {
+        let error = sanitize_native_preview_error(WorkAssistantError::blocked(
+            r"could not inspect source path: C:\Users\Administrator\secret.txt",
+        ));
+
+        assert_eq!(error.code, "blocked");
+        assert_eq!(error.message, "native file preview is blocked");
+        assert!(!error.message.contains(r"C:\Users\Administrator"));
+    }
 }
 use crate::work_assistant::{
     append_audit_entry, ApprovalChoice, ApprovalGrant, AssistantRiskLevel, AssistantToolPreview,
@@ -333,7 +344,8 @@ pub fn create_native_file_preview(
     request: NativePreviewRequest,
 ) -> Result<AssistantToolPreview, WorkAssistantError> {
     let batch = batch_preview_request_from_native(&request)?;
-    let preview = create_batch_preview_with_tool_call(state, batch, request.tool_call_id)?;
+    let preview = create_batch_preview_with_tool_call(state, batch, request.tool_call_id)
+        .map_err(sanitize_native_preview_error)?;
     let risk = assistant_risk(&preview.risk)?;
     let reversible = risk == AssistantRiskLevel::Reversible;
 
@@ -347,6 +359,20 @@ pub fn create_native_file_preview(
         reversible,
         expires_at: preview.expires,
     })
+}
+
+pub(crate) fn sanitize_native_preview_error(error: WorkAssistantError) -> WorkAssistantError {
+    let message = match error.code.as_str() {
+        "path_outside_workspace" => "requested path is outside an authorized workspace",
+        "blocked" => "native file preview is blocked",
+        "protocol" => "native file preview request is invalid",
+        _ => "could not create native file preview",
+    };
+    WorkAssistantError {
+        code: error.code,
+        message: message.into(),
+        recoverable: error.recoverable,
+    }
 }
 
 fn assistant_risk(risk: &str) -> Result<AssistantRiskLevel, WorkAssistantError> {

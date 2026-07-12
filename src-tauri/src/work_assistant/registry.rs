@@ -46,7 +46,7 @@ fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
             )
         };
 
-    let mut capabilities = vec![
+    let capabilities = vec![
         capability("file_copy", copy_available, unavailable_reason),
         capability(
             "file_create_directory",
@@ -55,42 +55,41 @@ fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
         ),
         capability(
             "file_trash",
-            false,
-            Some("trash is unavailable until it supports handle-bound deletion"),
+            copy_available,
+            if copy_available {
+                Some("moves regular files into Papyrus private same-volume recovery storage")
+            } else {
+                unavailable_reason
+            },
         ),
         capability(
             "file_overwrite",
-            false,
-            Some("overwrite is unavailable until it supports handle-bound trashing"),
+            copy_available,
+            if copy_available {
+                Some("recovers the existing destination before publishing replacement content")
+            } else {
+                unavailable_reason
+            },
+        ),
+        capability(
+            "file_move",
+            copy_available,
+            if copy_available {
+                Some("same-volume uses native no-replace rename; cross-volume uses copy -> publish -> recovery")
+            } else {
+                unavailable_reason
+            },
+        ),
+        capability(
+            "file_rename",
+            copy_available,
+            if copy_available {
+                Some("uses the native no-replace rename primitive; unavailable primitives are rejected safely")
+            } else {
+                unavailable_reason
+            },
         ),
     ];
-
-    #[cfg(windows)]
-    {
-        capabilities.push(capability(
-            "file_move",
-            true,
-            Some("available for same-volume moves; cross-volume moves are blocked"),
-        ));
-        capabilities.push(capability(
-            "file_rename",
-            true,
-            Some("available for same-volume renames"),
-        ));
-    }
-    #[cfg(not(windows))]
-    {
-        capabilities.push(capability(
-            "file_move",
-            false,
-            Some("move is unavailable without a no-replace relative operation"),
-        ));
-        capabilities.push(capability(
-            "file_rename",
-            false,
-            Some("rename is unavailable without a no-replace relative operation"),
-        ));
-    }
 
     capabilities
 }
@@ -313,25 +312,21 @@ mod tests {
 
         assert!(capability("file_copy").available);
         assert!(capability("file_create_directory").available);
-        assert!(!capability("file_trash").available);
-        assert!(!capability("file_overwrite").available);
+        assert!(capability("file_trash").available);
+        assert!(capability("file_overwrite").available);
         assert!(capability("file_trash").reason.is_some());
         assert!(capability("file_overwrite").reason.is_some());
 
-        #[cfg(windows)]
-        {
-            assert!(capability("file_move").available);
-            assert!(capability("file_rename").available);
-            assert!(capability("file_move")
-                .reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("cross-volume")));
-        }
-        #[cfg(not(windows))]
-        {
-            assert!(!capability("file_move").available);
-            assert!(!capability("file_rename").available);
-        }
+        assert!(capability("file_move").available);
+        assert!(capability("file_rename").available);
+        assert!(capability("file_move")
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("cross-volume")));
+        assert!(capability("file_rename")
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no-replace")));
     }
 
     #[test]
