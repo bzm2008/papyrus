@@ -44,6 +44,7 @@ import { getWorkAssistantCapabilities } from './workAssistantClient'
 import { runWorkAssistantAgentLoop } from './workAssistantAgentLoop'
 import { executeAssistantToolCall, dispatchOrderedWorkAssistantEvent } from './workAssistantRuntime'
 import { finishSecretaryRun, startSecretaryRun } from './secretaryRunController'
+import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 import { findSemanticCacheHit, rememberSemanticResult } from './semanticCacheService'
 import {
   getEnabledStudioAgents,
@@ -284,6 +285,10 @@ export async function sendFlowMessage(
       patchContent: result.patchContent,
       summary: summarizeFlowRun(routedExecutionContent, plan, result),
     })
+    const controlledRun = useWorkAssistantStore.getState().runs[run.id]
+    if (controlledRun && controlledRun.status !== 'completed') {
+      dispatchOrderedWorkAssistantEvent({ type: 'run.completed', runId: run.id, response: result.response, at: Date.now() })
+    }
 
     if (activeGoal) {
       await runGoalJudgePass(activeGoal.id, result.response || result.patchContent || '', thinkingEffort)
@@ -296,6 +301,10 @@ export async function sendFlowMessage(
         canCallProvider(provider) ? '秘书长已完成本轮编排' : '使用本地保守编排完成',
       )
   } catch (error) {
+    const controlledRun = useWorkAssistantStore.getState().runs[run.id]
+    if (controlledRun && controlledRun.status !== 'failed' && controlledRun.status !== 'cancelled') {
+      dispatchOrderedWorkAssistantEvent({ type: 'run.failed', runId: run.id, code: 'secretary_run_failed', message: error instanceof Error ? error.message : '秘书运行失败。', recoverable: true, at: Date.now() })
+    }
     failAgentRun(run, error)
     useAppStore.getState().addFlowMessage({
       role: 'assistant',
@@ -669,6 +678,8 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
     })
   }
   const subAgentStepIds = new Map<FlowAgentId, string>()
+  const controlledRunId = useAppStore.getState().activeAgentRunId
+  const hasControlledRun = Boolean(controlledRunId && useWorkAssistantStore.getState().runs[controlledRunId])
   const storyBrief = shouldUseStoryPipeline(prompt, plan.writeIntent)
     ? runStoryPreparation(prompt)
     : undefined
@@ -713,6 +724,15 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
     }
 
     useAppStore.getState().updateAgentTodo(todo.id, { status: 'running' })
+    if (controlledRunId && hasControlledRun) {
+      dispatchOrderedWorkAssistantEvent({
+        type: 'subagent.started',
+        runId: controlledRunId,
+        subagent: { id: `${controlledRunId}:${todo.agentId}`, goal: todo.title, status: 'running', progress: [], startedAt: Date.now() },
+        at: Date.now(),
+      })
+      dispatchOrderedWorkAssistantEvent({ type: 'subagent.progress', runId: controlledRunId, subagentId: `${controlledRunId}:${todo.agentId}`, message: todo.detail || todo.title, at: Date.now() })
+    }
     updateHiveFromTodos(plan, todo.agentId)
     const stepId = subAgentStepIds.get(todo.agentId)
 
@@ -750,6 +770,9 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
         }
       }
       useAppStore.getState().updateAgentTodo(todo.id, { status: 'completed' })
+      if (controlledRunId && hasControlledRun) {
+        dispatchOrderedWorkAssistantEvent({ type: 'subagent.completed', runId: controlledRunId, subagentId: `${controlledRunId}:${todo.agentId}`, summary: output.content.slice(0, 240) || `${todo.title} 已完成`, at: Date.now() })
+      }
       updateHiveFromTodos(plan, todo.agentId)
 
       if (plan.earlyStopReason) {
@@ -772,6 +795,9 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
         detail: error instanceof Error ? error.message : '工作室 Agent 执行失败',
       })
       updateHiveFromTodos(plan, todo.agentId)
+      if (controlledRunId && hasControlledRun) {
+        dispatchOrderedWorkAssistantEvent({ type: 'subagent.completed', runId: controlledRunId, subagentId: `${controlledRunId}:${todo.agentId}`, summary: error instanceof Error ? error.message : '工作室 Agent 执行失败', failed: true, at: Date.now() })
+      }
     }
   }
 

@@ -10,6 +10,7 @@ import {
   RotateCcw,
   Send,
   Sparkles,
+  Square,
   Trash2,
   Undo2,
 } from 'lucide-react'
@@ -20,6 +21,9 @@ import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
+import { cancelSecretaryRun } from '../services/secretaryRunController'
+import { resolveAssistantApproval } from '../services/workAssistantRuntime'
+import type { AssistantApprovalRequest } from '../services/workAssistantProtocol'
 import {
   type AgentStep,
   type AgentTodo,
@@ -44,6 +48,9 @@ import {
 } from './SecretaryWorkbenchPanel'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
+import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
+import { SecretaryToolStep } from './SecretaryToolStep'
+import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type AgentTodos = AgentTodo[]
 type WorkbenchView = 'workbench' | 'manuscript'
@@ -86,6 +93,9 @@ export function FlowWorkspace() {
   const removeQueuedUserInput = useAppStore((state) => state.removeQueuedUserInput)
   const sendQueuedInputAsGuidance = useAppStore((state) => state.sendQueuedInputAsGuidance)
   const activeSecretaryGoal = useAppStore((state) => state.activeSecretaryGoal)
+  const activeWorkAssistantRunId = useWorkAssistantStore((state) => state.activeRunId)
+  const activeWorkAssistantRun = useWorkAssistantStore((state) => activeWorkAssistantRunId ? state.runs[activeWorkAssistantRunId] : undefined)
+  const selectWorkAssistantTool = useWorkAssistantStore((state) => state.selectToolCall)
   const updateSecretaryGoal = useAppStore((state) => state.updateSecretaryGoal)
   const clearSecretaryGoal = useAppStore((state) => state.clearSecretaryGoal)
   const goalCheckpoints = useAppStore((state) => state.goalCheckpoints)
@@ -483,6 +493,18 @@ export function FlowWorkspace() {
                 {shouldShowPendingThinking ? (
                   <ThinkingBubble key="thinking" todos={agentTodos} steps={agentSteps} runState={llmRunState} />
                 ) : null}
+                {activeWorkAssistantRun && ['running', 'awaiting_approval', 'completed', 'failed', 'cancelled'].includes(activeWorkAssistantRun.status)
+                  ? Object.values(activeWorkAssistantRun.toolCalls).map((toolCall) => (
+                      <SecretaryToolStep
+                        key={toolCall.id}
+                        toolCall={toolCall}
+                        approval={toolCall.status === 'awaiting_approval' ? toolCall.preview as AssistantApprovalRequest : undefined}
+                        onApprove={(choice) => toolCall.preview && resolveAssistantApproval(toolCall.preview.id, choice)}
+                        onSelect={() => selectWorkAssistantTool(toolCall.id)}
+                        onRetry={toolCall.result?.recoverable ? () => setPrompt(toolCall.result?.errorCode === 'stale_preview' ? '请根据当前文件状态重新生成预览' : `请重试：${toolCall.intent}`) : undefined}
+                      />
+                    ))
+                  : null}
               </AnimatePresence>
             </div>
           </div>
@@ -513,6 +535,7 @@ export function FlowWorkspace() {
               onGuide={(id) => sendQueuedInputAsGuidance(id)}
             />
           ) : null}
+          <SecretaryRunStatusStack run={activeWorkAssistantRun} todos={agentTodos} queuedCount={queuedUserInputs.filter((input) => input.status === 'queued').length} />
           <form onSubmit={submitFlowPrompt} className="papyrus-command-bar mx-auto max-w-[920px] rounded-xl p-2">
             <div className="mb-1.5 flex flex-wrap items-center gap-1.5 px-1">
               <ModelSelector compact />
@@ -550,6 +573,17 @@ export function FlowWorkspace() {
               >
                 <Send size={15} />
               </button>
+              {activeWorkAssistantRun && (activeWorkAssistantRun.status === 'running' || activeWorkAssistantRun.status === 'awaiting_approval') ? (
+                <button
+                  type="button"
+                  title="停止电脑助手"
+                  aria-label="停止电脑助手"
+                  onClick={cancelSecretaryRun}
+                  className="papyrus-control grid size-9 shrink-0 place-items-center rounded-lg text-[#8b4138]"
+                >
+                  <Square size={14} fill="currentColor" />
+                </button>
+              ) : null}
             </div>
           </form>
         </div>

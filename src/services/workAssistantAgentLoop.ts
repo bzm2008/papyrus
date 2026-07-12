@@ -85,6 +85,7 @@ export async function runWorkAssistantAgentLoop(input: WorkAssistantAgentLoopInp
       if (decision.kind === 'final') {
         const receipts = toolReceipt(results)
         let response = decision.response
+        if (input.collectionOnly) return { response, toolResults: results }
         if (!input.collectionOnly && input.finalStream) {
           let streamed = ''
           response = await input.finalStream(decision.response, receipts, (token) => {

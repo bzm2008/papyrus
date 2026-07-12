@@ -63,4 +63,13 @@ describe('runWorkAssistantAgentLoop', () => {
     expect(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join('')).toBe('已整理 12 个文件。')
     expect(result.response).toBe('已整理 12 个文件。')
   })
+
+  it('keeps a mixed collection run open for the writing pipeline', async () => {
+    const events: Array<{ type: string }> = []
+    const result = await runWorkAssistantAgentLoop({
+      runId: 'r1', prompt: '扫描资料并写报告', toolNames: [], modelCall: async () => finalDecision('资料收集完毕'), executeTool: vi.fn(), collectionOnly: true, emit: (event) => events.push(event),
+    })
+    expect(result.response).toBe('资料收集完毕')
+    expect(events.map((event) => event.type)).toEqual(['run.started'])
+  })
 })
