@@ -169,6 +169,34 @@ pub(crate) fn write_recovery_receipt(slot: &File, receipt: &[u8]) -> Result<(), 
     file.sync_all().map_err(blocked_io("could not sync recovery receipt"))
 }
 
+/// Proves that this held recovery slot can create, flush, close, and remove a receipt-sized
+/// child before a transaction mutates either its source or destination. Every child open is
+/// relative to the retained slot handle, so this check does not introduce path or reparse walks.
+pub(crate) fn preflight_recovery_receipt(slot: &File) -> Result<(), WorkAssistantError> {
+    let probe_leaf = uuid::Uuid::new_v4().to_string();
+    let outcome = (|| {
+        let mut probe = create_child_file_relative(slot, &probe_leaf)?;
+        use std::io::Write;
+        probe
+            .write_all(b"papyrus-recovery-probe")
+            .map_err(blocked_io("could not write recovery receipt probe"))?;
+        probe
+            .sync_all()
+            .map_err(blocked_io("could not sync recovery receipt probe"))?;
+        drop(probe);
+        Ok(())
+    })();
+
+    // Cleanup is required even if writing or syncing failed. A failed cleanup makes this
+    // preflight fail; otherwise an abandoned probe could be mistaken for receipt metadata.
+    let cleanup = delete_child_file_relative(slot, &probe_leaf);
+    match (outcome, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(recovery_unavailable(error)),
+        (_, Err(error)) => Err(recovery_unavailable(error)),
+    }
+}
+
 pub(crate) fn remove_staging(staging: &File) -> Result<(), WorkAssistantError> {
     use std::os::windows::io::AsRawHandle;
     let mut info = NtFileDispositionInformation { delete_file: 1 };
@@ -549,9 +577,53 @@ struct NtFileDispositionInformation {
 }
 
 const NT_FILE_DISPOSITION_INFORMATION: u32 = 13;
+const FILE_CREATE: u32 = 2;
+const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+const FILE_OPEN_REPARSE_POINT_NATIVE: u32 = 0x0020_0000;
+const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+
+#[repr(C)]
+struct NtUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct NtObjectAttributes {
+    length: u32,
+    root_directory: *mut std::ffi::c_void,
+    object_name: *mut NtUnicodeString,
+    attributes: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    security_quality_of_service: *mut std::ffi::c_void,
+}
 
 #[link(name = "ntdll")]
 extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut *mut std::ffi::c_void,
+        desired_access: u32,
+        object_attributes: *mut NtObjectAttributes,
+        io_status_block: *mut NtIoStatusBlock,
+        allocation_size: *mut i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *mut std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+    fn NtOpenFile(
+        file_handle: *mut *mut std::ffi::c_void,
+        desired_access: u32,
+        object_attributes: *mut NtObjectAttributes,
+        io_status_block: *mut NtIoStatusBlock,
+        share_access: u32,
+        open_options: u32,
+    ) -> i32;
     fn NtSetInformationFile(
         file_handle: *mut std::ffi::c_void,
         io_status_block: *mut NtIoStatusBlock,
@@ -559,6 +631,96 @@ extern "system" {
         length: u32,
         file_information_class: u32,
     ) -> i32;
+}
+
+fn relative_object_attributes(
+    parent: &File,
+    leaf: &str,
+) -> Result<(Vec<u16>, NtUnicodeString, NtObjectAttributes), WorkAssistantError> {
+    use std::os::windows::io::AsRawHandle;
+
+    if uuid::Uuid::parse_str(leaf).is_err() {
+        return Err(WorkAssistantError::blocked("recovery probe leaf is invalid"));
+    }
+    let mut name = std::ffi::OsStr::new(leaf).encode_wide().collect::<Vec<_>>();
+    let byte_len = name
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| WorkAssistantError::blocked("recovery probe leaf is too long"))?;
+    // Native counted strings do not include a terminator in their length.
+    name.push(0);
+    let mut object_name = NtUnicodeString {
+        length: byte_len,
+        maximum_length: byte_len,
+        buffer: name.as_mut_ptr(),
+    };
+    let attributes = NtObjectAttributes {
+        length: std::mem::size_of::<NtObjectAttributes>() as u32,
+        root_directory: parent.as_raw_handle(),
+        object_name: &mut object_name,
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor: ptr::null_mut(),
+        security_quality_of_service: ptr::null_mut(),
+    };
+    Ok((name, object_name, attributes))
+}
+
+fn create_child_file_relative(parent: &File, leaf: &str) -> Result<File, WorkAssistantError> {
+    let (_name, mut object_name, mut attributes) = relative_object_attributes(parent, leaf)?;
+    attributes.object_name = &mut object_name;
+    let mut handle = ptr::null_mut();
+    let mut io_status = NtIoStatusBlock { status: 0, information: 0 };
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
+            &mut attributes,
+            &mut io_status,
+            ptr::null_mut(),
+            FILE_ATTRIBUTE_NORMAL,
+            0,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT_NATIVE,
+            ptr::null_mut(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(WorkAssistantError::blocked(format!(
+            "could not create recovery receipt probe (NTSTATUS 0x{:08X})",
+            status as u32
+        )));
+    }
+    let file = unsafe { File::from_raw_handle(handle) };
+    reject_reparse(&file, "recovery receipt probe")?;
+    Ok(file)
+}
+
+fn delete_child_file_relative(parent: &File, leaf: &str) -> Result<(), WorkAssistantError> {
+    let (_name, mut object_name, mut attributes) = relative_object_attributes(parent, leaf)?;
+    attributes.object_name = &mut object_name;
+    let mut handle = ptr::null_mut();
+    let mut io_status = NtIoStatusBlock { status: 0, information: 0 };
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            DELETE | GENERIC_READ | SYNCHRONIZE,
+            &mut attributes,
+            &mut io_status,
+            0,
+            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT_NATIVE,
+        )
+    };
+    if status < 0 {
+        return Err(WorkAssistantError::blocked(format!(
+            "could not reopen recovery receipt probe for cleanup (NTSTATUS 0x{:08X})",
+            status as u32
+        )));
+    }
+    let probe = unsafe { File::from_raw_handle(handle) };
+    reject_reparse(&probe, "recovery receipt probe")?;
+    remove_staging(&probe)
 }
 
 fn create_staging_file(path: &Path) -> Result<File, WorkAssistantError> {
@@ -633,4 +795,40 @@ fn recovery_unavailable(error: WorkAssistantError) -> WorkAssistantError {
 
 fn blocked_io(context: &'static str) -> impl FnOnce(std::io::Error) -> WorkAssistantError {
     move |error| WorkAssistantError::blocked(format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{open_read_verified_directory, preflight_recovery_receipt};
+    use std::{fs, path::PathBuf};
+
+    fn test_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("papyrus-recovery-probe-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn recovery_receipt_preflight_removes_its_opaque_probe() {
+        let root = test_dir();
+        fs::create_dir_all(&root).unwrap();
+        let slot = open_read_verified_directory(&root).unwrap();
+
+        preflight_recovery_receipt(&slot).unwrap();
+
+        drop(slot);
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_receipt_preflight_fails_closed_for_a_non_directory_slot() {
+        let path = test_dir();
+        let slot = fs::File::create(&path).unwrap();
+
+        let error = preflight_recovery_receipt(&slot).unwrap_err();
+
+        assert_eq!(error.code, "recovery_unavailable");
+        assert!(error.recoverable);
+        drop(slot);
+        fs::remove_file(path).unwrap();
+    }
 }

@@ -1246,8 +1246,7 @@ fn preflight_recovery_receipt(recovery: &PreparedRecoverySlot) -> Result<(), Wor
     // abandoned approval, that would write through a slot before the execution-time rebind.
     #[cfg(windows)]
     {
-        let _ = recovery;
-        Ok(())
+        windows::preflight_recovery_receipt(&recovery.slot)
     }
     #[cfg(target_os = "linux")]
     {
