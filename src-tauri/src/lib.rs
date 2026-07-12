@@ -575,6 +575,7 @@ mod security_tests {
         "work_assistant::work_assistant_validate_application_selection",
         "work_assistant::work_assistant_list_applications",
         "work_assistant::work_assistant_register_application_from_picker",
+        "work_assistant::work_assistant_remove_application",
         "work_assistant::work_assistant_launch_application",
         "work_assistant::work_assistant_cancel_run",
         "work_assistant::work_assistant_preview",

@@ -17,7 +17,7 @@
     "test:wps": "vitest run --config apps/wps-word-addin/vite.config.ts",
     "test:unit": "vitest run --config vitest.config.ts",
     "test:unit:watch": "vitest --config vitest.config.ts",
-    "test:desktop": "npm run test:unit && cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:desktop": "npm run test:unit && node scripts/run-cargo-desktop.mjs test --locked",
     "check:desktop": "npm run lint && npm run test:desktop && npm run build && npm run tauri:check:portable",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
