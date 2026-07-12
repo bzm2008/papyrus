@@ -36,7 +36,7 @@ fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
     };
 
     let (copy_available, create_directory_available, unavailable_reason) =
-        if cfg!(any(unix, windows)) {
+        if cfg!(any(windows, target_os = "linux", target_os = "macos")) {
             (true, true, None)
         } else {
             (
@@ -75,7 +75,7 @@ fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
             "file_move",
             copy_available,
             if copy_available {
-                Some("same-volume uses native no-replace rename; cross-volume uses copy -> publish -> recovery")
+                Some("same-volume uses native no-replace rename; cross-volume uses copy -> publish -> recovery; unavailable kernel primitives fail closed")
             } else {
                 unavailable_reason
             },
@@ -84,7 +84,7 @@ fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
             "file_rename",
             copy_available,
             if copy_available {
-                Some("uses the native no-replace rename primitive; unavailable primitives are rejected safely")
+                Some("uses the native no-replace rename primitive; unavailable kernel primitives fail closed")
             } else {
                 unavailable_reason
             },
@@ -327,6 +327,14 @@ mod tests {
             .reason
             .as_deref()
             .is_some_and(|reason| reason.contains("no-replace")));
+        assert!(capability("file_move")
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("fail closed")));
+        assert!(capability("file_rename")
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("fail closed")));
     }
 
     #[test]

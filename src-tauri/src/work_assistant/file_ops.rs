@@ -368,6 +368,24 @@ mod tests {
     }
 
     #[test]
+    fn command_error_summaries_preserve_recovery_codes_and_flags() {
+        for (code, message) in [
+            ("stale_preview", "preview is no longer current; create a new preview"),
+            ("partial_transaction", "a recoverable transaction step needs attention"),
+            ("cancelled", "operation cancelled"),
+        ] {
+            let payload = safe_command_error(WorkAssistantError {
+                code: code.into(),
+                message: "adapter detail: C:\\Users\\Administrator\\secret.txt".into(),
+                recoverable: true,
+            });
+            assert_eq!(payload.code, code);
+            assert_eq!(payload.message, message);
+            assert!(payload.recoverable);
+        }
+    }
+
+    #[test]
     fn overwrite_recovers_old_destination_before_publishing_new_content() {
         let path = directory(); fs::create_dir_all(&path).unwrap(); fs::write(path.join("source.txt"), "new").unwrap(); fs::write(path.join("destination.txt"), "old").unwrap();
         let result = run(&state(&path), vec![operation(FileOperationKind::Copy, Some("source.txt"), Some("destination.txt"))], ConflictPolicy::Overwrite);
