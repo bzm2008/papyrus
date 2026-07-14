@@ -1,5 +1,5 @@
 export type SecretaryTaskComplexity = 'simple' | 'standard' | 'complex' | 'goal'
-export type SecretaryTaskDomain = 'writing' | 'work_assistant' | 'mixed'
+export type SecretaryTaskDomain = 'writing' | 'work_assistant' | 'browser' | 'mixed'
 
 export type SecretaryTaskClassification = {
   complexity: SecretaryTaskComplexity
@@ -14,12 +14,20 @@ export type SecretaryTaskClassification = {
 }
 
 const workAssistantPattern = /(?:文件|文件夹|目录|下载|桌面|磁盘|内存|CPU|应用|软件|打开网址|打开链接|定位文件|扫描|整理资料|归档|移动|重命名|复制|删除|电脑状态|downloads?|folders?|files?|desktop|disk|memory|scan|open\s+(?:app|url|file)|rename|move|organize)/i
-const writingDomainPattern = /(?:写|撰写|起草|文章|报告|总结|润色|改写|小说|章节|文案|正文|write|draft|article|report|rewrite)/i
+const browserPattern = /(?:网页|网站|浏览器|标签页|链接内容|页面|表单|字段|点击|填写|下载网页|提交表单|web|website|browser|tab|page|form|field|click|fill|submit|download)/i
+const writingDomainPattern = /(?:写作|撰写|编写|续写|写(?:一|篇|个|份|封|段|出|作|好|成|报告|文章|文案|小说|总结)|起草|文章|报告|总结|润色|改写|小说|章节|文案|正文|write|draft|article|report|rewrite)/i
 
 function inferDomain(text: string): SecretaryTaskDomain {
   const work = workAssistantPattern.test(text)
+  const browser = browserPattern.test(text)
   const writing = writingDomainPattern.test(text)
-  return work && writing ? 'mixed' : work ? 'work_assistant' : 'writing'
+  if ((work || browser) && writing) return 'mixed'
+  // Browser work takes precedence over the broad local-work patterns. For
+  // example, "打开链接并填写表单" must expose the paired-tab tools instead
+  // of being treated as a desktop URL-open request.
+  if (browser) return 'browser'
+  if (work) return 'work_assistant'
+  return 'writing'
 }
 
 const robustLongformScalePattern =

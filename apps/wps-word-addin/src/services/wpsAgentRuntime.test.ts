@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as unifiedAgent from './wpsUnifiedAgent'
 import * as documentBridge from './wpsDocumentBridge'
-import { classifyWpsAgentError, readSseResponse } from './wpsAgentRuntime'
+import { classifyWpsAgentError, readSseResponse, shouldRefreshWpsQuotaAfterError } from './wpsAgentRuntime'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 type RuntimeExports = {
   parseSseChunks?: (chunks: string[]) => string
@@ -49,6 +54,75 @@ describe('WPS agent streaming protocol', () => {
     expect(classifyWpsAgentError(new Error('HTTP 401')).kind).toBe('authentication')
     expect(classifyWpsAgentError(new Error('request timeout')).kind).toBe('timeout')
     expect(classifyWpsAgentError(new DOMException('Aborted', 'AbortError')).kind).toBe('cancelled')
+    expect(
+      classifyWpsAgentError(Object.assign(new Error('当前套餐不可用该模型'), { code: 'plan_model_forbidden' })).kind,
+    ).toBe('plan_forbidden')
+  })
+
+  it('refreshes quota after non-cancelled model errors but not auth or cancellation', () => {
+    expect(shouldRefreshWpsQuotaAfterError(new Error('HTTP 402'))).toBe(true)
+    expect(shouldRefreshWpsQuotaAfterError(new Error('HTTP 503'))).toBe(true)
+    expect(shouldRefreshWpsQuotaAfterError(new DOMException('Aborted', 'AbortError'))).toBe(false)
+    expect(shouldRefreshWpsQuotaAfterError(Object.assign(new Error('JWT 失效'), { status: 401 }))).toBe(false)
+  })
+
+  it('preserves gateway error code, status, and retryability', () => {
+    const unauthorized = classifyWpsAgentError(
+      Object.assign(new Error('JWT 失效'), { code: 'unauthorized', status: 401, retryable: false }),
+    )
+    expect(unauthorized).toMatchObject({
+      kind: 'authentication',
+      code: 'unauthorized',
+      status: 401,
+      retryable: false,
+      recoverable: false,
+    })
+
+    const forbidden = classifyWpsAgentError(
+      Object.assign(new Error('当前套餐不可用该模型'), { code: 'plan_model_forbidden', status: 403 }),
+    )
+    expect(forbidden).toMatchObject({
+      kind: 'plan_forbidden',
+      code: 'plan_model_forbidden',
+      status: 403,
+      retryable: false,
+    })
+  })
+
+  it('keeps structured auth errors when a streaming request fails before its first token', async () => {
+    const fetchMock = vi.fn()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: 'agnes-2.0-flash', plan_available: true }] }),
+    })
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: { type: 'unauthorized', message: 'JWT 失效' } }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('window', {
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+    })
+
+    await expect(
+      unifiedAgent.callScallion(
+        'stream-auth-test-token',
+        'agnes-2.0-flash',
+        [{ role: 'user', content: '测试' }],
+        0.2,
+        128,
+        { stream: true },
+      ),
+    ).rejects.toMatchObject({
+      name: 'WpsAgentError',
+      kind: 'authentication',
+      code: 'unauthorized',
+      status: 401,
+      retryable: false,
+    })
   })
 
   it('rejects a truncated SSE response after partial content', async () => {

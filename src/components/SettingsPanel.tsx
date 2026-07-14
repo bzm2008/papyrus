@@ -12,6 +12,7 @@ import {
   Server,
   SlidersHorizontal,
   TestTube2,
+  TriangleAlert,
   Trash2,
   UserRound,
   X,
@@ -26,12 +27,14 @@ import { acceptTowriteSuggestion, rejectTowriteSuggestion, syncTowriteToMemory }
 import { modelTierDescriptions, refreshLocalModelTierAssessments } from '../services/modelGovernanceService'
 import {
   customContextTiers,
+  getEffectiveContextLimit,
   isProviderValidated,
   providerValidationSignature,
 } from '../services/modelCatalog'
 import { checkAndDownloadUpdate, relaunchToInstallUpdate } from '../services/updater'
 import { logoutScallion, startScallionLogin } from '../services/scallionAuth'
-import { refreshScallionQuota } from '../services/scallionAccountService'
+import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import {
   providerOrder,
@@ -42,6 +45,7 @@ import {
   type McpServerConfig,
   type McpServerTransport,
   type ProviderId,
+  type ScallionSyncChannelState,
 } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { RemoteRelaySettings } from './RemoteRelaySettings'
@@ -77,6 +81,9 @@ export function SettingsPanel() {
   const updateVersion = useAppStore((state) => state.updateVersion)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionModels = useAppStore((state) => state.scallionModels)
+  const scallionSync = useAppStore((state) => state.scallionSync)
+  const scallionToken = useAppStore((state) => state.scallionToken)
   const authStatus = useAppStore((state) => state.authStatus)
   const authUserCode = useAppStore((state) => state.authUserCode)
   const cloudProvider = providerConfigs.qwen36
@@ -84,6 +91,7 @@ export function SettingsPanel() {
   const vendorProviders = providerOrder
     .map((providerId) => providerConfigs[providerId])
     .filter((provider) => provider.type === 'vendor_key')
+  const hasScallionSession = Boolean(scallionToken || scallionUser || scallionQuota)
 
   const validateProvider = async (providerId: ProviderId) => {
     const provider = useAppStore.getState().providerConfigs[providerId]
@@ -194,7 +202,7 @@ export function SettingsPanel() {
                         通过主站授权登录 Papyrus，用于内置模型、会员状态和后续同步。
                       </div>
                     </div>
-                    {scallionUser ? (
+                    {hasScallionSession ? (
                       <button
                         type="button"
                         onClick={() => logoutScallion()}
@@ -206,18 +214,24 @@ export function SettingsPanel() {
                     ) : null}
                   </div>
 
-                  {scallionUser ? (
+                  {hasScallionSession ? (
                     <div className="grid gap-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3 text-sm text-[#2f2b22]">
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div>
-                          <div className="font-medium">{scallionUser.username}</div>
+                          <div className="font-medium">{scallionUser?.username ?? 'Scallion 用户'}</div>
                           <div className="mt-1 text-xs text-[#8f897a]">
-                            {scallionQuota?.isMember || scallionUser.is_member ? '会员账号' : '普通账号'}
+                            {scallionQuota?.planName ||
+                              (scallionQuota?.planKey ? formatScallionPlanName(scallionQuota.planKey) : undefined) ||
+                              (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined) ||
+                              (scallionQuota?.isMember || scallionUser?.is_member ? '会员账号' : '普通账号')}
+                            {scallionQuota?.planExpiresAt
+                              ? ` · 到期 ${formatQuotaExpiry(scallionQuota.planExpiresAt)}`
+                              : ''}
                           </div>
                         </div>
                         <button
                           type="button"
-                          onClick={() => void refreshScallionQuota()}
+                          onClick={() => void refreshScallionRuntimeMetadata()}
                           className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[#e8ddc7] bg-[#fffefa] px-2 text-xs text-[#6f7168] transition hover:text-[#171714]"
                         >
                           <RotateCcw size={12} />
@@ -227,16 +241,39 @@ export function SettingsPanel() {
                       <div className="grid gap-2 rounded-lg bg-[#fffefa] p-3">
                         <div className="text-xs text-[#8f897a]">剩余内置模型额度</div>
                         <div className="text-xl font-semibold tabular-nums text-[#20201d]">
-                          {scallionQuota?.remaining ?? scallionUser.points ?? scallionUser.balance ?? 0}
-                          <span className="ml-1 text-xs font-normal text-[#8f897a]">
-                            {scallionQuota?.unit ?? '积分'}
-                          </span>
+                          {scallionQuota
+                            ? scallionQuota.pointsBalance ??
+                              scallionQuota.remaining ??
+                              scallionUser?.points ??
+                              scallionUser?.balance ??
+                              0
+                            : scallionSync.quota.status === 'error'
+                              ? '同步失败'
+                              : '同步中'}
+                          {scallionQuota ? (
+                            <span className="ml-1 text-xs font-normal text-[#8f897a]">
+                              {scallionQuota.unit ?? '积分'}
+                            </span>
+                          ) : null}
                         </div>
                         {scallionQuota?.total ? (
                           <div className="text-xs text-[#8f897a]">
                             总额度 {scallionQuota.total} {scallionQuota.unit}
                           </div>
                         ) : null}
+                        <div className="text-xs text-[#8f897a]">
+                          实时余额以主站 points_balance 为准
+                          {scallionSync.quota.status === 'syncing'
+                            ? ' · 正在更新'
+                            : scallionSync.quota.status === 'stale'
+                              ? ' · 最近同步失败，当前为上次成功值'
+                              : scallionSync.quota.status === 'error'
+                                ? ` · ${scallionSync.quota.error || '暂时无法同步'}`
+                                : ''}
+                          {scallionQuota?.updatedAt
+                            ? ` · 更新于 ${new Date(scallionQuota.updatedAt).toLocaleTimeString('zh-CN')}`
+                            : ''}
+                        </div>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <a
@@ -303,8 +340,15 @@ export function SettingsPanel() {
                     <InfoRow label="显示名称" value={cloudProvider.label} />
                     <InfoRow label="代理入口" value={cloudProvider.baseUrl} />
                     <InfoRow label="实际模型" value={cloudProvider.modelName} />
-                    <InfoRow label="上下文" value="128K" />
+                    <InfoRow label="上下文" value={contextDisplay(getEffectiveContextLimit(cloudProvider))} />
                   </div>
+                  <ScallionModelDirectory
+                    models={scallionModels}
+                    activeModelId={cloudProvider.modelName}
+                    hasToken={Boolean(scallionToken)}
+                    sync={scallionSync.models}
+                    onRefresh={() => void refreshScallionRuntimeMetadata()}
+                  />
                 </section>
 
                 <section className={`rounded-xl border border-[#e8ddc7] bg-[#fffdf7] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.05)] ${activeSection === 'updates' ? '' : 'hidden'}`}>
@@ -477,6 +521,98 @@ export function SettingsPanel() {
         </>
       ) : null}
     </AnimatePresence>
+  )
+}
+
+function ScallionModelDirectory({
+  models,
+  activeModelId,
+  hasToken,
+  sync,
+  onRefresh,
+}: {
+  models: ReturnType<typeof useAppStore.getState>['scallionModels']
+  activeModelId: string
+  hasToken: boolean
+  sync: ScallionSyncChannelState
+  onRefresh: () => void
+}) {
+  const latestSync = models.reduce<number | undefined>(
+    (latest, model) => (latest === undefined || model.updatedAt > latest ? model.updatedAt : latest),
+    undefined,
+  )
+
+  return (
+    <section className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-3">
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-[#2f2b22]">完整模型目录</div>
+          <div className="mt-1 text-xs leading-5 text-[#8f897a]">
+            套餐外模型仍会展示，但不能调用；只有标记为可用的模型会进入请求。
+            {sync.status === 'syncing' ? ' 正在同步目录。' : ''}
+            {sync.status === 'stale' ? ' 最近同步失败，当前目录可能已过期。' : ''}
+            {sync.status === 'error' ? ` ${sync.error || '目录同步失败。'}` : ''}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={!hasToken}
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[#e8ddc7] bg-[#fffdf7] px-2.5 text-xs text-[#6f7168] transition hover:text-[#171714] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <RotateCcw size={12} />
+          刷新目录
+        </button>
+      </div>
+
+      {!hasToken ? (
+        <div className="rounded-md border border-dashed border-[#e8ddc7] px-3 py-3 text-xs leading-5 text-[#8f897a]">
+          登录 Scallion 后同步套餐权限和完整模型目录。
+        </div>
+      ) : models.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[#e8ddc7] px-3 py-3 text-xs leading-5 text-[#8f897a]">
+          暂未读取到模型目录，请刷新后重试。
+        </div>
+      ) : (
+        <div className="max-h-80 divide-y divide-[#f0e8da] overflow-y-auto rounded-md border border-[#f0e8da]">
+          {models.map((model) => {
+            const access = getScallionModelAccess(model)
+            const active = model.id === activeModelId || model.modelName === activeModelId
+
+            return (
+              <div key={model.id} className="flex items-start justify-between gap-3 px-3 py-2.5">
+                <div className="min-w-0">
+                  <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-[#2f2b22]">
+                    {access.usable ? <Check size={13} className="shrink-0 text-[#416746]" /> : <TriangleAlert size={13} className="shrink-0 text-[#b7791f]" />}
+                    <span className="truncate">{model.label}</span>
+                    {active ? <span className="shrink-0 text-[10px] text-[#416746]">当前</span> : null}
+                  </div>
+                  <div className="mt-1 truncate text-[11px] text-[#8f897a]">
+                    {model.id} · {contextDisplay(model.contextWindowTokens ?? 0)}
+                    {model.callPrice !== undefined ? ` · ${model.callPrice} 积分/次` : ''}
+                  </div>
+                </div>
+                <div className="flex max-w-[48%] shrink-0 flex-col items-end gap-0.5 text-right">
+                  <span
+                    className={`text-[11px] font-medium ${
+                      access.status === 'available' ? 'text-[#416746]' : 'text-[#9a4338]'
+                    }`}
+                  >
+                    {access.label}
+                  </span>
+                  <span className="text-[10px] leading-4 text-[#8f897a]">{access.detail}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-[#8f897a]">
+        <span>{hasToken ? `共 ${models.length} 个模型` : '目录未同步'}</span>
+        <span>{latestSync ? `同步于 ${formatSyncTime(latestSync)}` : '等待同步'}</span>
+      </div>
+    </section>
   )
 }
 
@@ -723,9 +859,7 @@ function ProviderUseButton({ providerId }: { providerId: ProviderId }) {
   const activeProviderId = useAppStore((state) => state.activeProviderId)
   const setActiveProviderId = useAppStore((state) => state.setActiveProviderId)
   const provider = useAppStore((state) => state.providerConfigs[providerId])
-  const canUse =
-    provider.type === 'scallion_proxy' ||
-    (canCallProvider(provider) && isProviderValidated(provider))
+  const canUse = canCallProvider(provider) && isProviderValidated(provider)
   const active = activeProviderId === providerId
 
   return (
@@ -742,6 +876,24 @@ function ProviderUseButton({ providerId }: { providerId: ProviderId }) {
       {active ? '使用中' : '使用'}
     </button>
   )
+}
+
+function formatQuotaExpiry(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('zh-CN')
+}
+
+function formatSyncTime(value: number) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleTimeString('zh-CN')
+}
+
+function contextDisplay(tokens: number) {
+  if (!tokens || tokens <= 0) return '未知'
+  if (tokens >= 1048576) return '1M'
+  if (tokens >= 262144) return '256K'
+  if (tokens >= 131072) return '128K'
+  return `${Math.round(tokens / 1024)}K`
 }
 
 function ContextTierButtons({ providerId }: { providerId: ProviderId }) {
@@ -908,9 +1060,7 @@ function GeneralSettingsSection() {
             {providerOrder.map((providerId) => {
               const provider = providerConfigs[providerId]
               const checked = autoModelProviderIds.includes(providerId)
-              const ready =
-                provider.type === 'scallion_proxy' ||
-                (canCallProvider(provider) && isProviderValidated(provider))
+              const ready = canCallProvider(provider) && isProviderValidated(provider)
               const assessment = modelTierAssessments.find(
                 (item) => item.providerId === providerId && item.available,
               )

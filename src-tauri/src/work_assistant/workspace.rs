@@ -60,14 +60,27 @@ pub fn work_assistant_file_inspect(
 #[tauri::command]
 pub fn work_assistant_downloads_scan(
     state: State<'_, WorkAssistantState>,
-) -> Result<Vec<WorkspaceScan>, AssistantErrorPayload> {
+    root_id: String,
+) -> Result<WorkspaceScan, AssistantErrorPayload> {
     let roots = read_roots(&state)?;
-    roots
+    require_downloads_root(&roots, &root_id).map_err(AssistantErrorPayload::from)?;
+    scan_workspace(&roots, &root_id).map_err(Into::into)
+}
+
+fn require_downloads_root<'a>(
+    roots: &'a [AuthorizedRoot],
+    root_id: &str,
+) -> Result<&'a AuthorizedRoot, WorkAssistantError> {
+    let root = roots
         .iter()
-        .filter(|root| matches!(root.kind, AuthorizedRootKind::Downloads))
-        .map(|root| scan_workspace(&roots, &root.id))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into)
+        .find(|root| root.id == root_id)
+        .ok_or_else(|| WorkAssistantError::blocked("authorized Downloads root was not found"))?;
+    if !matches!(root.kind, AuthorizedRootKind::Downloads) {
+        return Err(WorkAssistantError::blocked(
+            "selected root is not authorized as a Downloads directory",
+        ));
+    }
+    Ok(root)
 }
 
 pub fn scan_workspace(
@@ -631,7 +644,8 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     use super::open_verified_file_with_opener;
     use super::{
-        has_hidden_or_system_attribute_in_ancestors, inspect_file, scan_workspace, search_workspace,
+        has_hidden_or_system_attribute_in_ancestors, inspect_file, require_downloads_root,
+        scan_workspace, search_workspace,
     };
     use crate::work_assistant::{AuthorizedRoot, AuthorizedRootKind};
     use std::{
@@ -665,6 +679,43 @@ mod tests {
         assert!(!scan.entries.iter().any(|entry| entry.name == "run.exe"));
         assert!(!scan.entries.iter().any(|entry| entry.name == ".private"));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn downloads_scan_requires_a_root_explicitly_marked_as_downloads() {
+        let workspace = AuthorizedRoot {
+            id: "workspace".into(),
+            label: "Work".into(),
+            path: PathBuf::from("workspace"),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+        let downloads = AuthorizedRoot {
+            id: "downloads".into(),
+            label: "Downloads".into(),
+            path: PathBuf::from("downloads"),
+            kind: AuthorizedRootKind::Downloads,
+            created_at: 1,
+        };
+
+        assert_eq!(
+            require_downloads_root(&[workspace.clone()], "workspace")
+                .unwrap_err()
+                .code,
+            "blocked"
+        );
+        assert_eq!(
+            require_downloads_root(&[workspace], "missing")
+                .unwrap_err()
+                .code,
+            "blocked"
+        );
+        assert!(matches!(
+            &require_downloads_root(&[downloads], "downloads")
+                .unwrap()
+                .kind,
+            &AuthorizedRootKind::Downloads
+        ));
     }
 
     #[test]

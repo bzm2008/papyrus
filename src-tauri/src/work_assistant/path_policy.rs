@@ -505,8 +505,21 @@ fn is_sensitive_root(path: &Path) -> Result<bool, WorkAssistantError> {
         }
     }
     #[cfg(not(windows))]
-    if matches_environment_path(path, "XDG_CONFIG_HOME", true)? {
-        return Ok(true);
+    {
+        if matches_environment_path(path, "XDG_CONFIG_HOME", true)?
+            || matches_home_relative_path(path, ".config")
+            || matches_home_relative_path(path, ".cache")
+            || matches_home_relative_path(path, ".local/share")
+        {
+            return Ok(true);
+        }
+        #[cfg(target_os = "macos")]
+        if matches_home_relative_path(path, "Library/Application Support")
+            || matches_home_relative_path(path, "Library/Preferences")
+            || matches_home_relative_path(path, "Library/Caches")
+        {
+            return Ok(true);
+        }
     }
 
     Ok(path.components().any(|component| {
@@ -536,6 +549,18 @@ fn matches_environment_path(
     })
 }
 
+#[cfg(not(windows))]
+fn matches_home_relative_path(path: &Path, suffix: &str) -> bool {
+    let Ok(home) = std::env::var("HOME") else {
+        return false;
+    };
+    let Ok(home) = fs::canonicalize(home) else {
+        return false;
+    };
+    let candidate = home.join(suffix);
+    path_is_within(&candidate, path)
+}
+
 pub fn path_is_within(root: &Path, candidate: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -560,6 +585,8 @@ fn normalized_windows_components(path: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
+    use super::is_sensitive_root;
     use super::{path_is_within, validate_authorized_root, PathPolicy};
     use crate::work_assistant::{AuthorizedRoot, AuthorizedRootKind};
     use std::{
@@ -648,6 +675,32 @@ mod tests {
         assert_eq!(credential_error.code, "blocked");
         assert_eq!(credentials_error.code, "blocked");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn default_unix_application_data_roots_are_sensitive() {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .and_then(|path| fs::canonicalize(path).ok())
+            .expect("HOME must be available for the Unix path policy test");
+        let mut suffixes = vec![".config", ".cache", ".local/share"];
+        #[cfg(target_os = "macos")]
+        suffixes.extend([
+            "Library/Application Support",
+            "Library/Preferences",
+            "Library/Caches",
+        ]);
+
+        for suffix in suffixes {
+            let root = home.join(suffix);
+            assert!(
+                is_sensitive_root(&root).unwrap(),
+                "application data root should be blocked: {}",
+                root.display()
+            );
+            assert!(is_sensitive_root(&root.join("papyrus")).unwrap());
+        }
     }
 
     #[cfg(windows)]

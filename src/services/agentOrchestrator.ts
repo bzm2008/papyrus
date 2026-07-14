@@ -107,6 +107,17 @@ export type AgentRunResult = {
   streamedMessageId?: string
 }
 
+export type AgentRunOutcome = {
+  status: 'completed' | 'cancelled' | 'failed'
+  runId: string
+  result?: AgentRunResult
+  error?: string
+}
+
+export function shouldContinueSecretaryGoalCycle(outcome: Pick<AgentRunOutcome, 'status'> | undefined) {
+  return outcome?.status === 'completed'
+}
+
 type AgentOutput = {
   agentId: FlowAgentId
   label: string
@@ -137,7 +148,7 @@ const sharedAgentRules = [
 export async function sendFlowMessage(
   prompt: string,
   harnessInput: SendFlowMessageOptions = {},
-) {
+): Promise<AgentRunOutcome | undefined> {
   const content = prompt.trim()
   const displayContent = (harnessInput.displayPrompt ?? content).trim()
 
@@ -186,25 +197,36 @@ export async function sendFlowMessage(
   }
   store.setLlmRunState('running', '秘书长正在判断任务路径')
 
+  let runSignal: AbortSignal | undefined
   try {
+    runSignal = startSecretaryRun(run.id)
+    throwIfAborted(runSignal)
     const classification = classifySecretaryTask(executionContent)
     let routedExecutionContent = executionContent
 
     if (classification.domain !== 'writing') {
-      const signal = startSecretaryRun(run.id)
-      try {
+      const signal = runSignal
         const capabilityStatus = await getWorkAssistantCapabilities()
         const platform = capabilityStatus.find((status) => status.platform)?.platform ?? 'windows'
         const availability = {
           workspace: capabilityStatus.some((status) => status.toolset === 'workspace' && status.available),
           desktop: capabilityStatus.some((status) => status.toolset === 'desktop' && status.available),
-          browser: false,
-          project: false,
+          browser: capabilityStatus.some((status) => status.toolset === 'browser' && status.available),
+          // Project resources are a local Papyrus store. The project executor
+          // still requires the same inline approval, but has no native bridge
+          // health check of its own.
+          project: true,
         }
         const definitions = enabledToolDefinitions({
           platform,
-          enabledToolsets: classification.domain === 'mixed' ? ['workspace', 'desktop'] : ['workspace', 'desktop'],
+          enabledToolsets:
+            classification.domain === 'browser'
+              ? ['browser', 'project']
+              : classification.domain === 'mixed'
+                ? ['workspace', 'desktop', 'browser', 'project']
+                : ['workspace', 'desktop'],
           availability,
+          availableToolNames: capabilityStatus.filter((status) => status.available).map((status) => status.name),
         }).filter((tool) => classification.domain !== 'mixed' || tool.defaultRisk === 'read')
         const workRouting = selectModelForRole('agent', {
           complexity: classification.complexity,
@@ -238,6 +260,7 @@ export async function sendFlowMessage(
         })
 
         if (classification.domain === 'work_assistant') {
+          throwIfAborted(runSignal)
           useAppStore.getState().addFlowMessage({ role: 'assistant', agentId: 'writer', content: workResult.response })
           finishAgentRun(run, {
             status: 'completed',
@@ -245,7 +268,11 @@ export async function sendFlowMessage(
             summary: `受控电脑助手完成 ${workResult.toolResults.length} 个工具步骤。`,
           })
           useAppStore.getState().setLlmRunState('idle', '电脑助手已完成本轮操作')
-          return
+          return {
+            status: 'completed',
+            runId: run.id,
+            result: { response: workResult.response },
+          }
         }
 
         routedExecutionContent = [
@@ -253,13 +280,11 @@ export async function sendFlowMessage(
           '以下是受控本地工具采集结果。只把这些结果作为写作材料，不要声称执行了未出现的操作：',
           workResult.toolResults.map(({ call, result }) => JSON.stringify({ tool: call.name, ok: result.ok, summary: result.summary, data: result.data })).join('\n'),
         ].join('\n\n')
-      } finally {
-        finishSecretaryRun(run.id)
-      }
     }
 
-    const plan = await planAgentRun(routedExecutionContent, thinkingEffort)
-    const result = await executeAgentRun(routedExecutionContent, plan, thinkingEffort)
+    const plan = await planAgentRun(routedExecutionContent, thinkingEffort, runSignal)
+    const result = await executeAgentRun(routedExecutionContent, plan, thinkingEffort, runSignal)
+    throwIfAborted(runSignal)
 
     if (!result.streamedMessageId) {
       useAppStore.getState().addFlowMessage({
@@ -291,8 +316,10 @@ export async function sendFlowMessage(
     }
 
     if (activeGoal) {
-      await runGoalJudgePass(activeGoal.id, result.response || result.patchContent || '', thinkingEffort)
+      await runGoalJudgePass(activeGoal.id, result.response || result.patchContent || '', thinkingEffort, runSignal)
     }
+
+    throwIfAborted(runSignal)
 
     useAppStore
       .getState()
@@ -300,8 +327,25 @@ export async function sendFlowMessage(
         'idle',
         canCallProvider(provider) ? '秘书长已完成本轮编排' : '使用本地保守编排完成',
       )
+    return {
+      status: 'completed',
+      runId: run.id,
+      result,
+    }
   } catch (error) {
     const controlledRun = useWorkAssistantStore.getState().runs[run.id]
+    const cancelled = runSignal?.aborted === true
+      || (error instanceof DOMException && error.name === 'AbortError')
+      || controlledRun?.status === 'cancelled'
+    if (cancelled) {
+      finishAgentRun(run, { status: 'cancelled', summary: '用户已取消本次运行。' })
+      useAppStore.getState().setLlmRunState('idle', '本轮运行已取消')
+      return {
+        status: 'cancelled',
+        runId: run.id,
+        error: '用户已取消本次运行。',
+      }
+    }
     if (controlledRun && controlledRun.status !== 'failed' && controlledRun.status !== 'cancelled') {
       dispatchOrderedWorkAssistantEvent({ type: 'run.failed', runId: run.id, code: 'secretary_run_failed', message: error instanceof Error ? error.message : '秘书运行失败。', recoverable: true, at: Date.now() })
     }
@@ -312,6 +356,13 @@ export async function sendFlowMessage(
       content: `Agent 编排失败：${error instanceof Error ? error.message : '未知错误'}`,
     })
     useAppStore.getState().setLlmRunState('error', 'Agent 编排失败')
+    return {
+      status: 'failed',
+      runId: run.id,
+      error: error instanceof Error ? error.message : '未知错误',
+    }
+  } finally {
+    finishSecretaryRun(run.id)
   }
 }
 
@@ -453,7 +504,9 @@ async function runGoalJudgePass(
   goalId: string,
   stageResult: string,
   thinkingEffort: FlowThinkingEffort,
+  signal?: AbortSignal,
 ) {
+  throwIfAborted(signal)
   const goal = useAppStore.getState().activeSecretaryGoal
 
   if (!goal || goal.id !== goalId) {
@@ -461,6 +514,7 @@ async function runGoalJudgePass(
   }
 
   const judge = await judgeSecretaryGoal(goal, stageResult, thinkingEffort)
+  throwIfAborted(signal)
   useAppStore.getState().addGoalCheckpoint({
     goalId,
     title: '裁判检查',
@@ -508,7 +562,11 @@ function composeExecutionControlPrompt(
     .join('\n')
 }
 
-export async function planAgentRun(prompt: string, thinkingEffort = useAppStore.getState().flowThinkingEffort): Promise<AgentRunPlan> {
+export async function planAgentRun(
+  prompt: string,
+  thinkingEffort = useAppStore.getState().flowThinkingEffort,
+  signal?: AbortSignal,
+): Promise<AgentRunPlan> {
   const store = useAppStore.getState()
   const classification = classifySecretaryTask(prompt, {
     activeGoal: Boolean(store.activeSecretaryGoal),
@@ -599,6 +657,7 @@ export async function planAgentRun(prompt: string, thinkingEffort = useAppStore.
         thinkingEffort,
         samplingPhase: 'planning',
         contextHash: String(store.editorText.length + store.resources.length),
+        signal,
       })
       const plan = sanitizePlan(parseJsonPlan(rawPlan), prompt, classification, [describeModelRouting(plannerModel)], thinkingEffort)
 
@@ -615,6 +674,7 @@ export async function planAgentRun(prompt: string, thinkingEffort = useAppStore.
 
       return plan
     } catch (error) {
+      if (signal?.aborted) throw error
       useAppStore.getState().updateFlowTrace(trace.id, {
         detail: `模型规划失败，已切换到本地保守规划：${
           error instanceof Error ? error.message : '未知错误'
@@ -652,7 +712,13 @@ export async function planAgentRun(prompt: string, thinkingEffort = useAppStore.
   return fallbackPlan
 }
 
-export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinkingEffort = useAppStore.getState().flowThinkingEffort): Promise<AgentRunResult> {
+export async function executeAgentRun(
+  prompt: string,
+  plan: AgentRunPlan,
+  thinkingEffort = useAppStore.getState().flowThinkingEffort,
+  signal?: AbortSignal,
+): Promise<AgentRunResult> {
+  throwIfAborted(signal)
   useAppStore.getState().setAgentTodos(createTodos(prompt, plan))
   useAppStore.getState().addFlowTrace({
     kind: 'plan',
@@ -714,11 +780,12 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
     })
   }
 
-  const sources = semanticCacheHit?.sources?.length ? semanticCacheHit.sources : await executeToolCalls(prompt, plan)
+  const sources = semanticCacheHit?.sources?.length ? semanticCacheHit.sources : await executeToolCalls(prompt, plan, signal)
   const outputs: AgentOutput[] = []
   const structuredOutputs: StructuredAgentOutput[] = []
 
   for (const todo of useAppStore.getState().agentTodos) {
+    throwIfAborted(signal)
     if (todo.agentId === 'writer' || todo.status === 'completed') {
       continue
     }
@@ -747,7 +814,7 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
       const outputText = await runHiveAgentWithGuards(hiveRuntime, {
         agentId: todo.agentId,
         phase: plan.hiveTopology?.nodes.find((node) => node.agentId === todo.agentId)?.phase,
-        run: () => callAgent(todo.agentId, prompt, plan, sources),
+        run: () => callAgent(todo.agentId, prompt, plan, sources, signal),
         fallback: (reason) => createMockAgentOutput(todo.agentId, `${prompt}\n\nFallback reason: ${reason}`, sources),
       })
       const output = persistSubAgentOutput(todo.agentId, outputText, stepId, sources)
@@ -784,12 +851,23 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
               status: 'skipped',
               detail: plan.earlyStopReason,
             })
+            if (controlledRunId && hasControlledRun) {
+              dispatchOrderedWorkAssistantEvent({
+                type: 'subagent.completed',
+                runId: controlledRunId,
+                subagentId: `${controlledRunId}:${item.agentId}`,
+                summary: plan.earlyStopReason ?? '已跳过后续协作。',
+                skipped: true,
+                at: Date.now(),
+              })
+            }
           })
         updateHiveFromTodos(plan)
         addHiveRuntimeSummary(hiveRuntime, plan.earlyStopReason)
         break
       }
     } catch (error) {
+      if (signal?.aborted) throw error
       useAppStore.getState().updateAgentTodo(todo.id, {
         status: 'blocked',
         detail: error instanceof Error ? error.message : '工作室 Agent 执行失败',
@@ -824,16 +902,17 @@ export async function executeAgentRun(prompt: string, plan: AgentRunPlan, thinki
       content: visibleText || '秘书长开始整合结果…',
     })
   }
-  let writerText = await runWriter(prompt, plan, outputs, sources, updateStream, storyBrief)
+  throwIfAborted(signal)
+  let writerText = await runWriter(prompt, plan, outputs, sources, updateStream, storyBrief, signal)
   let patchContent = plan.writeIntent ? extractDraftText(writerText) : undefined
 
   if (plan.writeIntent && isInsufficientDraft(patchContent, prompt)) {
-    writerText = await repairDraft(prompt, plan, outputs, sources, writerText, updateStream)
+    writerText = await repairDraft(prompt, plan, outputs, sources, writerText, updateStream, signal)
     patchContent = extractDraftText(writerText)
   }
 
   if (storyBrief && patchContent) {
-    const reviewed = await runStoryReviewAndCommit(prompt, storyBrief, patchContent)
+    const reviewed = await runStoryReviewAndCommit(prompt, storyBrief, patchContent, signal)
     patchContent = reviewed.patchContent
   }
 
@@ -890,7 +969,8 @@ function runStoryPreparation(prompt: string) {
   return brief
 }
 
-async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchContent: string) {
+async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchContent: string, signal?: AbortSignal) {
+  throwIfAborted(signal)
   const reviewStep = useAppStore.getState().addAgentStep({
     type: 'sub_agent',
     title: '审查闸门: 多维 Reviewer',
@@ -942,7 +1022,7 @@ async function runStoryReviewAndCommit(prompt: string, brief: StoryBrief, patchC
             `初稿:\n${patchContent}`,
           ].join('\n\n'),
         },
-      ], undefined, sampling)
+      ], signal, sampling)
       patchContent = fixed.trim() || patchContent
       issues = reviewDraft(patchContent, brief)
       useAppStore.getState().updateAgentStep(repairStep.id, {
@@ -1032,12 +1112,13 @@ function createTodos(
   return todos
 }
 
-async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
+async function executeToolCalls(prompt: string, plan: AgentRunPlan, signal?: AbortSignal) {
   const sources: NonNullable<FlowTrace['sources']> = []
   const webCalls = plan.toolCalls.filter((toolCall) => toolCall.name === 'web_search')
   const researchAgentId = firstEnabledAgent(['citation-checker', 'academic-historian', 'trend-researcher']) ?? 'writer'
 
   for (const toolCall of webCalls) {
+    throwIfAborted(signal)
     const query = toolCall.query?.trim() || buildSearchQuery(prompt, plan)
     const step = useAppStore.getState().addAgentStep({
       type: 'tool',
@@ -1059,6 +1140,7 @@ async function executeToolCalls(prompt: string, plan: AgentRunPlan) {
 
     try {
       const results = await searchWeb(query)
+      throwIfAborted(signal)
       const mapped = results.map((result) => ({
         title: result.title,
         url: result.url,
@@ -1187,6 +1269,7 @@ async function callAgent(
   prompt: string,
   plan: AgentRunPlan,
   sources?: FlowTrace['sources'],
+  signal?: AbortSignal,
 ) {
   const store = useAppStore.getState()
   const routing = selectModelForRole('agent', {
@@ -1239,6 +1322,7 @@ async function callAgent(
     thinkingEffort: useAppStore.getState().flowThinkingEffort,
     samplingPhase: 'agent_output',
     contextHash: String((sources?.length ?? 0) + useAppStore.getState().editorText.length),
+    signal,
   })
 }
 
@@ -1249,7 +1333,9 @@ async function runWriter(
   sources?: FlowTrace['sources'],
   onText?: (text: string) => void,
   storyBrief?: StoryBrief,
+  signal?: AbortSignal,
 ) {
+  throwIfAborted(signal)
   const store = useAppStore.getState()
   const writerRouting = selectModelForRole('writer', {
     complexity: plan.taskComplexity,
@@ -1351,7 +1437,7 @@ async function runWriter(
         }
 
         onText?.(text)
-      }, sampling)
+      }, sampling, signal)
     : createMockWriterResponse(prompt, plan, outputs, sources)
 
   if (!streamedText) {
@@ -1378,7 +1464,9 @@ async function repairDraft(
   sources: FlowTrace['sources'],
   previousText: string,
   onText?: (text: string) => void,
+  signal?: AbortSignal,
 ) {
+  throwIfAborted(signal)
   const repairRouting = selectModelForRole('repair', {
     complexity: plan.taskComplexity,
     writeIntent: true,
@@ -1457,7 +1545,7 @@ async function repairDraft(
       useAppStore.getState().appendAgentStepContent(step.id, delta)
     }
     onText?.(stripDraftSection(text) || '秘书长正在补写正文…')
-  }, sampling)
+  }, sampling, signal)
 
   useAppStore.getState().updateFlowTrace(trace.id, {
     detail: response.slice(0, 420),
@@ -1504,28 +1592,45 @@ function parseJsonPlan(raw: string) {
   return JSON.parse(jsonText) as Partial<AgentRunPlan>
 }
 
+function throwIfAborted(signal?: AbortSignal) {
+  if (!signal?.aborted) return
+  const error = new Error('秘书长运行已取消。')
+  error.name = 'AbortError'
+  throw error
+}
+
 async function streamOrCall(
   provider: Parameters<typeof callOpenAICompatible>[0],
   messages: ChatMessage[],
   onText?: (text: string) => void,
   sampling?: AgentSamplingProfile,
+  signal?: AbortSignal,
 ) {
   if (!onText) {
-    return callOpenAICompatible(provider, messages, undefined, sampling)
+    return callOpenAICompatible(provider, messages, signal, sampling)
   }
 
   let text = ''
+  let receivedToken = false
 
   try {
     return await callOpenAICompatibleStream(provider, messages, {
       onToken: (token) => {
+        if (token) {
+          receivedToken = true
+        }
         text += token
         onText(text)
       },
+      signal,
       sampling,
     })
-  } catch {
-    const fallback = await callOpenAICompatible(provider, messages, undefined, sampling)
+  } catch (error) {
+    if (receivedToken || (error instanceof DOMException && error.name === 'AbortError')) {
+      throw error
+    }
+
+    const fallback = await callOpenAICompatible(provider, messages, signal, sampling)
     onText(fallback)
     return fallback
   }

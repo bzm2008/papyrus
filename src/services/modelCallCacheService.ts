@@ -32,6 +32,7 @@ export type CachedModelCallOptions = {
   contextHash?: string
   samplingPhase?: AgentSamplingPhase
   sampling?: AgentSamplingProfile
+  signal?: AbortSignal
   bypass?: boolean
 }
 
@@ -56,7 +57,7 @@ export async function callCacheableModel(
   const sampling =
     options.sampling ??
     getAgentSamplingProfile(options.samplingPhase ?? stageToSamplingPhase(options.stage), options.thinkingEffort)
-  const result = await callOpenAICompatible(provider, messages, undefined, sampling)
+  const result = await callOpenAICompatible(provider, messages, options.signal, sampling)
 
   if (isCacheableStage(options.stage)) {
     rememberSemanticResult(cacheKey, cacheTaskType(options), result)

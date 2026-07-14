@@ -11,7 +11,10 @@ node_modules
 dist
 dist-wps-addin
 dist-ssr
+dist-browser-bridge
+test-results
 artifacts
+artifacts/browser-bridge/
 src-tauri/target
 *.zip
 .codex-tools

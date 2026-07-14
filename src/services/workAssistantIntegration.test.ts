@@ -61,6 +61,7 @@ describe('controlled work assistant integration', () => {
   })
 
   it('keeps a stale preview recoverable instead of replaying approval', async () => {
+    dispatchOrderedWorkAssistantEvent({ type: 'run.started', runId: 'run-3', at: 1 })
     setWorkAssistantInvokerForTests(async (command) => {
       if (command === 'work_assistant_preview') return { id: 'preview-stale', revision: '1', risk: 'reversible', title: '整理', targetSummary: '下载目录', impactSummary: '移动文件', reversible: true, expiresAt: Date.now() + 60_000 }
       if (command === 'work_assistant_approve') return { token: 'token-stale', previewId: 'preview-stale', expires: Date.now() + 60_000 }

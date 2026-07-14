@@ -414,7 +414,9 @@ pub fn remove_registered_application(
     let previous_len = applications.len();
     applications.retain(|application| application.id != application_id);
     if applications.len() == previous_len {
-        return Err(WorkAssistantError::blocked("registered application was not found"));
+        return Err(WorkAssistantError::blocked(
+            "registered application was not found",
+        ));
     }
     persist_applications(&path, &applications)?;
     drop(_guard);
@@ -772,10 +774,18 @@ mod tests {
             fs::set_permissions(&executable, permissions).unwrap();
         }
         if cfg!(any(windows, target_os = "linux")) {
-            let app = register_application_from_picker(&state, "Editor".into(), &executable).unwrap();
+            let app =
+                register_application_from_picker(&state, "Editor".into(), &executable).unwrap();
             remove_registered_application(&state, &app.id).unwrap();
-            assert!(load_applications(&applications_path(&state)).unwrap().is_empty());
-            assert_eq!(remove_registered_application(&state, &app.id).unwrap_err().code, "blocked");
+            assert!(load_applications(&applications_path(&state))
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                remove_registered_application(&state, &app.id)
+                    .unwrap_err()
+                    .code,
+                "blocked"
+            );
         }
         fs::remove_dir_all(directory).unwrap();
     }

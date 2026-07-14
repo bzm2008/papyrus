@@ -276,8 +276,7 @@ pub(crate) fn preflight_recovery_receipt(slot: &File) -> Result<(), WorkAssistan
         probe
             .write_all(b"papyrus-recovery-probe")
             .map_err(blocked_io("could not write recovery receipt probe"))?;
-        sync_receipt_probe(&probe)
-            .map_err(blocked_io("could not sync recovery receipt probe"))?;
+        sync_receipt_probe(&probe).map_err(blocked_io("could not sync recovery receipt probe"))?;
         drop(probe);
         Ok(())
     })();
@@ -294,22 +293,31 @@ pub(crate) fn preflight_recovery_receipt(slot: &File) -> Result<(), WorkAssistan
 
 fn sync_receipt_probe(file: &File) -> std::io::Result<()> {
     #[cfg(test)]
-    if FAIL_RECEIPT_PROBE_SYNC_ONCE.with(|value| std::mem::replace(&mut *value.borrow_mut(), false)) {
+    if FAIL_RECEIPT_PROBE_SYNC_ONCE.with(|value| std::mem::replace(&mut *value.borrow_mut(), false))
+    {
         return Err(std::io::Error::other("injected receipt probe sync failure"));
     }
     #[cfg(test)]
     let fail_after = FAIL_RECEIPT_PROBE_SYNC_AFTER.with(|value| {
         let mut value = value.borrow_mut();
         match *value {
-            Some(0) => { *value = None; true }
-            Some(remaining) => { *value = Some(remaining - 1); false }
+            Some(0) => {
+                *value = None;
+                true
+            }
+            Some(remaining) => {
+                *value = Some(remaining - 1);
+                false
+            }
             None => false,
         }
     });
     #[cfg(not(test))]
     let fail_after = false;
     if fail_after {
-        return Err(std::io::Error::other("injected delayed receipt probe sync failure"));
+        return Err(std::io::Error::other(
+            "injected delayed receipt probe sync failure",
+        ));
     }
     file.sync_all()
 }
@@ -369,8 +377,14 @@ fn rebind_recovery_slot(binding: &RecoveryBinding) -> Result<File, WorkAssistant
     let mut path = binding.authorized_root_path.clone();
     let mut parent = root;
     for component in &binding.parent_components {
-        if component.is_empty() || component.contains(['/', '\\', '\0']) || component == "." || component == ".." {
-            return Err(WorkAssistantError::stale_preview("recovery ancestor is invalid"));
+        if component.is_empty()
+            || component.contains(['/', '\\', '\0'])
+            || component == "."
+            || component == ".."
+        {
+            return Err(WorkAssistantError::stale_preview(
+                "recovery ancestor is invalid",
+            ));
         }
         path.push(component);
         parent = open_read_verified_directory(&path).map_err(|_| {
@@ -412,24 +426,38 @@ fn rebind_recovery_slot(binding: &RecoveryBinding) -> Result<File, WorkAssistant
 
 /// Delete an empty preflight slot only after a fresh identity-bound rebind. The UUID leaf is
 /// adapter generated; no model-supplied path or retained transaction handle participates.
-pub(crate) fn remove_empty_recovery_slot(binding: &RecoveryBinding) -> Result<(), WorkAssistantError> {
+pub(crate) fn remove_empty_recovery_slot(
+    binding: &RecoveryBinding,
+) -> Result<(), WorkAssistantError> {
     let slot = rebind_recovery_slot(binding)?;
-    let mut io_status = NtIoStatusBlock { status: 0, information: 0 };
+    let mut io_status = NtIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
     reject_reparse(&slot, "uncommitted recovery slot")?;
-    if !slot.metadata().map_err(blocked_io("could not inspect uncommitted recovery slot"))?.is_dir() {
-        return Err(WorkAssistantError::blocked("uncommitted recovery slot is not a directory"));
+    if !slot
+        .metadata()
+        .map_err(blocked_io("could not inspect uncommitted recovery slot"))?
+        .is_dir()
+    {
+        return Err(WorkAssistantError::blocked(
+            "uncommitted recovery slot is not a directory",
+        ));
     }
     let mut disposition = NtFileDispositionInformation { delete_file: 1 };
     let status = unsafe {
         NtSetInformationFile(
-            slot.as_raw_handle(), &mut io_status,
+            slot.as_raw_handle(),
+            &mut io_status,
             (&mut disposition as *mut NtFileDispositionInformation).cast(),
             std::mem::size_of::<NtFileDispositionInformation>() as u32,
             NT_FILE_DISPOSITION_INFORMATION,
         )
     };
     if status < 0 {
-        return Err(WorkAssistantError::partial_transaction("could not remove uncommitted recovery slot"));
+        return Err(WorkAssistantError::partial_transaction(
+            "could not remove uncommitted recovery slot",
+        ));
     }
     Ok(())
 }
@@ -776,8 +804,14 @@ fn open_private_recovery_slot(path: &Path) -> Result<File, WorkAssistantError> {
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
     )?;
     reject_reparse(&file, "private recovery slot")?;
-    if !file.metadata().map_err(blocked_io("could not inspect private recovery slot"))?.is_dir() {
-        return Err(WorkAssistantError::blocked("private recovery slot is not a directory"));
+    if !file
+        .metadata()
+        .map_err(blocked_io("could not inspect private recovery slot"))?
+        .is_dir()
+    {
+        return Err(WorkAssistantError::blocked(
+            "private recovery slot is not a directory",
+        ));
     }
     let _ = file_identity(&file)?;
     Ok(file)
@@ -793,8 +827,14 @@ fn open_private_recovery_slot_for_cleanup(path: &Path) -> Result<File, WorkAssis
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
     )?;
     reject_reparse(&file, "private recovery slot")?;
-    if !file.metadata().map_err(blocked_io("could not inspect private recovery slot"))?.is_dir() {
-        return Err(WorkAssistantError::blocked("private recovery slot is not a directory"));
+    if !file
+        .metadata()
+        .map_err(blocked_io("could not inspect private recovery slot"))?
+        .is_dir()
+    {
+        return Err(WorkAssistantError::blocked(
+            "private recovery slot is not a directory",
+        ));
     }
     let _ = file_identity(&file)?;
     Ok(file)
@@ -1280,8 +1320,7 @@ fn blocked_io(context: &'static str) -> impl FnOnce(std::io::Error) -> WorkAssis
 mod tests {
     use super::{
         file_identity, file_version, open_handle, open_read_verified_directory,
-        open_snapshot_directory,
-        preflight_recovery_receipt, verify_bound_source,
+        open_snapshot_directory, preflight_recovery_receipt, verify_bound_source,
     };
     use std::{
         fs,
@@ -1366,9 +1405,13 @@ mod tests {
         fs::write(root_path.join("source.txt"), b"source").unwrap();
 
         let source = super::open_source(&root_path, std::path::Path::new("source.txt")).unwrap();
-        let destination = super::open_destination(&root_path, std::path::Path::new("destination.txt"));
+        let destination =
+            super::open_destination(&root_path, std::path::Path::new("destination.txt"));
 
-        assert!(destination.is_ok(), "source parent lock must permit an independently bound destination parent");
+        assert!(
+            destination.is_ok(),
+            "source parent lock must permit an independently bound destination parent"
+        );
         drop(source);
         drop(destination);
         fs::remove_dir_all(root_path).unwrap();

@@ -266,6 +266,38 @@ impl WorkAssistantError {
         }
     }
 
+    pub fn network(message: impl Into<String>) -> Self {
+        Self {
+            code: "network".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            code: "timeout".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    pub fn unsupported_content_type(message: impl Into<String>) -> Self {
+        Self {
+            code: "unsupported_content_type".into(),
+            message: message.into(),
+            recoverable: false,
+        }
+    }
+
+    pub fn response_too_large(message: impl Into<String>) -> Self {
+        Self {
+            code: "response_too_large".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
     pub fn protocol(message: impl Into<String>) -> Self {
         Self {
             code: "protocol".into(),

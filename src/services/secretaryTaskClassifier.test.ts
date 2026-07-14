@@ -13,6 +13,11 @@ describe('classifySecretaryTask domain routing', () => {
     expect(classifySecretaryTask('扫描项目资料并写一份研究报告').domain).toBe('mixed')
   })
 
+  it('routes browser tab actions to the Browser Bridge domain', () => {
+    expect(classifySecretaryTask('打开链接并填写网页表单').domain).toBe('browser')
+    expect(classifySecretaryTask('查看浏览器当前标签页').domain).toBe('browser')
+  })
+
   it('preserves ordinary writing classification', () => {
     expect(classifySecretaryTask('续写这个小说章节', { writeIntent: true }).domain).toBe('writing')
   })

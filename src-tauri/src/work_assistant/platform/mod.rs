@@ -15,13 +15,13 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+pub(crate) mod desktop;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(windows)]
 pub(crate) mod windows;
-pub(crate) mod desktop;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -489,9 +489,9 @@ fn prepare_recovery_slot_for_source_capturing(
     index: usize,
 ) -> Result<PreparedRecoverySlot, RecoverySlotPreparationFailure> {
     if preview_id.trim().is_empty() || preview_id.contains('\0') {
-        return Err(WorkAssistantError::protocol(
-            "recovery receipt requires a valid preview id",
-        ).into());
+        return Err(
+            WorkAssistantError::protocol("recovery receipt requires a valid preview id").into(),
+        );
     }
     source.verify_snapshot()?;
     let recovery_leaf = uuid::Uuid::new_v4().to_string();
@@ -535,7 +535,10 @@ fn prepare_recovery_slot_for_source_capturing(
         },
     };
     if let Err(error) = preflight_recovery_receipt(&slot) {
-        return Err(RecoverySlotPreparationFailure { error, slot: Some(slot) });
+        return Err(RecoverySlotPreparationFailure {
+            error,
+            slot: Some(slot),
+        });
     }
     Ok(slot)
 }
@@ -622,7 +625,9 @@ impl PreparedFileTransaction {
     }
 }
 
-pub(crate) fn cleanup_recovery_slots(slots: Vec<PreparedRecoverySlot>) -> Result<(), WorkAssistantError> {
+pub(crate) fn cleanup_recovery_slots(
+    slots: Vec<PreparedRecoverySlot>,
+) -> Result<(), WorkAssistantError> {
     let bindings = slots
         .into_iter()
         .filter_map(PreparedRecoverySlot::take_binding_for_cleanup)
@@ -722,14 +727,18 @@ pub(crate) fn prepare_file_transaction(
     ) && !skip
     {
         match prepare_recovery_slot_for_source_capturing(
-            source.as_ref().expect("source is required"), preview_id, index,
+            source.as_ref().expect("source is required"),
+            preview_id,
+            index,
         ) {
             Ok(slot) => Some(slot),
             Err(failure) => {
                 drop(source.take());
                 drop(existing_destination.take());
                 drop(destination.take());
-                if let Some(slot) = failure.slot { let _ = cleanup_recovery_slots(vec![slot]); }
+                if let Some(slot) = failure.slot {
+                    let _ = cleanup_recovery_slots(vec![slot]);
+                }
                 return Err(failure.error);
             }
         }
@@ -752,8 +761,12 @@ pub(crate) fn prepare_file_transaction(
                     drop(existing_destination.take());
                     drop(destination.take());
                     let mut slots = Vec::new();
-                    if let Some(slot) = source_recovery.take() { slots.push(slot); }
-                    if let Some(slot) = failure.slot { slots.push(slot); }
+                    if let Some(slot) = source_recovery.take() {
+                        slots.push(slot);
+                    }
+                    if let Some(slot) = failure.slot {
+                        slots.push(slot);
+                    }
                     let _ = cleanup_recovery_slots(slots);
                     return Err(failure.error);
                 }
@@ -1457,7 +1470,9 @@ fn remove_recovery_slot(binding: &RecoveryBinding) -> Result<(), WorkAssistantEr
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         let _ = binding;
-        Err(WorkAssistantError::blocked("native recovery cleanup is unavailable"))
+        Err(WorkAssistantError::blocked(
+            "native recovery cleanup is unavailable",
+        ))
     }
 }
 
@@ -2017,18 +2032,18 @@ mod tests {
     use super::inject_after_destination_recovery;
     #[cfg(not(windows))]
     use super::inject_after_staging_before_prepublish;
+    #[cfg(not(windows))]
+    use super::prepare_recovery_slot;
+    #[cfg(any(unix, windows))]
+    use super::prepare_recovery_slot_for_source;
     #[cfg(unix)]
     use super::{bind_destination, create_directory, stage_source};
     use super::{
         inject_rename_publication_collision_once, open_source_snapshot, prepare_file_transaction,
         validate_recovery_leaf,
     };
-    #[cfg(not(windows))]
-    use super::prepare_recovery_slot;
     #[cfg(unix)]
     use super::{move_snapshot_to_recovery, persist_recovery_receipt};
-    #[cfg(any(unix, windows))]
-    use super::prepare_recovery_slot_for_source;
     use crate::work_assistant::{ConflictPolicy, FileOperationKind, FileOperationRequest};
     use std::{
         fs,
@@ -2254,8 +2269,15 @@ mod tests {
         };
         super::windows::inject_receipt_probe_sync_failure_once();
         let error = match prepare_file_transaction(
-            &root, "preview-preflight", 0, &operation, &ConflictPolicy::Skip,
-        ) { Err(error) => error, Ok(_) => panic!("injected recovery preflight must fail") };
+            &root,
+            "preview-preflight",
+            0,
+            &operation,
+            &ConflictPolicy::Skip,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("injected recovery preflight must fail"),
+        };
         assert_eq!(error.code, "recovery_unavailable");
         assert!(root.join("document.txt").is_file());
         let vault = root.join(".papyrus-recovery");
@@ -2277,8 +2299,15 @@ mod tests {
         };
         super::windows::inject_receipt_probe_sync_failure_after(1);
         let error = match prepare_file_transaction(
-            &root, "preview-second-preflight", 0, &operation, &ConflictPolicy::Overwrite,
-        ) { Err(error) => error, Ok(_) => panic!("injected second recovery preflight must fail") };
+            &root,
+            "preview-second-preflight",
+            0,
+            &operation,
+            &ConflictPolicy::Overwrite,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("injected second recovery preflight must fail"),
+        };
         assert_eq!(error.code, "recovery_unavailable");
         assert!(root.join("source.txt").is_file() && root.join("destination.txt").is_file());
         let vault = root.join(".papyrus-recovery");

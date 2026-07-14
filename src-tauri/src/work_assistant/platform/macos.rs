@@ -532,16 +532,24 @@ fn rebind_recovery_vault(binding: &RecoveryBinding) -> Result<File, WorkAssistan
     Ok(vault)
 }
 
-pub(crate) fn remove_empty_recovery_slot(binding: &RecoveryBinding) -> Result<(), WorkAssistantError> {
+pub(crate) fn remove_empty_recovery_slot(
+    binding: &RecoveryBinding,
+) -> Result<(), WorkAssistantError> {
     let vault = rebind_recovery_vault(binding)?;
     let leaf = CString::new(binding.slot_leaf.as_str())
         .map_err(|_| WorkAssistantError::stale_preview("private recovery slot is invalid"))?;
     let slot = openat_directory(vault.as_raw_fd(), &leaf)?;
     if identity(&slot)? != binding.slot_identity {
-        return Err(WorkAssistantError::stale_preview("private recovery slot changed before cleanup"));
+        return Err(WorkAssistantError::stale_preview(
+            "private recovery slot changed before cleanup",
+        ));
     }
     let result = unsafe { libc::unlinkat(vault.as_raw_fd(), leaf.as_ptr(), libc::AT_REMOVEDIR) };
-    if result == 0 { Ok(()) } else { Err(last_os_error("could not remove uncommitted recovery slot")) }
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(last_os_error("could not remove uncommitted recovery slot"))
+    }
 }
 
 /// The retained parent descriptor is the only namespace used for the leaf re-open.

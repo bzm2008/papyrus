@@ -8,6 +8,14 @@
 
 **Tech Stack:** Tauri 2, Rust 2021, React 19, TypeScript 6, Zustand 5, Vitest 4, Testing Library, `trash`, `sysinfo`, `sha2`, `uuid`, `dunce`, `open`.
 
+## Implementation Audit (2026-07-14)
+
+`[x]` marks implementation or test steps with current-worktree evidence. Commit steps remain
+unchecked because the branch is uncommitted. The current local evidence is 35 desktop unit-test
+files/166 tests, 116 Rust tests, and a passing Windows portable check; it also includes the
+structured `/goal` cancellation regression. A real-user-file smoke transaction and cross-platform
+device evidence are not substitutes for the release gate and remain pending in the release report.
+
 ---
 
 ## Execution Prerequisite
@@ -30,7 +38,7 @@ Expected: the new worktree starts from commit `eb2c91c` or a later commit contai
 - Create: `src/test/setup.ts`
 - Create: `src/test/smoke.test.ts`
 
-- [ ] **Step 1: Add a passing smoke test**
+- [x] **Step 1: Add a passing smoke test**
 
 ```ts
 // src/test/smoke.test.ts
@@ -43,7 +51,7 @@ describe('desktop test harness', () => {
 })
 ```
 
-- [ ] **Step 2: Install the test dependencies and scripts**
+- [x] **Step 2: Install the test dependencies and scripts**
 
 Run:
 
@@ -83,7 +91,7 @@ import { afterEach } from 'vitest'
 afterEach(() => cleanup())
 ```
 
-- [ ] **Step 3: Run the smoke test**
+- [x] **Step 3: Run the smoke test**
 
 Run: `npm run test:unit -- src/test/smoke.test.ts`
 
@@ -104,7 +112,7 @@ git commit -m "test: add desktop unit test harness"
 - Create: `src/services/workAssistantProtocol.test.ts`
 - Create: `src/services/workAssistantEventReducer.test.ts`
 
-- [ ] **Step 1: Define stable public types**
+- [x] **Step 1: Define stable public types**
 
 Create `workAssistantProtocol.ts` with these exported types and constructor:
 
@@ -229,7 +237,7 @@ export function createEmptyWorkAssistantRun(id: string): WorkAssistantRun {
 }
 ```
 
-- [ ] **Step 2: Write reducer tests for ordering and terminal states**
+- [x] **Step 2: Write reducer tests for ordering and terminal states**
 
 Cover these cases in `workAssistantEventReducer.test.ts`:
 
@@ -270,7 +278,7 @@ it('does not revive a cancelled run with late events', () => {
 })
 ```
 
-- [ ] **Step 3: Implement the reducer**
+- [x] **Step 3: Implement the reducer**
 
 Create `workAssistantEventReducer.ts`. The reducer must:
 
@@ -432,7 +440,7 @@ export const reduceWorkAssistantEvents = (state: WorkAssistantRun, events: WorkA
   events.reduce(reduceWorkAssistantEvent, state)
 ```
 
-- [ ] **Step 4: Run protocol tests**
+- [x] **Step 4: Run protocol tests**
 
 Run: `npm run test:unit -- src/services/workAssistantProtocol.test.ts src/services/workAssistantEventReducer.test.ts`
 
@@ -453,7 +461,7 @@ git commit -m "feat: define work assistant event protocol"
 - Create: `src/services/workAssistantRegistry.test.ts`
 - Create: `src/services/workAssistantPolicy.test.ts`
 
-- [ ] **Step 1: Write registry filtering tests**
+- [x] **Step 1: Write registry filtering tests**
 
 ```ts
 it('hides unavailable and disabled tools from the model schema', () => {
@@ -468,7 +476,7 @@ it('hides unavailable and disabled tools from the model schema', () => {
 })
 ```
 
-- [ ] **Step 2: Implement manifest registration**
+- [x] **Step 2: Implement manifest registration**
 
 Use one manifest per tool. The shape must be:
 
@@ -553,7 +561,7 @@ const batchPlanSchema = () => objectSchema({
 
 Do not register browser-enhanced tools in this plan; the browser plan adds them after the bridge exists.
 
-- [ ] **Step 3: Write policy tests**
+- [x] **Step 3: Write policy tests**
 
 Test these exact rules:
 
@@ -580,7 +588,7 @@ expect(scopeAllows(previousFileScope, largerFileCount)).toBe(false)
 expect(scopeAllows(previousFileScope, sameBoundedOperation)).toBe(true)
 ```
 
-- [ ] **Step 4: Implement fail-closed policy helpers**
+- [x] **Step 4: Implement fail-closed policy helpers**
 
 ```ts
 export function effectiveRisk(
@@ -648,7 +656,7 @@ git commit -m "feat: add controlled assistant tool policy"
 - Create: `src-tauri/src/work_assistant/registry.rs`
 - Create: `src-tauri/src/work_assistant/audit.rs`
 
-- [ ] **Step 1: Add Rust dependencies**
+- [x] **Step 1: Add Rust dependencies**
 
 Add:
 
@@ -665,7 +673,7 @@ Run: `cargo check --manifest-path src-tauri/Cargo.toml`
 
 Expected: dependency resolution succeeds on Rust 1.77.2. If a selected crate raises the minimum Rust version, pin the newest compatible patch release and record the resolved version in `Cargo.lock`; do not raise `rust-version` in this task.
 
-- [ ] **Step 2: Define serializable command types**
+- [x] **Step 2: Define serializable command types**
 
 In `types.rs`, define:
 
@@ -726,7 +734,7 @@ impl From<WorkAssistantError> for AssistantErrorPayload {
 }
 ```
 
-- [ ] **Step 3: Create broker state and commands**
+- [x] **Step 3: Create broker state and commands**
 
 `mod.rs` must expose a managed state:
 
@@ -787,7 +795,7 @@ let state = work_assistant::init_state(app.handle())?;
 app.manage(state);
 ```
 
-- [ ] **Step 4: Add audit append/read/clear tests**
+- [x] **Step 4: Add audit append/read/clear tests**
 
 Use a temporary directory created from `std::env::temp_dir().join(format!("papyrus-test-{}", Uuid::new_v4()))`. Test that append writes one JSON object per line, malformed trailing lines are skipped during reads, and clear truncates the file without deleting the directory.
 
@@ -810,7 +818,7 @@ git commit -m "feat: add native work assistant broker"
 - Modify: `src-tauri/src/work_assistant/mod.rs`
 - Modify: `src-tauri/src/work_assistant/types.rs`
 
-- [ ] **Step 1: Write path-policy tests first**
+- [x] **Step 1: Write path-policy tests first**
 
 Cover:
 
@@ -837,7 +845,7 @@ fn resolves_new_destination_by_canonical_parent() {
 
 Use `#[cfg(unix)]` for symlink creation and add a Windows junction/temporary-directory case under `#[cfg(windows)]`.
 
-- [ ] **Step 2: Implement canonical boundary checks**
+- [x] **Step 2: Implement canonical boundary checks**
 
 ```rust
 pub fn resolve_existing(root: &Path, candidate: &Path) -> Result<PathBuf, WorkAssistantError> {
@@ -858,7 +866,7 @@ pub fn resolve_destination(root: &Path, candidate: &Path) -> Result<PathBuf, Wor
 
 On Windows, `ensure_inside` must compare normalized components case-insensitively and preserve UNC roots. On Unix, use component equality after canonicalization.
 
-- [ ] **Step 3: Implement root persistence commands**
+- [x] **Step 3: Implement root persistence commands**
 
 `work_assistant_add_root` must:
 
@@ -870,7 +878,7 @@ On Windows, `ensure_inside` must compare normalized components case-insensitivel
 
 `work_assistant_remove_root` must remove only the matching ID and invalidate previews referencing that root.
 
-- [ ] **Step 4: Implement read-only workspace commands**
+- [x] **Step 4: Implement read-only workspace commands**
 
 Add `workspace_list`, `workspace_scan`, `file_search`, `file_inspect`, and `downloads_scan` handlers. Bound every scan by:
 
@@ -902,7 +910,7 @@ git commit -m "feat: enforce work assistant workspace boundaries"
 - Modify: `src-tauri/src/work_assistant/mod.rs`
 - Modify: `src-tauri/src/work_assistant/types.rs`
 
-- [ ] **Step 1: Write preview revision tests**
+- [x] **Step 1: Write preview revision tests**
 
 Test that the revision changes when source length, modified time, destination existence, conflict policy, or operation order changes. Test that execution fails with `stale_preview` after the source is modified.
 
@@ -913,7 +921,7 @@ let error = execute_preview(&state, &preview.id, Some(valid_token())).unwrap_err
 assert_eq!(error.code, "stale_preview");
 ```
 
-- [ ] **Step 2: Define batch requests and results**
+- [x] **Step 2: Define batch requests and results**
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -966,7 +974,7 @@ pub struct BatchExecutionResult {
 
 Limit one preview to 200 items and 2 GiB total source bytes. `Overwrite` and `Trash` force risk `high`; copy/move/rename/create-directory use `reversible`.
 
-- [ ] **Step 3: Implement native approval tokens**
+- [x] **Step 3: Implement native approval tokens**
 
 Commands:
 
@@ -995,7 +1003,7 @@ pub fn work_assistant_execute(
 
 Tokens are random UUIDs bound to preview ID, revision, run ID, scope, expiry, and maximum item count. Execution consumes `once` tokens. Run-scoped grants remain valid only while all scope fields match and the run is not cancelled.
 
-- [ ] **Step 4: Implement file execution**
+- [x] **Step 4: Implement file execution**
 
 Rules:
 
@@ -1029,7 +1037,7 @@ git commit -m "feat: add approved file operation previews"
 - Modify: `src-tauri/src/work_assistant/mod.rs`
 - Modify: `src-tauri/src/work_assistant/types.rs`
 
-- [ ] **Step 1: Write target-validation tests**
+- [x] **Step 1: Write target-validation tests**
 
 ```rust
 assert!(validate_open_url("https://example.com/report").is_ok());
@@ -1041,7 +1049,7 @@ assert_eq!(validate_open_file(Path::new("installer.exe")).unwrap_err().code, "bl
 
 Test the full executable/script extension denylist from Task 5.
 
-- [ ] **Step 2: Implement platform-neutral status and open commands**
+- [x] **Step 2: Implement platform-neutral status and open commands**
 
 Use `sysinfo` for CPU, total/used memory, and disk summaries. Use `open::that` only after validating HTTP(S) URLs or ordinary files/directories inside an authorized root.
 
@@ -1060,7 +1068,7 @@ Command::new("xdg-open").arg(path.parent().unwrap_or(path)).spawn()
 
 No adapter may accept an entire command string.
 
-- [ ] **Step 3: Persist user-registered application aliases**
+- [x] **Step 3: Persist user-registered application aliases**
 
 Add `RegisteredApplication { id, label, executable_path, platform, created_at }` to the native config. Registration must originate from a system file picker, canonicalize the target, and reject shell/script files. Launch uses no model-supplied arguments:
 
@@ -1072,7 +1080,7 @@ pub fn launch_registered_app(app: &RegisteredApplication) -> Result<(), WorkAssi
 
 macOS accepts `.app` bundles and launches them with fixed `open -a`; Windows/Linux accept executable files selected by the user.
 
-- [ ] **Step 4: Expose audit list and clear commands**
+- [x] **Step 4: Expose audit list and clear commands**
 
 Return newest-first records with pagination `{ offset, limit }`, capped at 200. Clear requires a direct settings action and writes a final `audit_cleared` marker after truncation.
 
@@ -1096,7 +1104,7 @@ git commit -m "feat: add cross-platform desktop capabilities"
 - Create: `src/stores/useWorkAssistantStore.ts`
 - Modify: `src/hooks/useAgentStream.ts:1-45`
 
-- [ ] **Step 1: Create typed Tauri wrappers**
+- [x] **Step 1: Create typed Tauri wrappers**
 
 `workAssistantClient.ts` must expose typed functions for capabilities, roots, previews, approval, execution, cancellation, app aliases, and audit. Browser tests must be able to inject a mock invoker:
 
@@ -1112,7 +1120,7 @@ export const previewWorkAssistantAction = (request: NativePreviewRequest) =>
   invokeFn<AssistantToolPreview>('work_assistant_preview', { request })
 ```
 
-- [ ] **Step 2: Write approval-runtime tests**
+- [x] **Step 2: Write approval-runtime tests**
 
 Test:
 
@@ -1123,7 +1131,7 @@ Test:
 5. Aborted signals reject pending approval and invoke native cancellation.
 6. Two identical failures trip the loop guard on the third attempt.
 
-- [ ] **Step 3: Implement resolver-based approval waiting**
+- [x] **Step 3: Implement resolver-based approval waiting**
 
 ```ts
 const pendingApprovals = new Map<string, {
@@ -1144,7 +1152,7 @@ export function resolveAssistantApproval(id: string, choice: AssistantApprovalCh
 
 `file_plan_batch` calls the native preview command and returns its opaque preview ID to the Agent. `file_apply_batch` loads that existing preview ID, emits `approval.required`, obtains the native approval grant, and executes it; it must not build a second preview from model arguments.
 
-- [ ] **Step 4: Coalesce text deltas and preserve event order**
+- [x] **Step 4: Coalesce text deltas and preserve event order**
 
 Maintain one queued string per `{ runId, messageId }`. Flush at most once every 40ms using `requestAnimationFrame` plus a timeout floor. Before dispatching any non-`message.delta` event, synchronously flush that run's queued text so a tool row cannot appear before the sentence that introduced it.
 
@@ -1168,7 +1176,7 @@ export function dispatchOrderedWorkAssistantEvent(event: WorkAssistantEvent) {
 
 Add tests for two deltas becoming one reducer dispatch, tool-before-flush prevention, unmount flush, and cancelled-run late delta rejection.
 
-- [ ] **Step 5: Create a focused Zustand store**
+- [x] **Step 5: Create a focused Zustand store**
 
 Do not add more transient runtime state to `useAppStore.ts`. `useWorkAssistantStore.ts` owns:
 
@@ -1210,7 +1218,7 @@ git commit -m "feat: add work assistant approval runtime"
 - Modify: `src/services/agentOrchestrator.ts:120-215`
 - Modify: `src/services/agentOrchestrator.ts:933-1020`
 
-- [ ] **Step 1: Extend task classification with a domain**
+- [x] **Step 1: Extend task classification with a domain**
 
 Add:
 
@@ -1232,7 +1240,7 @@ export type SecretaryTaskClassification = {
 
 Classify file organization, downloads, local app, folder, disk, browser-open, and system-status requests as `work_assistant`; classify requests that both gather local/web material and produce prose as `mixed`; preserve existing writing classifications.
 
-- [ ] **Step 2: Write agent-loop tests with a scripted model**
+- [x] **Step 2: Write agent-loop tests with a scripted model**
 
 Use an injected `modelCall` and `executeTool`:
 
@@ -1258,7 +1266,7 @@ Also test unknown tools, malformed JSON, eight-round limit, duplicate failed arg
 
 Add a final-stream test where `finalDecision('整理完成')` is followed by streamed tokens `['已整理', ' 12 个文件。']`; assert two `message.delta` inputs coalesce into the canonical response `已整理 12 个文件。` and the chat contains one assistant message.
 
-- [ ] **Step 3: Implement a strict JSON decision protocol**
+- [x] **Step 3: Implement a strict JSON decision protocol**
 
 Intermediate model calls are buffered and never streamed into chat. Accept only:
 
@@ -1272,7 +1280,7 @@ The loop maximum is eight tool calls. Tool results returned to the model contain
 
 When the model returns `kind: 'final'`, treat `response` as an outline and make one short final streaming call with the verified tool receipts. Stream only that final prose through `message.delta`; if the provider is unavailable, emit the outline as one delta. On completion, replace the streamed buffer with the canonical final text and deduplicate it.
 
-- [ ] **Step 4: Add cancellation ownership**
+- [x] **Step 4: Add cancellation ownership**
 
 `secretaryRunController.ts` owns one `AbortController` per active flow run:
 
@@ -1292,7 +1300,7 @@ export function cancelSecretaryRun() {
 
 Do not abort an older completed run when a new run starts; clear ownership in `finally` only when IDs match.
 
-- [ ] **Step 5: Route work-assistant and mixed tasks**
+- [x] **Step 5: Route work-assistant and mixed tasks**
 
 In `sendFlowMessage`:
 
@@ -1331,11 +1339,11 @@ git commit -m "feat: route secretary tasks through controlled tools"
 - Modify: `src/services/agentOrchestrator.ts:590-730`
 - Modify: `src/components/FlowWorkspace.tsx:447-555`
 
-- [ ] **Step 1: Emit subagent lifecycle events**
+- [x] **Step 1: Emit subagent lifecycle events**
 
 When existing subagents are queued, running, completed, failed, skipped, or cancelled, dispatch matching work-assistant events. Progress text must be a user-verifiable summary such as the task title, current tool, or structured handoff; do not expose model reasoning.
 
-- [ ] **Step 2: Add tool-row component tests**
+- [x] **Step 2: Add tool-row component tests**
 
 Test that:
 
@@ -1346,7 +1354,7 @@ Test that:
 - failed rows show recoverable error and retry command;
 - expanding a row reveals preview details without duplicating the title.
 
-- [ ] **Step 3: Implement stable inline tool rows**
+- [x] **Step 3: Implement stable inline tool rows**
 
 `SecretaryToolStep` receives only one tool call and callbacks. It must not subscribe to streaming message text. Use icon buttons for disclosure, copy, retry, and dismiss; use text buttons only for `执行一次`, `本轮允许`, and `拒绝`.
 
@@ -1359,11 +1367,11 @@ Test that:
 />
 ```
 
-- [ ] **Step 4: Add the composer status stack**
+- [x] **Step 4: Add the composer status stack**
 
 Render Todo, subagents, background tools, and queued prompts in a stable block immediately above the existing command bar. Default Todo open; subagents and background tools collapsed. Reserve measured height so it cannot cover the final message.
 
-- [ ] **Step 5: Add cancellation and stall behavior**
+- [x] **Step 5: Add cancellation and stall behavior**
 
 While a run is active, show a stop icon beside the send/queue control. A two-second no-activity indicator appears only when status is `running`, never while `awaiting_approval`. On cancellation, preserve partial assistant text and mark unfinished tools/subagents cancelled.
 
@@ -1396,7 +1404,7 @@ git commit -m "feat: show secretary tools and subagents inline"
 - Modify: `src/components/SettingsPanel.tsx:50-70`
 - Modify: `src/components/SettingsPanel.tsx:458-515`
 
-- [ ] **Step 1: Rename and extend workbench views**
+- [x] **Step 1: Rename and extend workbench views**
 
 Use:
 
@@ -1406,15 +1414,15 @@ export type WorkbenchView = 'run' | 'files' | 'manuscript'
 
 Map the previous `workbench` state to `run` locally; it is component state and requires no persistence migration. The browser plan later adds `browser`.
 
-- [ ] **Step 2: Build file-preview tests**
+- [x] **Step 2: Build file-preview tests**
 
 Test source/target rows, conflict policy, item counts, stale preview warning, completed/failed item grouping, and selection synchronization with an inline tool row.
 
-- [ ] **Step 3: Implement the unframed file workbench**
+- [x] **Step 3: Implement the unframed file workbench**
 
 Use full-width sections for authorized root, batch summary, conflict policy, and operation list. Do not place cards inside cards. The view is read-only; approvals remain inline in chat.
 
-- [ ] **Step 4: Add computer-assistant settings**
+- [x] **Step 4: Add computer-assistant settings**
 
 Add `assistant` to `SettingsSectionId` and sidebar label `电脑助手`. The section provides:
 
@@ -1451,7 +1459,7 @@ git commit -m "feat: add file workbench and assistant settings"
 - Modify: `README.md`
 - Modify: `package.json`
 
-- [ ] **Step 1: Add a full mocked integration test**
+- [x] **Step 1: Add a full mocked integration test**
 
 The test must execute this sequence with a mocked model and Tauri invoker:
 
@@ -1467,11 +1475,11 @@ The test must execute this sequence with a mocked model and Tauri invoker:
 
 Assert one user message, one assistant message, one tool row per tool-call ID, no duplicate final text, and a completed run receipt.
 
-- [ ] **Step 2: Add cancellation and stale-preview integration tests**
+- [x] **Step 2: Add cancellation and stale-preview integration tests**
 
 Cancel while approval is pending and assert native cancellation plus no execute call. Return `stale_preview` during execution and assert the UI keeps the original plan, marks the tool recoverable, and offers regenerate-preview rather than replaying the old approval.
 
-- [ ] **Step 3: Add aggregate scripts**
+- [x] **Step 3: Add aggregate scripts**
 
 Add:
 
@@ -1480,11 +1488,11 @@ Add:
 "check:desktop": "npm run lint && npm run test:desktop && npm run build && npm run tauri:check:portable"
 ```
 
-- [ ] **Step 4: Update documentation**
+- [x] **Step 4: Update documentation**
 
 Document the controlled tool loop, approval levels, workspace authorization, file-operation limits, no-Shell boundary, audit location, and the fact that browser-enhanced controls arrive in the next plan.
 
-- [ ] **Step 5: Run the full core verification**
+- [x] **Step 5: Run the full core verification**
 
 Run:
 

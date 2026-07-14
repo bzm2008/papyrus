@@ -35,9 +35,7 @@ export function buildModelTierAssessments(
   const now = Date.now()
   const providerAssessments = providerOrder.map((providerId) => {
     const provider = providerConfigs[providerId] ?? defaultProviderConfigs[providerId]
-    const available =
-      provider.type === 'scallion_proxy' ||
-      (canCallProvider(provider) && isProviderValidated(provider))
+    const available = canCallProvider(provider) && isProviderValidated(provider)
     const score = scoreModel({
       providerId,
       label: provider.label,

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ordinary work form</title>
+    <style>
+      .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Ordinary work form</h1>
+      <label for="title">Title</label>
+      <input id="title" name="title" type="text" aria-label="Title" />
+
+      <label for="default-input">Default input</label>
+      <input id="default-input" name="default-input" aria-label="Default input" />
+
+      <label for="summary">Summary</label>
+      <textarea id="summary" name="summary" aria-label="Summary"></textarea>
+
+      <label for="notes">Notes</label>
+      <div id="notes" contenteditable="true" role="textbox" aria-label="Notes"></div>
+
+      <label for="disabled-input">Disabled field</label>
+      <input id="disabled-input" name="disabled-input" type="text" aria-label="Disabled field" disabled />
+      <button id="disabled-button" type="button" disabled>Disabled action</button>
+
+      <button id="next" type="button" aria-label="Next">Next</button>
+      <output id="clicked" aria-live="polite"></output>
+
+      <form id="ordinary-form" action="https://example.com/submit">
+        <label for="form-value">Form value</label>
+        <input id="form-value" name="form-value" type="text" aria-label="Form value" />
+        <button id="save-draft" type="submit" aria-label="Save draft">Save draft</button>
+      </form>
+      <output id="submitted" aria-live="polite"></output>
+
+      <a id="download" href="/sample.txt" download="sample.txt">Download report</a>
+      <a id="external" href="https://example.com/">External reference</a>
+
+      <input class="visually-hidden" id="hidden-input" name="hidden-input" type="text" aria-label="Hidden field" />
+    </main>
+    <script>
+      window.__events = { title: { input: 0, change: 0 }, summary: { input: 0, change: 0 }, notes: { input: 0, change: 0 } };
+      for (const id of ['title', 'summary', 'notes']) {
+        const node = document.getElementById(id);
+        node.addEventListener('input', () => { window.__events[id].input += 1; });
+        node.addEventListener('change', () => { window.__events[id].change += 1; });
+      }
+      document.getElementById('next').addEventListener('click', () => {
+        document.getElementById('clicked').textContent = 'clicked';
+      });
+      document.getElementById('ordinary-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        document.getElementById('submitted').textContent = 'submitted';
+      });
+    </script>
+  </body>
+</html>

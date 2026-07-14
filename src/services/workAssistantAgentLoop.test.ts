@@ -26,6 +26,35 @@ describe('runWorkAssistantAgentLoop', () => {
     await expect(runWorkAssistantAgentLoop({ runId: 'r2', prompt: 'x', toolNames: [], modelCall: async () => toolDecision('shell', {}), executeTool: vi.fn() })).rejects.toThrow('不可用工具')
   })
 
+  it('adds browser safety guidance only when browser tools are available', async () => {
+    const browserMessages: Array<{ role: string; content: string }> = []
+    await runWorkAssistantAgentLoop({
+      runId: 'browser-guidance',
+      prompt: '读取当前页面',
+      toolNames: ['browser_snapshot'],
+      modelCall: async (messages) => {
+        browserMessages.push(...messages)
+        return finalDecision('已读取。')
+      },
+      executeTool: vi.fn(),
+    })
+    expect(browserMessages[0]?.content).toContain('Never request passwords')
+    expect(browserMessages[0]?.content).toContain('latest browser snapshot')
+
+    const normalMessages: Array<{ role: string; content: string }> = []
+    await runWorkAssistantAgentLoop({
+      runId: 'normal-guidance',
+      prompt: '扫描文件',
+      toolNames: ['workspace_scan'],
+      modelCall: async (messages) => {
+        normalMessages.push(...messages)
+        return finalDecision('已扫描。')
+      },
+      executeTool: vi.fn(),
+    })
+    expect(normalMessages[0]?.content).not.toContain('Never request passwords')
+  })
+
   it('stops duplicate failed arguments before a third execution', async () => {
     const modelCall = vi.fn(async () => toolDecision('workspace_scan', { rootId: 'bad' }))
     const executeTool = vi.fn(async () => ({ ok: false, summary: 'failed', recoverable: true }))
@@ -62,6 +91,31 @@ describe('runWorkAssistantAgentLoop', () => {
     })
     expect(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join('')).toBe('已整理 12 个文件。')
     expect(result.response).toBe('已整理 12 个文件。')
+  })
+
+  it('falls back to the verified outline when final streaming is unavailable before any token', async () => {
+    const events: Array<{ type: string; delta?: string; response?: string }> = []
+    const result = await runWorkAssistantAgentLoop({
+      runId: 'r-fallback',
+      prompt: '整理下载目录',
+      toolNames: [],
+      modelCall: async () => finalDecision('已核对 3 个文件，未执行写入。'),
+      executeTool: vi.fn(),
+      finalStream: async () => {
+        throw new Error('provider unavailable')
+      },
+      emit: (event) => events.push(event),
+    })
+
+    expect(result.response).toBe('已核对 3 个文件，未执行写入。')
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'message.delta',
+      runId: 'r-fallback',
+      messageId: 'final-r-fallback',
+      delta: '已核对 3 个文件，未执行写入。',
+    }))
+    expect(events.at(-1)).toMatchObject({ type: 'run.completed', response: '已核对 3 个文件，未执行写入。' })
+    expect(events.some((event) => event.type === 'run.failed')).toBe(false)
   })
 
   it('keeps a mixed collection run open for the writing pipeline', async () => {

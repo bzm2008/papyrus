@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { setWorkAssistantInvokerForTests } from './workAssistantClient'
+import { resetBrowserBridgeInvokerForTests, setBrowserBridgeInvokerForTests } from './browserBridgeClient'
 import {
   dispatchOrderedWorkAssistantEvent,
   executeAssistantToolCall,
@@ -10,6 +11,7 @@ import {
 } from './workAssistantRuntime'
 import type { AssistantToolCall, WorkAssistantEvent } from './workAssistantProtocol'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
+import { useAppStore } from '../stores/useAppStore'
 
 const call = (name: string, args: Record<string, unknown> = {}, id = `call-${name}`): AssistantToolCall => ({
   id, runId: 'run-1', name, intent: name, arguments: args, status: 'queued', startedAt: 1,
@@ -18,6 +20,8 @@ const call = (name: string, args: Record<string, unknown> = {}, id = `call-${nam
 afterEach(() => {
   vi.useRealTimers()
   resetWorkAssistantRuntimeForTests()
+  resetBrowserBridgeInvokerForTests()
+  useAppStore.setState({ resources: [] })
 })
 
 describe('work assistant runtime', () => {
@@ -89,6 +93,44 @@ describe('work assistant runtime', () => {
 
     expect(third.errorCode).toBe('loop_guard')
     expect(invoke).toHaveBeenCalledTimes(2)
+  })
+
+  it('routes web extraction and project archiving through the approval boundary', async () => {
+    const extracted = {
+      url: 'https://example.com/research?utm_source=mail',
+      canonicalUrl: 'https://example.com/research',
+      title: '研究页面',
+      text: '这是经过提取的网页正文。',
+      links: [],
+      truncated: false,
+    }
+    setBrowserBridgeInvokerForTests(async (command) => {
+      if (command === 'web_extract') return extracted
+      throw new Error(`unexpected command: ${command}`)
+    })
+
+    const extraction = await executeAssistantToolCall({
+      runId: 'run-archive',
+      toolCall: call('web_extract', { url: extracted.url }),
+    })
+    const extractId = extraction.data?.extractId
+    expect(typeof extractId).toBe('string')
+
+    const events: WorkAssistantEvent[] = []
+    const archive = executeAssistantToolCall({
+      runId: 'run-archive',
+      toolCall: call('web_archive', { extractId, resourceName: '归档研究' }, 'archive'),
+      emit: (event) => events.push(event),
+    })
+    await Promise.resolve()
+    const approval = events.find((event): event is Extract<WorkAssistantEvent, { type: 'approval.required' }> => event.type === 'approval.required')
+    expect(approval?.request.reason).toContain('归档研究')
+    expect(approval && resolveAssistantApproval(approval.request.id, 'once')).toBe(true)
+
+    const result = await archive
+    expect(result).toMatchObject({ ok: true })
+    expect(useAppStore.getState().resources).toHaveLength(1)
+    expect(useAppStore.getState().resources[0]).toMatchObject({ type: 'html', name: '归档研究', canonicalUrl: 'https://example.com/research' })
   })
 
   it('coalesces deltas and flushes text before a tool event', () => {

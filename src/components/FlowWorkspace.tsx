@@ -16,10 +16,16 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useAgentStream } from '../hooks/useAgentStream'
-import { createSecretaryPlanDraft, reviseSecretaryPlanDraft } from '../services/agentOrchestrator'
+import {
+  createSecretaryPlanDraft,
+  reviseSecretaryPlanDraft,
+  shouldContinueSecretaryGoalCycle,
+} from '../services/agentOrchestrator'
 import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
+import { formatScallionPlanName } from '../services/scallionModelCatalog'
+import { shouldShowSecretaryPartialReply } from '../services/secretaryPartialReply'
 import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
 import { cancelSecretaryRun } from '../services/secretaryRunController'
 import { resolveAssistantApproval } from '../services/workAssistantRuntime'
@@ -44,6 +50,7 @@ import {
   ExecutionReceipt,
   MarkdownMessage,
   SecretaryWorkbenchPanel,
+  type WorkbenchView,
   ThoughtSummaryBlock,
 } from './SecretaryWorkbenchPanel'
 import { SlashCommandMenu } from './SlashCommandMenu'
@@ -51,10 +58,11 @@ import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from 
 import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
 import { SecretaryToolStep } from './SecretaryToolStep'
 import { SecretaryFileWorkbench } from './SecretaryFileWorkbench'
+import { SecretaryBrowserWorkbench } from './SecretaryBrowserWorkbench'
+import { SecretaryPartialReply } from './SecretaryPartialReply'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type AgentTodos = AgentTodo[]
-type WorkbenchView = 'run' | 'files' | 'manuscript'
 type ReceiptSnapshot = {
   todos: AgentTodo[]
   steps: AgentStep[]
@@ -94,12 +102,14 @@ export function FlowWorkspace() {
   const removeQueuedUserInput = useAppStore((state) => state.removeQueuedUserInput)
   const sendQueuedInputAsGuidance = useAppStore((state) => state.sendQueuedInputAsGuidance)
   const activeSecretaryGoal = useAppStore((state) => state.activeSecretaryGoal)
+  const activeAgentRunId = useAppStore((state) => state.activeAgentRunId)
   const activeWorkAssistantRunId = useWorkAssistantStore((state) => state.activeRunId)
   const activeWorkAssistantRun = useWorkAssistantStore((state) => activeWorkAssistantRunId ? state.runs[activeWorkAssistantRunId] : undefined)
   const selectWorkAssistantTool = useWorkAssistantStore((state) => state.selectToolCall)
   const selectedWorkAssistantToolId = useWorkAssistantStore((state) => state.selectedToolCallId)
   const activeWorkAssistantCalls = activeWorkAssistantRun ? Object.values(activeWorkAssistantRun.toolCalls) : []
   const selectedWorkAssistantCall = activeWorkAssistantCalls.find((call) => call.id === selectedWorkAssistantToolId)
+  const showCancelledPartialReply = shouldShowSecretaryPartialReply(activeWorkAssistantRun, activeAgentRunId)
   const filePlanCall = selectedWorkAssistantCall?.name === 'file_plan_batch' ? selectedWorkAssistantCall : [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_plan_batch')
   const fileApplyCall = [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_apply_batch')
   const updateSecretaryGoal = useAppStore((state) => state.updateSecretaryGoal)
@@ -227,12 +237,16 @@ export function FlowWorkspace() {
       }
 
       round += 1
-      await sendFlowMessage(currentRequest, {
+      const runOutcome = await sendFlowMessage(currentRequest, {
         displayPrompt: currentDisplay,
         thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
         goalId: goal.id,
         queuedInputId: currentQueuedInputId,
       })
+
+      if (!shouldContinueSecretaryGoalCycle(runOutcome)) {
+        break
+      }
 
       const afterRunGoal = useAppStore.getState().activeSecretaryGoal
 
@@ -499,6 +513,7 @@ export function FlowWorkspace() {
                 {shouldShowPendingThinking ? (
                   <ThinkingBubble key="thinking" todos={agentTodos} steps={agentSteps} runState={llmRunState} />
                 ) : null}
+                {showCancelledPartialReply ? <SecretaryPartialReply text={activeWorkAssistantRun?.messageText ?? ''} /> : null}
                 {activeWorkAssistantRun && ['running', 'awaiting_approval', 'completed', 'failed', 'cancelled'].includes(activeWorkAssistantRun.status)
                   ? Object.values(activeWorkAssistantRun.toolCalls).map((toolCall) => (
                       <SecretaryToolStep
@@ -613,6 +628,7 @@ export function FlowWorkspace() {
             changeStat={latestRunChangeStat}
             manuscript={<EditorPane />}
             files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
+            browser={<SecretaryBrowserWorkbench />}
           />
         ) : null}
       </AnimatePresence>
@@ -829,6 +845,7 @@ function SecretaryUsageOverview({
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
   const scallionUser = useAppStore((state) => state.scallionUser)
+  const scallionToken = useAppStore((state) => state.scallionToken)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
   const cacheStats = getModelCacheStats()
@@ -842,8 +859,16 @@ function SecretaryUsageOverview({
       ? 'Auto 调度'
       : providerConfigs[activeProviderId]?.label ?? '未选择'
   const quotaValue =
-    scallionQuota?.remaining ?? scallionUser?.points ?? scallionUser?.balance ?? 0
+    scallionQuota?.pointsBalance ??
+    scallionQuota?.remaining ??
+    scallionUser?.points ??
+    scallionUser?.balance ??
+    0
   const quotaUnit = scallionQuota?.unit ?? '积分'
+  const planLabel =
+    scallionQuota?.planName ??
+    scallionQuota?.planKey ??
+    (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined)
   const contextTitle = [
     `已用 ${formatCompactNumber(contextUsedTokens)} / 上限 ${formatCompactNumber(effectiveContextLimitTokens)} tokens`,
     `正文 ${formatCompactNumber(editorTokens)}`,
@@ -888,7 +913,10 @@ function SecretaryUsageOverview({
               <UsageMetric label="本轮 Token" value={formatCompactNumber(contextUsedTokens)} />
               <UsageMetric label="上下文" value={`${contextPercent}%`} title={contextTitle} />
               <UsageMetric label="当前模型" value={modelLabel} />
-              <UsageMetric label="内置额度" value={`${quotaValue} ${quotaUnit}`} />
+              <UsageMetric
+                label="套餐 / 积分"
+                value={`${planLabel ?? (scallionToken ? '同步中' : '未登录')} · ${quotaValue} ${quotaUnit}`}
+              />
               <UsageMetric label="缓存命中" value={`${cacheStats.hitRate}%`} />
               <UsageMetric label="累计修改" value={formatCompactNumber(totalChanged)} />
             </div>

@@ -58,7 +58,7 @@ export const addWorkAssistantRoot = (label: string, path: string, kind: Authoriz
   invokeTyped<AuthorizedRoot>('work_assistant_add_root', { label, path, kind })
 
 export const removeWorkAssistantRoot = (rootId: string) =>
-  invokeTyped<void>('work_assistant_remove_root', { rootId })
+  invokeTyped<void>('work_assistant_remove_root', { id: rootId })
 
 export const scanWorkAssistantRoot = (rootId: string) =>
   invokeTyped<Record<string, unknown>>('work_assistant_workspace_scan', { rootId })
@@ -69,8 +69,8 @@ export const searchWorkAssistantFiles = (rootId: string, query: string) =>
 export const inspectWorkAssistantFile = (rootId: string, path: string) =>
   invokeTyped<Record<string, unknown>>('work_assistant_file_inspect', { rootId, path })
 
-export const scanWorkAssistantDownloads = () =>
-  invokeTyped<Array<Record<string, unknown>>>('work_assistant_downloads_scan')
+export const scanWorkAssistantDownloads = (rootId: string) =>
+  invokeTyped<Record<string, unknown>>('work_assistant_downloads_scan', { rootId })
 
 export const previewWorkAssistantAction = (request: NativePreviewRequest) =>
   invokeTyped<AssistantToolPreview>('work_assistant_preview', { request })

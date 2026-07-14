@@ -212,6 +212,32 @@ mod tests {
     }
 
     #[test]
+    fn high_risk_preview_rejects_run_scoped_approval() {
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("source.txt"), "before").unwrap();
+        let state = state(root(&directory), &directory);
+        let request = BatchPreviewRequest {
+            run_id: "run".into(),
+            root_id: "root".into(),
+            operations: vec![FileOperationRequest {
+                kind: FileOperationKind::Trash,
+                source: Some("source.txt".into()),
+                destination: None,
+            }],
+            conflict_policy: ConflictPolicy::Skip,
+        };
+        let preview = create_batch_preview(&state, request).unwrap();
+        assert_eq!(preview.risk, "high");
+
+        let error = approve_batch_preview(&state, &preview.preview_id, "run", ApprovalChoice::Run)
+            .unwrap_err();
+        assert_eq!(error.code, "blocked");
+        assert!(state.approvals.lock().unwrap().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn preview_rejects_directory_move_before_it_can_prepare_an_overwrite() {
         let directory = test_dir();
         fs::create_dir_all(directory.join("source-directory")).unwrap();
@@ -459,6 +485,11 @@ pub fn approve_batch_preview(
     }
     if preview.expires <= unix_seconds() {
         return Err(WorkAssistantError::stale_preview("preview has expired"));
+    }
+    if preview.risk != "reversible" && choice == ApprovalChoice::Run {
+        return Err(WorkAssistantError::blocked(
+            "high-risk file operations only allow one-time approval",
+        ));
     }
     let max_count = request_from_payload(&preview.payload)?.operations.len() as u32;
 

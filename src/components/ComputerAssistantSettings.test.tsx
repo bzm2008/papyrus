@@ -18,16 +18,17 @@ describe('ComputerAssistantSettings', () => {
   it('shows capability reasons, authorized roots, applications, and audit records', async () => {
     render(<ComputerAssistantSettings />)
     expect(await screen.findByText('未注册应用')).toBeInTheDocument()
-    expect(screen.getByText('Work')).toBeInTheDocument()
+    expect(screen.getByText(/^Work · 工作区$/)).toBeInTheDocument()
     expect(screen.getByText('Editor')).toBeInTheDocument()
     expect(screen.getAllByText('workspace_scan')).toHaveLength(2)
   })
 
   it('adds a picker-authorized root and confirms audit clearing', async () => {
     render(<ComputerAssistantSettings />)
-    await screen.findByText('Work')
+    await screen.findByText(/^Work · 工作区$/)
+    fireEvent.change(screen.getByRole('combobox', { name: '授权目录类型' }), { target: { value: 'downloads' } })
     fireEvent.click(screen.getByRole('button', { name: '添加授权目录' }))
-    await waitFor(() => expect(client.addWorkAssistantRoot).toHaveBeenCalled())
+    await waitFor(() => expect(client.addWorkAssistantRoot).toHaveBeenCalledWith('Work', 'C:/Work', 'downloads'))
     fireEvent.click(screen.getByRole('button', { name: '清空审计记录' }))
     fireEvent.click(screen.getByRole('button', { name: '确认清空' }))
     await waitFor(() => expect(client.clearWorkAssistantAudit).toHaveBeenCalled())

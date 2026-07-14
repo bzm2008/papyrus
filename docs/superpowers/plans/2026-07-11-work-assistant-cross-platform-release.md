@@ -8,6 +8,15 @@
 
 **Tech Stack:** GitHub Actions, Node.js 22, Rust 1.77.2, Tauri 2, Vitest 4, Playwright Chromium, NSIS, DMG/App bundle, AppImage/DEB, cross-platform Node release scripts.
 
+## Completion Audit (2026-07-14)
+
+`[x]` means the files and local evidence were verified in the current Windows worktree. Commit
+steps remain unchecked because the branch is not committed. Remote CI, downloaded smoke artifacts,
+and every real-device record remain unchecked by design. The aggregate `ci:desktop` rehearsal,
+WPS production build, Browser Bridge Chromium E2E, full Rust suite, doctor probes, and Windows
+portable check were rerun after concurrent edits stopped and passed. The release report keeps
+remote and device items `pending` until an authorized push and physical-device runs exist.
+
 ---
 
 ## Execution Prerequisite
@@ -32,7 +41,7 @@ Expected: core and browser plans are fully implemented and locally green.
 - Create: `src/services/workAssistantDoctor.test.ts`
 - Modify: `src/components/ComputerAssistantSettings.tsx`
 
-- [ ] **Step 1: Define diagnostic checks**
+- [x] **Step 1: Define diagnostic checks**
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +67,7 @@ pub struct WorkAssistantDoctorReport {
 }
 ```
 
-- [ ] **Step 2: Write doctor tests**
+- [x] **Step 2: Write doctor tests**
 
 Inject filesystem, PATH lookup, port binding, and configured-root probes. Test:
 
@@ -71,11 +80,18 @@ Inject filesystem, PATH lookup, port binding, and configured-root probes. Test:
 - Browser Bridge connected/stale/disconnected state;
 - no check mutates user files, launches applications, or adds trash entries.
 
-- [ ] **Step 3: Implement the doctor command**
+The implementation exposes `DoctorProbes` and `run_doctor_with_browser_and_probes` so filesystem
+paths, PATH entries, clock values, downloads warnings, loopback failures, and opener availability
+are injected without changing process-wide environment state. Browser Bridge status is checked
+through a pure status helper. `cargo test --manifest-path src-tauri/Cargo.toml --locked doctor`
+passes 6 tests, including the no-side-effect and Linux `xdg-open` cases; the TypeScript doctor
+client suite passes 2 tests with `npm run test:unit -- src/services/workAssistantDoctor.test.ts`.
+
+- [x] **Step 3: Implement the doctor command**
 
 Register `work_assistant_doctor`. Return warnings for optional degradation and errors for broken core boundaries. Linux file-manager selection is a warning when only parent-directory opening is available; path-policy or audit failures are errors.
 
-- [ ] **Step 4: Add settings UI**
+- [x] **Step 4: Add settings UI**
 
 `ComputerAssistantSettings` renders the report as compact rows with status icons and messages. Add a refresh icon button. Do not show stack traces; preserve the structured error code for copy/debug actions.
 
@@ -108,7 +124,7 @@ git commit -m "feat: add work assistant platform diagnostics"
 - Create: `scripts/lib/release-checks.test.mjs`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: Install the ZIP dependency**
+- [x] **Step 1: Install the ZIP dependency**
 
 Run:
 
@@ -118,7 +134,7 @@ npm install --save-dev archiver
 
 Add `artifacts/browser-bridge/` to `.gitignore` while keeping the existing tracked `artifacts` behavior intact.
 
-- [ ] **Step 2: Write release-check unit tests**
+- [x] **Step 2: Write release-check unit tests**
 
 Use Node's built-in test runner. Test that checks fail for:
 
@@ -137,7 +153,7 @@ Replace `csp: null` in `src-tauri/tauri.conf.json` with:
 
 Custom model providers require HTTP(S) `connect-src`; Browser Bridge traffic remains in Rust and does not require WebSocket access from the main WebView.
 
-- [ ] **Step 3: Implement the release checker**
+- [x] **Step 3: Implement the release checker**
 
 ```js
 const requiredCommands = [
@@ -157,11 +173,11 @@ const requiredCommands = [
 
 Read and parse JSON/manifest files with structured APIs. Read Rust registration as text only for exact command-name presence. Exit 1 with one line per failure; exit 0 with a concise summary.
 
-- [ ] **Step 4: Implement deterministic extension packaging**
+- [x] **Step 4: Implement deterministic extension packaging**
 
 `package-browser-bridge.mjs` reads `package.json.version`, deletes only `artifacts/browser-bridge`, recreates it, sorts files from `dist-browser-bridge`, and writes ``Papyrus-Browser-Bridge_${version}.zip``. It must reject symlinks and files outside the build directory.
 
-- [ ] **Step 5: Add scripts**
+- [x] **Step 5: Add scripts**
 
 ```json
 "test:release-scripts": "node --test scripts/lib/release-checks.test.mjs",
@@ -201,7 +217,7 @@ git commit -m "build: add work assistant release checks"
 - Create: `apps/browser-bridge/e2e/browser-actions.spec.ts`
 - Create: `apps/browser-bridge/e2e/restricted-pages.spec.ts`
 
-- [ ] **Step 1: Install Playwright**
+- [x] **Step 1: Install Playwright**
 
 Run:
 
@@ -216,7 +232,7 @@ Add:
 "test:browser:e2e": "playwright test --config playwright.config.ts"
 ```
 
-- [ ] **Step 2: Configure a cross-platform fixture server**
+- [x] **Step 2: Configure a cross-platform fixture server**
 
 `playwright.config.ts`:
 
@@ -238,11 +254,11 @@ export default defineConfig({
 
 The fixture imports the production snapshot, restriction, and action modules. It does not replace them with test-only implementations.
 
-- [ ] **Step 3: Test ordinary browser actions**
+- [x] **Step 3: Test ordinary browser actions**
 
 In real Chromium, verify snapshot element labels, text-field fill, contenteditable fill, click, stale element after DOM replacement, disabled controls, download link metadata, input/change events, and post-action snapshot.
 
-- [ ] **Step 4: Test restricted pages**
+- [x] **Step 4: Test restricted pages**
 
 Use fixture routes for English/Chinese password reset, OTP, card payment, account security, hidden credential, and admin-console pages. Assert snapshots are restricted and no action reaches the DOM.
 
@@ -263,13 +279,13 @@ git commit -m "test: add Chromium browser action coverage"
 - Create: `.github/workflows/desktop-ci.yml`
 - Modify: `package.json`
 
-- [ ] **Step 1: Add an aggregate CI script**
+- [x] **Step 1: Add an aggregate CI script**
 
 ```json
 "ci:desktop": "npm run lint && npm run test:wps && npm run test:unit && npm run browser:test && npm run browser:build && npm run build && npm run test:release-scripts && npm run release:assistant-check:local"
 ```
 
-- [ ] **Step 2: Create the workflow matrix**
+- [x] **Step 2: Create the workflow matrix**
 
 ```yaml
 name: Desktop CI
@@ -306,7 +322,7 @@ jobs:
       - run: npm run test:browser:e2e
 ```
 
-- [ ] **Step 3: Add Linux prerequisites**
+- [x] **Step 3: Add Linux prerequisites**
 
 Before `npm ci` on Ubuntu, install:
 
@@ -317,11 +333,11 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file lib
 
 Use a YAML `if: runner.os == 'Linux'`. Run `npx playwright install --with-deps chromium` on Linux and plain `npx playwright install chromium` on Windows/macOS.
 
-- [ ] **Step 4: Add platform-specific portable checks**
+- [x] **Step 4: Add platform-specific portable checks**
 
 On Windows run `npm run tauri:check:portable`. On macOS/Linux run `cargo check --manifest-path src-tauri/Cargo.toml`. Keep both in addition to Rust tests.
 
-- [ ] **Step 5: Validate the workflow locally**
+- [x] **Step 5: Validate the workflow locally**
 
 Run:
 
@@ -331,7 +347,8 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run test:browser:e2e
 ```
 
-Expected: PASS. Review `.github/workflows/desktop-ci.yml` with `git diff --check`.
+Expected: PASS. Review `.github/workflows/desktop-ci.yml` with `git diff --check`. The exact three
+commands and workflow review now pass locally; the commit remains a separate unchecked step.
 
 - [ ] **Step 6: Commit**
 
@@ -349,7 +366,7 @@ git commit -m "ci: test desktop assistant on three platforms"
 - Create: `src-tauri/ci/linux.json`
 - Create: `.github/workflows/desktop-packages.yml`
 
-- [ ] **Step 1: Add CI bundle overlays**
+- [x] **Step 1: Add CI bundle overlays**
 
 Windows:
 
@@ -364,7 +381,7 @@ Windows:
 
 macOS uses `targets: ["app", "dmg"]`; Linux uses `targets: ["deb", "appimage"]`. All overlays disable updater artifacts so smoke builds do not require the protected Tauri signing key.
 
-- [ ] **Step 2: Create a manually dispatchable package workflow**
+- [x] **Step 2: Create a manually dispatchable package workflow**
 
 The workflow matrix contains:
 
@@ -389,11 +406,11 @@ npm run tauri -- build --config ${{ matrix.config }}
 
 After the workflow file exists, change `ci:desktop` to end with `npm run release:assistant-check` so subsequent pull requests enforce both CI workflow files.
 
-- [ ] **Step 3: Upload artifacts**
+- [x] **Step 3: Upload artifacts**
 
 Upload the platform bundle directory plus `artifacts/browser-bridge/*.zip`. Set retention to seven days and name every artifact with the commit SHA. Do not publish a GitHub Release from this workflow.
 
-- [ ] **Step 4: Document signing boundaries in workflow comments**
+- [x] **Step 4: Document signing boundaries in workflow comments**
 
 State that production Windows signing, macOS signing/notarization, Linux repository signing, and Tauri updater signing require protected credentials and are not bypassed by smoke artifacts.
 
@@ -416,7 +433,7 @@ git commit -m "ci: add cross-platform desktop package smoke builds"
 - Modify: `docs/BROWSER_BRIDGE.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: Define supported environments**
+- [x] **Step 1: Define supported environments**
 
 The matrix must require at least:
 
@@ -426,19 +443,19 @@ The matrix must require at least:
 
 Record OS version, architecture, Papyrus commit, package type, browser version, desktop environment, test date, tester, and outcome.
 
-- [ ] **Step 2: Define exact native workflow cases**
+- [x] **Step 2: Define exact native workflow cases**
 
 Include numbered cases for root authorization/removal, nested-root rejection, scan limits, search, copy, same-volume move, cross-volume file move, rename, conflict skip/rename/overwrite, trash and restore, cancellation, stale preview, executable blocking, app alias launch, URL open, reveal file, audit clear, and doctor report.
 
-- [ ] **Step 3: Define exact browser cases**
+- [x] **Step 3: Define exact browser cases**
 
 Include pairing, token expiry, current-tab authorization, navigation invalidation, public extraction, private redirect block, archive dedupe, ordinary input fill, contenteditable fill, submit approval, submit denial, send/publish approval, restricted password/OTP/payment/account pages, download, disconnect, browser restart, app restart, and extension removal.
 
-- [ ] **Step 4: Define UI and stream cases**
+- [x] **Step 4: Define UI and stream cases**
 
 Include first-token streaming, two-second stall indicator, tool-row ordering, approval waiting state, cancel with partial response, late-event rejection, explicit retry, simple-task single Agent, complex-task subagent tree, right-panel auto-open, manual close persistence, and no text overlap at 1040x680, 1360x860, and a narrow mobile-like WebView width.
 
-- [ ] **Step 5: Define completion rules**
+- [x] **Step 5: Define completion rules**
 
 Every required case must have pass/fail evidence. A warning may document Linux file-manager selection degradation; any path escape, stale approval execution, restricted-page action, duplicate execution, crash, or data loss is a release blocker.
 
@@ -455,7 +472,7 @@ git commit -m "docs: add work assistant platform certification"
 - Modify: `docs/testing/WORK_ASSISTANT_PLATFORM_MATRIX.md`
 - Create: `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`
 
-- [ ] **Step 1: Run the complete local verification**
+- [x] **Step 1: Run the complete local verification**
 
 ```powershell
 npm ci

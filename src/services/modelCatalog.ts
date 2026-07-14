@@ -354,10 +354,6 @@ export function providerValidationSignature(provider: LlmProviderConfig) {
 }
 
 export function isProviderValidated(provider: LlmProviderConfig) {
-  if (provider.type === 'scallion_proxy') {
-    return true
-  }
-
   return (
     Boolean(provider.validatedAt) &&
     provider.lastValidatedSignature === providerValidationSignature(provider)

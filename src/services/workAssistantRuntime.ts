@@ -14,8 +14,18 @@ import {
   scanWorkAssistantRoot,
   searchWorkAssistantFiles,
 } from './workAssistantClient'
+import {
+  approveBrowserAction,
+  browserSnapshot,
+  executeApprovedBrowserAction,
+  rejectBrowserAction,
+  startBrowserActionPreview,
+} from './browserBridgeClient'
+import type { BrowserActionPreview, WebExtractResult } from './browserBridgeClient'
+import { applyWebArchive, createWebArchivePreview, type WebArchivePreview } from './webArchiveService'
+import { extractPublicWebPage } from './webExtractService'
 import { approvalChoices, effectiveRisk } from './workAssistantPolicy'
-import { WORK_ASSISTANT_TOOLS } from './workAssistantRegistry'
+import { ALL_WORK_ASSISTANT_TOOLS } from './workAssistantRegistry'
 import type {
   AssistantApprovalChoice,
   AssistantApprovalRequest,
@@ -41,6 +51,8 @@ type ExecuteToolInput = {
 
 const pendingApprovals = new Map<string, PendingApproval>()
 const previewCache = new Map<string, AssistantToolPreview>()
+const webExtractCache = new Map<string, { result: WebExtractResult; expiresAt: number }>()
+const webArchivePreviewCache = new Map<string, { result: WebExtractResult; preview: WebArchivePreview }>()
 const failureCounts = new Map<string, number>()
 
 const queuedDeltas = new Map<string, { runId: string; messageId: string; text: string; at: number }>()
@@ -124,32 +136,113 @@ function safeToolFailure(error: unknown) {
   const payload = error && typeof error === 'object' ? error as Record<string, unknown> : {}
   const code = typeof payload.code === 'string' ? payload.code : 'tool_failed'
   const recoverable = payload.recoverable !== false
-  const summary = code === 'stale_preview'
-    ? '预览已过期，请重新生成。'
-    : code === 'cancelled'
-      ? '运行已取消。'
-      : code === 'path_outside_workspace'
-        ? '请求路径不在已授权工作区内。'
-        : code === 'blocked'
-          ? '该本地操作已被安全策略阻止。'
-          : '工具执行失败，请检查能力状态后重试。'
+  const summaries: Record<string, string> = {
+    stale_preview: '预览已过期，请重新生成。',
+    cancelled: '运行已取消。',
+    path_outside_workspace: '请求路径不在已授权工作区内。',
+    blocked: '该本地操作已被安全策略阻止。',
+    page_restricted: '当前页面包含密码、验证码、支付或账号安全内容，已阻止操作。',
+    stale_page: '页面已经变化，请重新获取快照后再操作。',
+    browser_disconnected: '浏览器未连接，请先配对当前标签页。',
+    network: '网络暂不可用，请检查连接后重试。',
+    timeout: '请求超时，请稍后重试。',
+    unsupported_content_type: '网页内容类型不支持，仅允许 HTML 或纯文本。',
+    response_too_large: '网页响应过大，已停止读取。',
+  }
+  const summary = summaries[code] ?? '工具执行失败，请检查能力状态后重试。'
   return { ok: false as const, summary, errorCode: code, recoverable }
 }
 
-async function executeReadOrDesktopTool(call: AssistantToolCall): Promise<unknown> {
+async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal): Promise<unknown> {
   const args = call.arguments
   switch (call.name) {
     case 'workspace_list': return listWorkAssistantRoots()
     case 'workspace_scan': return scanWorkAssistantRoot(String(args.rootId ?? ''))
     case 'file_search': return searchWorkAssistantFiles(String(args.rootId ?? ''), String(args.query ?? ''))
     case 'file_inspect': return inspectWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
-    case 'downloads_scan': return scanWorkAssistantDownloads()
+    case 'downloads_scan': return scanWorkAssistantDownloads(String(args.rootId ?? ''))
     case 'desktop_status': return getWorkAssistantDesktopStatus()
     case 'desktop_open_url': return openWorkAssistantUrl(String(args.url ?? ''))
     case 'file_open': return openWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_reveal_file': return revealWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_open_app': return launchRegisteredApplication(String(args.appId ?? ''))
-    default: throw new Error(`Unsupported work-assistant tool: ${call.name}`)
+    case 'web_extract': {
+      const result = await extractPublicWebPage(String(args.url ?? ''), call.runId, signal)
+      const extractId = `${call.runId}:${call.id}`
+      webExtractCache.set(extractId, { result, expiresAt: now() + 10 * 60_000 })
+      return { ...result, extractId }
+    }
+    default: throw new Error(`Unsupported native work-assistant tool: ${call.name}`)
+  }
+}
+
+async function executeBrowserBridgeTool(call: AssistantToolCall): Promise<unknown> {
+  const args = call.arguments
+  switch (call.name) {
+    case 'browser_snapshot': return browserSnapshot(typeof args.pageRevision === 'string' ? args.pageRevision : undefined, typeof args.snapshotId === 'string' ? args.snapshotId : undefined)
+    default: throw new Error(`Unsupported browser bridge tool: ${call.name}`)
+  }
+}
+
+function browserActionKind(name: AssistantToolCall['name']) {
+  const actions = {
+    browser_open: 'navigate',
+    browser_fill_draft: 'fillDraft',
+    browser_click: 'click',
+    browser_download: 'download',
+    browser_submit: 'submit',
+  } as const
+  return actions[name as keyof typeof actions]
+}
+
+async function previewBrowserBridgeAction(call: AssistantToolCall): Promise<BrowserActionPreview> {
+  const args = call.arguments
+  const action = browserActionKind(call.name)
+  if (!action) throw new Error(`Unsupported browser bridge preview: ${call.name}`)
+  return startBrowserActionPreview({
+    action,
+    runId: call.runId,
+    toolCallId: call.id,
+    elementToken: typeof args.elementToken === 'string' ? args.elementToken : undefined,
+    value: typeof args.value === 'string' ? args.value : undefined,
+    pageRevision: typeof args.pageRevision === 'string' ? args.pageRevision : '',
+    snapshotId: typeof args.snapshotId === 'string' ? args.snapshotId : undefined,
+    url: typeof args.url === 'string' ? args.url : undefined,
+    directoryRootId: typeof args.directoryRootId === 'string' ? args.directoryRootId : undefined,
+  })
+}
+
+function resolveWebArchiveInput(call: AssistantToolCall): { result: WebExtractResult; resourceName?: string } {
+  const args = call.arguments
+  const extractId = typeof args.extractId === 'string' ? args.extractId : ''
+  if (extractId) {
+    const cached = webExtractCache.get(extractId)
+    if (!cached || cached.expiresAt <= now()) {
+      webExtractCache.delete(extractId)
+      throw Object.assign(new Error('网页提取结果已过期，请重新提取。'), { code: 'stale_preview', recoverable: true })
+    }
+    return { result: cached.result, resourceName: typeof args.resourceName === 'string' ? args.resourceName : undefined }
+  }
+
+  // Keep accepting the pre-bridge shape for existing clients, but it is still
+  // converted to the same project resource and approval path.
+  const url = typeof args.url === 'string' ? args.url : ''
+  const text = typeof args.text === 'string' ? args.text : ''
+  if (!url || !text) throw new Error('网页归档需要提取 ID 或完整 URL 与正文。')
+  return {
+    result: {
+      url,
+      canonicalUrl: typeof args.canonicalUrl === 'string' ? args.canonicalUrl : undefined,
+      title: typeof args.title === 'string' ? args.title : '',
+      text,
+      links: [],
+      truncated: false,
+    },
+    resourceName: typeof args.resourceName === 'string'
+      ? args.resourceName
+      : typeof args.title === 'string'
+        ? args.title
+        : undefined,
   }
 }
 
@@ -196,13 +289,21 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       return result
     }
 
-    const manifest = WORK_ASSISTANT_TOOLS.find((item) => item.name === call.name)
+    const manifest = ALL_WORK_ASSISTANT_TOOLS.find((item) => item.name === call.name)
     if (!manifest) throw new Error(`Unsupported work-assistant tool: ${call.name}`)
 
     if (call.name === 'file_apply_batch') {
       const previewId = String(call.arguments.previewId ?? '')
       preview = previewCache.get(previewId)
       if (!preview) throw new Error('The approved preview is unavailable; regenerate it first.')
+    } else if (manifest.executor === 'project') {
+      if (call.name !== 'web_archive') throw new Error(`Unsupported project tool: ${call.name}`)
+      const archiveInput = resolveWebArchiveInput(call)
+      const archivePreview = createWebArchivePreview(archiveInput.result, archiveInput.resourceName)
+      preview = archivePreview
+      webArchivePreviewCache.set(archivePreview.id, { result: archiveInput.result, preview: archivePreview })
+    } else if (manifest.executor === 'browser_bridge' && manifest.defaultRisk !== 'read') {
+      preview = await previewBrowserBridgeAction(call)
     } else if (manifest.defaultRisk !== 'read') {
       preview = syntheticPreview(call, manifest.defaultRisk)
     }
@@ -219,6 +320,9 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       emit({ type: 'approval.required', runId: input.runId, request, at: now() })
       const choice = await waitForApproval(request, input.signal)
       if (choice === 'deny') {
+        if (manifest.executor === 'browser_bridge') {
+          await rejectBrowserAction(preview.id, input.runId).catch(() => undefined)
+        }
         const denied = { ok: false, summary: '用户已拒绝该操作。', errorCode: 'cancelled', recoverable: true }
         emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: denied, at: now() })
         return denied
@@ -239,10 +343,50 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
       }
+      if (manifest.executor === 'project') {
+        const pending = webArchivePreviewCache.get(preview.id)
+        if (!pending) throw new Error('网页归档预览不可用，请重新提取。')
+        const result = applyWebArchive(pending.result, pending.preview)
+        webArchivePreviewCache.delete(preview.id)
+        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        return result
+      }
+      if (manifest.executor === 'browser_bridge') {
+        const grant = await approveBrowserAction(preview.id, input.runId)
+        const data = await executeApprovedBrowserAction({
+          previewId: grant.previewId,
+          approvalToken: grant.token,
+          actionHash: grant.actionHash,
+        })
+        const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
+        const result = actionPayload?.ok === false
+          ? {
+              ok: false as const,
+              summary: typeof actionPayload.summary === 'string' ? actionPayload.summary : '浏览器动作被安全策略阻止。',
+              errorCode: typeof actionPayload.errorCode === 'string' ? actionPayload.errorCode : 'blocked',
+              recoverable: actionPayload.recoverable !== false,
+              data: sanitizedToolData(call.name, data),
+            }
+          : { ok: true as const, summary: resultSummary(data), data: sanitizedToolData(call.name, data) }
+        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        return result
+      }
     }
 
-    const data = await executeReadOrDesktopTool(call)
-    const result = { ok: true, summary: resultSummary(data), data: sanitizedToolData(call.name, data) }
+    const data = manifest.executor === 'browser_bridge'
+      ? await executeBrowserBridgeTool(call)
+      : await executeNativeTool(call, input.signal)
+    const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
+    const actionFailure = actionPayload?.ok === false
+    const result = actionFailure
+      ? {
+          ok: false as const,
+          summary: typeof actionPayload?.summary === 'string' ? actionPayload.summary : '浏览器动作被安全策略阻止。',
+          errorCode: typeof actionPayload?.errorCode === 'string' ? actionPayload.errorCode : 'blocked',
+          recoverable: actionPayload?.recoverable !== false,
+          data: sanitizedToolData(call.name, data),
+        }
+      : { ok: true as const, summary: resultSummary(data), data: sanitizedToolData(call.name, data) }
     failureCounts.delete(key)
     emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
     return result
@@ -315,6 +459,9 @@ export function resetWorkAssistantRuntimeForTests() {
   flushAllWorkAssistantDeltas()
   pendingApprovals.clear()
   previewCache.clear()
+  webExtractCache.clear()
+  webArchivePreviewCache.clear()
   failureCounts.clear()
-  useWorkAssistantStore.setState({ runs: {}, activeRunId: undefined, selectedToolCallId: undefined, capabilityStatus: [] })
+  useWorkAssistantStore.getState().resetAllRuns()
+  useWorkAssistantStore.setState({ capabilityStatus: [] })
 }

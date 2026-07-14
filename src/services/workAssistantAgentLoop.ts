@@ -25,6 +25,14 @@ export type WorkAssistantAgentLoopInput = {
 
 const MAX_TOOL_CALLS = 8
 
+const browserSafetyGuidance = [
+  'Never request passwords, verification codes, payment details, or hidden-field values.',
+  'Never submit a form unless the user explicitly requested submission; prefer fill-draft and stop before submit.',
+  'Use element tokens only from the latest browser snapshot.',
+  'After navigation or a stale result, request a fresh browser snapshot and do not guess a replacement element.',
+  'Do not claim a browser action succeeded unless its tool result has ok: true.',
+]
+
 function parseDecision(raw: string): WorkAssistantDecision {
   let value: unknown
   try {
@@ -71,6 +79,7 @@ export async function runWorkAssistantAgentLoop(input: WorkAssistantAgentLoopInp
         `Available tools: ${input.toolNames.join(', ')}`,
         input.toolSchemas ? `Tool schemas: ${JSON.stringify(input.toolSchemas)}` : '',
         'Never invent paths or approval tokens. file_apply_batch may only reference previewId returned by file_plan_batch.',
+        ...(input.toolNames.some((name) => name.startsWith('browser_')) ? browserSafetyGuidance : []),
       ].join('\n'),
     },
     { role: 'user', content: input.prompt },
@@ -88,11 +97,25 @@ export async function runWorkAssistantAgentLoop(input: WorkAssistantAgentLoopInp
         if (input.collectionOnly) return { response, toolResults: results }
         if (!input.collectionOnly && input.finalStream) {
           let streamed = ''
-          response = await input.finalStream(decision.response, receipts, (token) => {
-            streamed += token
-            emit({ type: 'message.delta', runId: input.runId, messageId: `final-${input.runId}`, delta: token, at: Date.now() })
-          }, input.signal)
+          let streamFailedBeforeOutput = false
+          try {
+            response = await input.finalStream(decision.response, receipts, (token) => {
+              streamed += token
+              emit({ type: 'message.delta', runId: input.runId, messageId: `final-${input.runId}`, delta: token, at: Date.now() })
+            }, input.signal)
+          } catch (error) {
+            const cancelled = input.signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')
+            if (cancelled || streamed.trim()) throw error
+            // The outline was already produced from the verified tool receipts. If the short
+            // synthesis call is unavailable before its first token, keep the run useful without
+            // retrying the provider or emitting a duplicate partial response.
+            response = decision.response
+            streamFailedBeforeOutput = true
+          }
           if (!response.trim()) response = streamed.trim() || decision.response
+          if (streamFailedBeforeOutput || !streamed.trim() && response === decision.response) {
+            emit({ type: 'message.delta', runId: input.runId, messageId: `final-${input.runId}`, delta: response, at: Date.now() })
+          }
         } else {
           emit({ type: 'message.delta', runId: input.runId, messageId: `final-${input.runId}`, delta: response, at: Date.now() })
         }

@@ -24,7 +24,43 @@ pub fn capability_statuses() -> Vec<CapabilityStatus> {
         .collect();
     capabilities.extend(file_operation_capabilities(&platform));
     capabilities.extend(desktop_capabilities(&platform));
+    capabilities.extend(browser_capabilities(&platform, false));
     capabilities
+}
+
+fn browser_capabilities(platform: &str, paired: bool) -> Vec<CapabilityStatus> {
+    let reason = if paired {
+        None
+    } else {
+        Some("先在设置中启动并配对 Browser Bridge 当前标签页")
+    };
+    [
+        "browser_bridge",
+        "web_extract",
+        "web_archive",
+        "browser_open",
+        "browser_snapshot",
+        "browser_fill_draft",
+        "browser_click",
+        "browser_download",
+        "browser_submit",
+    ]
+    .into_iter()
+    .map(|name| {
+        let web_only = matches!(name, "web_extract" | "web_archive");
+        CapabilityStatus {
+            name: name.into(),
+            toolset: "browser".into(),
+            available: paired || web_only,
+            reason: if paired || web_only {
+                None
+            } else {
+                reason.map(str::to_owned)
+            },
+            platform: platform.into(),
+        }
+    })
+    .collect()
 }
 
 fn desktop_capabilities(platform: &str) -> Vec<CapabilityStatus> {
@@ -134,8 +170,30 @@ fn file_operation_capabilities(platform: &str) -> Vec<CapabilityStatus> {
 }
 
 #[tauri::command]
-pub fn work_assistant_capabilities() -> Vec<CapabilityStatus> {
-    capability_statuses()
+pub fn work_assistant_capabilities(
+    browser: State<'_, crate::work_assistant::browser_bridge::BrowserBridgeState>,
+) -> Vec<CapabilityStatus> {
+    let mut capabilities = capability_statuses();
+    let paired = browser_bridge_is_paired(&browser);
+    for capability in capabilities
+        .iter_mut()
+        .filter(|item| item.toolset == "browser")
+    {
+        let web_only = matches!(capability.name.as_str(), "web_extract" | "web_archive");
+        capability.available = paired || web_only;
+        capability.reason = if paired || web_only {
+            None
+        } else {
+            Some("先在设置中启动并配对 Browser Bridge 当前标签页".into())
+        };
+    }
+    capabilities
+}
+
+fn browser_bridge_is_paired(
+    state: &crate::work_assistant::browser_bridge::BrowserBridgeState,
+) -> bool {
+    state.status().paired
 }
 
 #[tauri::command]

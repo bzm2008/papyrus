@@ -54,7 +54,7 @@ export function selectModelForRole(
     .map((providerId) => store.providerConfigs[providerId])
     .filter((provider): provider is LlmProviderConfig => Boolean(provider))
     .filter((provider) => isProviderAllowedForAuto(provider.id))
-    .filter((provider) => provider.type === 'scallion_proxy' || (canCallProvider(provider) && isProviderValidated(provider)))
+    .filter((provider) => canCallProvider(provider) && isProviderValidated(provider))
 
   const fallbackCandidates = [fallback, store.providerConfigs.qwen36]
     .filter(Boolean)

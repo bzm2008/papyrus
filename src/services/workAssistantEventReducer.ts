@@ -6,7 +6,7 @@ import type {
 } from './workAssistantProtocol'
 
 const isTerminalSubagent = (subagent: AssistantSubagent) =>
-  subagent.status === 'completed' || subagent.status === 'failed' || subagent.status === 'cancelled'
+  subagent.status === 'completed' || subagent.status === 'failed' || subagent.status === 'cancelled' || subagent.status === 'skipped'
 
 const isTerminalToolCall = (toolCall: AssistantToolCall) =>
   toolCall.status === 'completed' || toolCall.status === 'failed' || toolCall.status === 'cancelled'
@@ -163,7 +163,7 @@ export function reduceWorkAssistantEvent(
           ...state.subagents,
           [subagent.id]: {
             ...subagent,
-            status: event.failed ? 'failed' : 'completed',
+            status: event.failed ? 'failed' : event.skipped ? 'skipped' : 'completed',
             summary: event.summary,
             currentTool: undefined,
             endedAt: event.at,

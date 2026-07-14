@@ -1,4 +1,5 @@
 import { Columns3, LogIn, PanelLeft, PanelRight, Radio, Sparkles } from 'lucide-react'
+import { formatScallionPlanName } from '../services/scallionModelCatalog'
 import { type ColumnMode, useAppStore } from '../stores/useAppStore'
 
 const columnControls: Array<{
@@ -30,6 +31,9 @@ export function StatusBar() {
   const updateStatus = useAppStore((state) => state.updateStatus)
   const updateMessage = useAppStore((state) => state.updateMessage)
   const scallionUser = useAppStore((state) => state.scallionUser)
+  const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionSync = useAppStore((state) => state.scallionSync)
+  const scallionToken = useAppStore((state) => state.scallionToken)
   const authStatus = useAppStore((state) => state.authStatus)
   const activeChatId = useAppStore((state) => state.activeChatId)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
@@ -102,8 +106,26 @@ export function StatusBar() {
         </span>
         <span className="truncate tabular-nums">累计修改 {conversationChangedChars} 字</span>
         {updateStatus !== 'idle' ? <span className="truncate">更新: {updateMessage}</span> : null}
-        {scallionUser ? (
-          <span className="truncate">Scallion: {scallionUser.username}</span>
+        {scallionUser || scallionToken || scallionQuota ? (
+          <span
+            className="truncate tabular-nums"
+            title={[
+              scallionQuota?.planName || scallionQuota?.planKey || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : 'Scallion 套餐'),
+              scallionQuota?.updatedAt ? `最近同步 ${formatSyncTime(scallionQuota.updatedAt)}` : '',
+              scallionSync.quota.error || '',
+            ]
+            .filter(Boolean)
+              .join(' · ')}
+          >
+            {scallionQuota?.planName || scallionQuota?.planKey || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : 'Scallion')} ·{' '}
+            {scallionQuota
+              ? `余 ${scallionQuota.pointsBalance ?? scallionQuota.remaining ?? scallionUser?.points ?? scallionUser?.balance ?? 0} ${scallionQuota.unit ?? '积分'}`
+              : scallionSync.quota.status === 'error'
+                ? '积分同步失败'
+                : '积分同步中'}
+            {scallionQuota && scallionSync.quota.status === 'syncing' ? ' · 更新中' : ''}
+            {scallionQuota && scallionSync.quota.status === 'stale' ? ' · 可能过期' : ''}
+          </span>
         ) : (
           <button
             type="button"
@@ -128,4 +150,9 @@ export function StatusBar() {
       </div>
     </footer>
   )
+}
+
+function formatSyncTime(value: number) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleTimeString('zh-CN')
 }

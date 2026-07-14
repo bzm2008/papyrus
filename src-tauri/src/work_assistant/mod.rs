@@ -1,5 +1,7 @@
 mod audit;
+pub mod browser_bridge;
 mod desktop;
+mod doctor;
 mod file_ops;
 mod path_policy;
 pub(crate) mod platform;
@@ -9,7 +11,9 @@ mod types;
 mod workspace;
 
 pub use audit::*;
+pub use browser_bridge::*;
 pub use desktop::*;
+pub use doctor::*;
 pub use file_ops::*;
 pub use path_policy::*;
 #[allow(unused_imports)]
