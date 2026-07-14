@@ -6,7 +6,7 @@
 
 **Architecture:** Add a native doctor command and a cross-platform release checker so unsupported or degraded capabilities are explicit. Run the same TypeScript, Rust, extension, browser, and Tauri checks on all three GitHub-hosted operating systems; build unsigned smoke packages in CI and reserve production signing/notarization for protected release credentials.
 
-**Tech Stack:** GitHub Actions, Node.js 22, Rust 1.77.2, Tauri 2, Vitest 4, Playwright Chromium, NSIS, DMG/App bundle, AppImage/DEB, cross-platform Node release scripts.
+**Tech Stack:** GitHub Actions, Node.js 22, Rust 1.95.0 (package MSRV 1.88.0), Tauri 2, Vitest 4, Playwright Chromium, NSIS, DMG/App bundle, AppImage/DEB, cross-platform Node release scripts.
 
 ## Completion Audit (2026-07-14)
 
@@ -310,7 +310,7 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.77.2
+          toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri

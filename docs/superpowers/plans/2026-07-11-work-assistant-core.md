@@ -671,7 +671,7 @@ open = "5"
 
 Run: `cargo check --manifest-path src-tauri/Cargo.toml`
 
-Expected: dependency resolution succeeds on Rust 1.77.2. If a selected crate raises the minimum Rust version, pin the newest compatible patch release and record the resolved version in `Cargo.lock`; do not raise `rust-version` in this task.
+Expected: dependency resolution succeeds on the declared Rust MSRV (`1.88.0`). The current lockfile contains edition-2024 dependencies that cannot be parsed by Cargo 1.77.2; CI therefore uses Rust 1.95.0 while the package MSRV records the dependency floor.
 
 - [x] **Step 2: Define serializable command types**
 
