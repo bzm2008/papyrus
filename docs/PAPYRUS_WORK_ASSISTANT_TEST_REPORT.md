@@ -6,7 +6,7 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `14226ef`（本地已提交，尚未推送，不能作为远程认证 commit） |
+| Papyrus commit | `98951ce`（本地已提交，尚未推送，不能作为远程认证 commit） |
 | Desktop CI run | `待填写 URL` |
 | Package smoke run | `待填写 URL` |
 | 报告更新时间 | `2026-07-14（Windows 本地回归刷新）` |
@@ -72,6 +72,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run release:assistant-check`：local/release 两阶段均通过；release 阶段还检查三平台 workflow 的关键命令、手动 dispatch、artifact 上传/保留、commit SHA、签名边界和打包 overlay。
 - Scallion 模型/额度契约：模型目录默认请求 `include_unavailable=1`，套餐外模型只读展示并禁用；余额以 `points_balance` 为准；模型目录按 token 去重并设置超时；不确定的 Scallion 网络结果不会自动切换 Tauri 重发。
 - WPS 模型/额度同步：`/models` 与 `/quota` 独立更新；单通道失败时保留旧目录/积分并显示 `stale`，无旧值时显示 `error`；成功、402、5xx、超时和流中断后会触发额度刷新，取消和认证失效不重复刷新。
+- 跨目标静态检查：当前 Windows toolchain 未安装 `x86_64-unknown-linux-gnu` 或 `aarch64-apple-darwin` 标准库；对应 `cargo check --target` 因缺少 `core` 失败，保留为跨平台 CI 责任项。
 
 `npm run ci:desktop`：在停止并发编辑后的稳定工作树上通过；该聚合脚本不包含 Rust、portable MSVC 和真实 Chromium E2E，这些项目已由上面的独立门禁覆盖。`npm run release:assistant-check:local` 与 `npm run release:assistant-check` 均通过。真实用户文件的完整写入/恢复 smoke 尚未执行，不能用临时测试目录替代现场记录。
 
@@ -79,6 +80,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 
 ## 远程仓库证据（只读检查，2026-07-14）
 
-- GitHub 远程目前只有 `main` 分支，最新远程 commit 为 `6a9a90dcde6c65d28beb8bbb33198bc3ffadc3d3`；当前本地 `feature/work-assistant`（`14226ef`）已提交但没有 upstream。
+- GitHub 远程目前只有 `main` 分支，最新远程 commit 为 `6a9a90dcde6c65d28beb8bbb33198bc3ffadc3d3`；当前本地 `feature/work-assistant`（`98951ce`）已提交但没有 upstream。
+- 当前最终本地提交为 `98951ce`；`git push --dry-run` 曾通过，但实际 HTTPS push 在连接写入阶段被 reset，随后 GitHub API/`ls-remote` 也出现 443 连接失败，因此远程没有认证分支或 CI run。
 - GitHub Actions API 返回 `total_count=0`；远程 `.github/workflows` 内容接口返回 404。因此没有可引用的远程 CI run、跨平台 artifact 或下载 smoke 证据。
 - 上述只读结果不改变总体 `pending` 状态，也不关闭 `REL-CERT-PENDING`。
