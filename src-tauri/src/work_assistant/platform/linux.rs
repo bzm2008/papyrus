@@ -47,6 +47,7 @@ pub(crate) fn open_source(
                     "approved source must be a regular file",
                 ));
             }
+            let version = file_version(&file)?;
             return Ok(OpenedPlatformSource {
                 file: file
                     .try_clone()
@@ -61,7 +62,7 @@ pub(crate) fn open_source(
                 root_identity,
                 source_identity: identity_from_metadata(&metadata),
                 byte_len: metadata.len(),
-                version: file_version(&file)?,
+                version,
             });
         }
     }

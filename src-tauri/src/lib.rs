@@ -554,20 +554,27 @@ mod security_tests {
     fn invoke_handler_exposes_only_approved_commands() {
         let source = include_str!("lib.rs");
         let handler_start = source
-            .find(".invoke_handler(tauri::generate_handler![")
+            .find(".invoke_handler(")
             .expect("invoke handler must be declared");
-        let handler_end = source[handler_start..]
-            .find("])\n        .run")
-            .expect("invoke handler must close");
-        let handler = &source[handler_start..handler_start + handler_end];
+        let macro_start = handler_start
+            + source[handler_start..]
+                .find("generate_handler!")
+                .expect("invoke handler must use generate_handler!");
+        let commands_start = macro_start
+            + source[macro_start..]
+                .find('[')
+                .expect("generate_handler! must open a command list")
+            + 1;
+        let commands_end = commands_start
+            + source[commands_start..]
+                .find(']')
+                .expect("generate_handler! must close its command list");
+        let handler = &source[commands_start..commands_end];
 
         let registered_commands = handler
-            .lines()
-            .filter_map(|line| {
-                let line = line.trim();
-                (!line.starts_with(".invoke_handler") && !line.is_empty())
-                    .then(|| line.trim_end_matches(','))
-            })
+            .split(',')
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
             .collect::<Vec<_>>();
 
         assert_eq!(

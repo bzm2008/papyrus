@@ -73,6 +73,7 @@ pub struct RecoveryReceipt {
 /// Content reads always use this retained handle. The adapter validates paths against a root while
 /// opening it; it does not later reopen a model-controlled full path. Handle ownership cannot
 /// revoke destructive handles a same-identity process obtained before the snapshot was opened.
+#[derive(Debug)]
 pub struct SourceSnapshot {
     file: File,
     summary: SourceSnapshotSummary,
@@ -93,6 +94,7 @@ trait PlatformSource {
 /// ancestor can still be moved by another process after it has been opened; the
 /// retained descriptors make that boundary explicit and every transaction must
 /// revalidate identities before publishing.
+#[derive(Debug)]
 struct BoundPlatformSource {
     root: File,
     authorized_root_path: PathBuf,
@@ -1029,6 +1031,7 @@ pub(super) struct OpenedDestination {
     ancestor_handles: Vec<File>,
 }
 
+#[derive(Debug)]
 pub(super) struct StagedFile {
     file: File,
     parent: File,
@@ -2029,6 +2032,8 @@ fn prepare_platform_recovery_vault(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::file_version;
     use super::inject_after_destination_recovery;
     #[cfg(not(windows))]
     use super::inject_after_staging_before_prepublish;
@@ -2459,7 +2464,7 @@ mod tests {
             source: Some("source.txt".into()),
             destination: Some("destination.txt".into()),
         };
-        let transaction = prepare_file_transaction(
+        let mut transaction = prepare_file_transaction(
             &root,
             "preview-source-rewrite",
             0,
@@ -2528,7 +2533,7 @@ mod tests {
             source: Some("source.txt".into()),
             destination: Some("destination.txt".into()),
         };
-        let transaction = prepare_file_transaction(
+        let mut transaction = prepare_file_transaction(
             &root,
             "preview-post-recovery-rewrite",
             0,
