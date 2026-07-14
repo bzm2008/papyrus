@@ -6,8 +6,8 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `21b1427`（远程 `feature/work-assistant` head；包含本地等价提交 `ce64d6c`） |
-| Desktop CI run | [29351096131](https://github.com/bzm2008/papyrus/actions/runs/29351096131) |
+| Papyrus commit | `2312fa1`（功能代码验证基线；后续 `21b1427`/`15ce9eb` 仅更新证据文档） |
+| Desktop CI run | [29349932387](https://github.com/bzm2008/papyrus/actions/runs/29349932387) |
 | Package smoke run | `未触发：workflow 仅存在于非默认分支，Actions API 返回 404` |
 | 报告更新时间 | `2026-07-14（三平台 Desktop CI 刷新）` |
 | 发布负责人 | `待填写` |
@@ -17,10 +17,10 @@
 
 | 平台 | CI 状态 | 包 smoke 状态 | 产物/日志 |
 | --- | --- | --- | --- |
-| Windows 11 / NSIS | pass | pending | Desktop CI run 29351096131 |
-| macOS 当前 / app + DMG | pass | pending | Desktop CI run 29351096131 |
+| Windows 11 / NSIS | pass | pending | Desktop CI run 29349932387 |
+| macOS 当前 / app + DMG | pass | pending | Desktop CI run 29349932387 |
 | macOS 上一主版本 / app + DMG | pending | pending |  |
-| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pending | Desktop CI run 29351096131 |
+| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pending | Desktop CI run 29349932387 |
 | 额外 Linux 桌面 / DEB + AppImage | pending | pending |  |
 
 Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包含版本号；smoke 产物不能被标记为已签名生产包。
@@ -41,7 +41,7 @@ Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包
 
 | ID | 描述 | 平台 | 修复/回归证据 | 状态 |
 | --- | --- | --- | --- | --- |
-| `REL-CERT-PENDING` | smoke 包下载和真实设备矩阵尚未完成；macOS 上一主版本也未覆盖 | all | Desktop CI 29351096131 三平台通过；package workflow 非默认分支无法 dispatch；设备记录待补 | open |
+| `REL-CERT-PENDING` | smoke 包下载和真实设备矩阵尚未完成；macOS 上一主版本也未覆盖 | all | Desktop CI 29349932387 三平台通过；package workflow 非默认分支无法 dispatch；设备记录待补 | open |
 
 路径逃逸、过期审批执行、受限页面动作、重复执行、崩溃或数据丢失必须保持为 blocker，不能以 warning 关闭。
 
@@ -80,6 +80,6 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 
 ## 远程仓库证据（2026-07-14）
 
-- 远程 `feature/work-assistant` head 为 `21b1427176fcee2925263ec141bcbda74c6d353f`；Desktop CI run 29351096131 在 Windows、macOS ARM、Ubuntu 24.04 全部通过。
+- 远程 `feature/work-assistant` 包含功能代码基线 `2312fa1950bba47f85d18bb23b40286be11b9d1d` 及后续证据文档提交；Desktop CI runs 29349932387、29351096131、29351784408 均在 Windows、macOS ARM、Ubuntu 24.04 全部通过。
 - 该分支的 `.github/workflows/desktop-packages.yml` 尚未出现在默认分支，因此 `workflow_dispatch` 返回 404；没有可引用的 package smoke artifact。
 - 真实设备记录、生产签名/公证和 updater 产物仍未执行，不能关闭 `REL-CERT-PENDING`。
