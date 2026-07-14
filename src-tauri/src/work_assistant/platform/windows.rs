@@ -1376,7 +1376,9 @@ mod tests {
             .open(&source_path)
             .unwrap();
         writer.seek(SeekFrom::Start(0)).unwrap();
-        writer.write_all(b"after!\n").unwrap();
+        // Use a different length so the NTFS file version advances even when its timestamp
+        // granularity would otherwise leave a same-length rewrite indistinguishable.
+        writer.write_all(b"after-content-change\n").unwrap();
         writer.sync_all().unwrap();
 
         let error = verify_bound_source(
