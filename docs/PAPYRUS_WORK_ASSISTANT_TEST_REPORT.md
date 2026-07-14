@@ -6,10 +6,10 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `98951ce`（本地已提交，尚未推送，不能作为远程认证 commit） |
-| Desktop CI run | `待填写 URL` |
-| Package smoke run | `待填写 URL` |
-| 报告更新时间 | `2026-07-14（Windows 本地回归刷新）` |
+| Papyrus commit | `2312fa1`（远程 `feature/work-assistant` head；包含本地等价提交 `c2fa8cd`） |
+| Desktop CI run | [29349932387](https://github.com/bzm2008/papyrus/actions/runs/29349932387) |
+| Package smoke run | `未触发：workflow 仅存在于非默认分支，Actions API 返回 404` |
+| 报告更新时间 | `2026-07-14（三平台 Desktop CI 刷新）` |
 | 发布负责人 | `待填写` |
 | 总体状态 | `pending` |
 
@@ -17,10 +17,10 @@
 
 | 平台 | CI 状态 | 包 smoke 状态 | 产物/日志 |
 | --- | --- | --- | --- |
-| Windows 11 / NSIS | pending | pending |  |
-| macOS 当前 / app + DMG | pending | pending |  |
+| Windows 11 / NSIS | pass | pending | Desktop CI run 29349932387 |
+| macOS 当前 / app + DMG | pass | pending | Desktop CI run 29349932387 |
 | macOS 上一主版本 / app + DMG | pending | pending |  |
-| Ubuntu 24.04 GNOME / DEB + AppImage | pending | pending |  |
+| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pending | Desktop CI run 29349932387 |
 | 额外 Linux 桌面 / DEB + AppImage | pending | pending |  |
 
 Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包含版本号；smoke 产物不能被标记为已签名生产包。
@@ -41,7 +41,7 @@ Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包
 
 | ID | 描述 | 平台 | 修复/回归证据 | 状态 |
 | --- | --- | --- | --- | --- |
-| `REL-CERT-PENDING` | 三平台 CI、smoke 包下载和真实设备矩阵尚未完成 | all | 当前分支未推送；Desktop CI / package run URL 与设备记录待补 | open |
+| `REL-CERT-PENDING` | smoke 包下载和真实设备矩阵尚未完成；macOS 上一主版本也未覆盖 | all | Desktop CI 29349932387 三平台通过；package workflow 非默认分支无法 dispatch；设备记录待补 | open |
 
 路径逃逸、过期审批执行、受限页面动作、重复执行、崩溃或数据丢失必须保持为 blocker，不能以 warning 关闭。
 
@@ -60,7 +60,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run check:browser`：扩展语法/构建、前端桥接测试和 Rust Browser Bridge/Web Extract 定向测试通过；Rust Browser Bridge 定向为 33 项，包含注入式私网重定向 fixture。
 - `npm run test:browser:e2e`：真实 Chromium 8 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、字段变更 stale、链接 query 变化 stale 和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
-- `cargo test --manifest-path src-tauri/Cargo.toml --locked`：126 项通过；其中 Browser Bridge 定向回归 33 项、doctor 定向回归 6 项；仅有既有 Rust unused/private warnings。
+- `cargo test --manifest-path src-tauri/Cargo.toml --locked`：Windows 本机 126 项通过；三平台 Desktop CI 同一远程提交全部通过。新增 macOS `O_NOFOLLOW`/`F_GETPATH` 文件读取与 destination symlink 防护已由 macOS/Linux CI 覆盖。
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - `npm run tauri:check:portable`：Windows MSVC portable check 通过。
 - `npm run browser:package`：生成 5 个运行时文件的 `Papyrus-Browser-Bridge_0.1.2.zip`。
@@ -72,15 +72,14 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run release:assistant-check`：local/release 两阶段均通过；release 阶段还检查三平台 workflow 的关键命令、手动 dispatch、artifact 上传/保留、commit SHA、签名边界和打包 overlay。
 - Scallion 模型/额度契约：模型目录默认请求 `include_unavailable=1`，套餐外模型只读展示并禁用；余额以 `points_balance` 为准；模型目录按 token 去重并设置超时；不确定的 Scallion 网络结果不会自动切换 Tauri 重发。
 - WPS 模型/额度同步：`/models` 与 `/quota` 独立更新；单通道失败时保留旧目录/积分并显示 `stale`，无旧值时显示 `error`；成功、402、5xx、超时和流中断后会触发额度刷新，取消和认证失效不重复刷新。
-- 跨目标静态检查：当前 Windows toolchain 未安装 `x86_64-unknown-linux-gnu` 或 `aarch64-apple-darwin` 标准库；对应 `cargo check --target` 因缺少 `core` 失败，保留为跨平台 CI 责任项。
+- 跨目标静态检查：本机未安装 Linux/macOS Rust 标准库；对应验证由 Desktop CI 的 Ubuntu/macOS runner 完成。
 
 `npm run ci:desktop`：在停止并发编辑后的稳定工作树上通过；该聚合脚本不包含 Rust、portable MSVC 和真实 Chromium E2E，这些项目已由上面的独立门禁覆盖。`npm run release:assistant-check:local` 与 `npm run release:assistant-check` 均通过。真实用户文件的完整写入/恢复 smoke 尚未执行，不能用临时测试目录替代现场记录。
 
-以上证据只代表当前 Windows 工作树。macOS、Linux 的 GitHub Actions 矩阵、平台 smoke 包下载验证和真实设备矩阵仍标记为 `pending`，在获得远程写入授权及对应设备后补录；不把 unsigned smoke 包标记为生产发布。
+以上证据包含 Windows 本地回归和远程三平台 CI。平台 smoke 包下载、macOS 上一主版本以及真实设备矩阵仍标记为 `pending`；不把 unsigned smoke 包标记为生产发布。
 
-## 远程仓库证据（只读检查，2026-07-14）
+## 远程仓库证据（2026-07-14）
 
-- GitHub 远程目前只有 `main` 分支，最新远程 commit 为 `6a9a90dcde6c65d28beb8bbb33198bc3ffadc3d3`；当前本地 `feature/work-assistant`（`98951ce`）已提交但没有 upstream。
-- 当前最终本地提交为 `98951ce`；`git push --dry-run` 曾通过，但实际 HTTPS push 在连接写入阶段被 reset，随后 GitHub API/`ls-remote` 也出现 443 连接失败，因此远程没有认证分支或 CI run。
-- GitHub Actions API 返回 `total_count=0`；远程 `.github/workflows` 内容接口返回 404。因此没有可引用的远程 CI run、跨平台 artifact 或下载 smoke 证据。
-- 上述只读结果不改变总体 `pending` 状态，也不关闭 `REL-CERT-PENDING`。
+- 远程 `feature/work-assistant` head 为 `2312fa1950bba47f85d18bb23b40286be11b9d1d`；Desktop CI run 29349932387 在 Windows、macOS ARM、Ubuntu 24.04 全部通过。
+- 该分支的 `.github/workflows/desktop-packages.yml` 尚未出现在默认分支，因此 `workflow_dispatch` 返回 404；没有可引用的 package smoke artifact。
+- 真实设备记录、生产签名/公证和 updater 产物仍未执行，不能关闭 `REL-CERT-PENDING`。

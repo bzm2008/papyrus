@@ -492,13 +492,13 @@ git diff --check
 
 Expected: all commands exit 0.
 
-- [ ] **Step 2: Trigger Desktop CI after remote-write approval**
+- [x] **Step 2: Trigger Desktop CI after remote-write approval**
 
-Obtain explicit user approval to push the certification branch. Then run `git push -u origin feat/work-assistant-release-certification` and confirm Windows, macOS, and Ubuntu matrix jobs all pass. Record workflow URL and commit SHA in the test report. Without push approval, stop here and report that remote certification remains pending.
+The feature branch was pushed and Desktop CI run [29349932387](https://github.com/bzm2008/papyrus/actions/runs/29349932387) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `2312fa1950bba47f85d18bb23b40286be11b9d1d`. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
 
 - [ ] **Step 3: Trigger package smoke builds**
 
-Run `desktop-packages.yml` through `workflow_dispatch`. Download every artifact and verify it contains the expected platform package plus the Browser Bridge ZIP.
+Run `desktop-packages.yml` through `workflow_dispatch`. Download every artifact and verify it contains the expected platform package plus the Browser Bridge ZIP. Current blocker: the workflow exists only on the feature branch and is not registered on the default branch, so GitHub Actions returns 404 for dispatch; do not mark this step complete without artifacts.
 
 - [ ] **Step 4: Complete real-device records**
 
