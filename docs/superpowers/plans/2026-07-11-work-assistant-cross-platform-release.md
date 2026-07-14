@@ -10,8 +10,8 @@
 
 ## Completion Audit (2026-07-14)
 
-`[x]` means the files and local evidence were verified in the current Windows worktree. Commit
-steps remain unchecked because the branch is not committed. Remote CI, downloaded smoke artifacts,
+`[x]` means the files, local evidence, or locally completed commit were verified. The consolidated
+local implementation commit is `14226ef`. Remote CI, downloaded smoke artifacts,
 and every real-device record remain unchecked by design. The aggregate `ci:desktop` rehearsal,
 WPS production build, Browser Bridge Chromium E2E, full Rust suite, doctor probes, and Windows
 portable check were rerun after concurrent edits stopped and passed. The release report keeps
@@ -95,7 +95,7 @@ Register `work_assistant_doctor`. Return warnings for optional degradation and e
 
 `ComputerAssistantSettings` renders the report as compact rows with status icons and messages. Add a refresh icon button. Do not show stack traces; preserve the structured error code for copy/debug actions.
 
-- [ ] **Step 5: Test and commit**
+- [x] **Step 5: Test and commit**
 
 Run:
 
@@ -188,7 +188,7 @@ Read and parse JSON/manifest files with structured APIs. Read Rust registration 
 
 Local phase checks CSP, command registration, extension output/permissions, and documentation. Release phase additionally requires the three-platform CI and package workflows. Unknown phase names exit 1.
 
-- [ ] **Step 6: Run and commit**
+- [x] **Step 6: Run and commit**
 
 Run:
 
@@ -262,7 +262,7 @@ In real Chromium, verify snapshot element labels, text-field fill, contenteditab
 
 Use fixture routes for English/Chinese password reset, OTP, card payment, account security, hidden credential, and admin-console pages. Assert snapshots are restricted and no action reaches the DOM.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run: `npm run test:browser:e2e`
 
@@ -350,7 +350,7 @@ npm run test:browser:e2e
 Expected: PASS. Review `.github/workflows/desktop-ci.yml` with `git diff --check`. The exact three
 commands and workflow review now pass locally; the commit remains a separate unchecked step.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add .github/workflows/desktop-ci.yml package.json
@@ -414,7 +414,7 @@ Upload the platform bundle directory plus `artifacts/browser-bridge/*.zip`. Set 
 
 State that production Windows signing, macOS signing/notarization, Linux repository signing, and Tauri updater signing require protected credentials and are not bypassed by smoke artifacts.
 
-- [ ] **Step 5: Validate and commit**
+- [x] **Step 5: Validate and commit**
 
 Run: `git diff --check`
 
@@ -459,7 +459,7 @@ Include first-token streaming, two-second stall indicator, tool-row ordering, ap
 
 Every required case must have pass/fail evidence. A warning may document Linux file-manager selection degradation; any path escape, stale approval execution, restricted-page action, duplicate execution, crash, or data loss is a release blocker.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add docs/testing docs/BROWSER_BRIDGE.md README.md

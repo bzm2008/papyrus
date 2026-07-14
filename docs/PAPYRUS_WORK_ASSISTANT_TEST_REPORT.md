@@ -6,7 +6,7 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `917dda3`（发布相关改动仍在未提交工作树，不能作为远程认证 commit） |
+| Papyrus commit | `14226ef`（本地已提交，尚未推送，不能作为远程认证 commit） |
 | Desktop CI run | `待填写 URL` |
 | Package smoke run | `待填写 URL` |
 | 报告更新时间 | `2026-07-14（Windows 本地回归刷新）` |
@@ -79,6 +79,6 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 
 ## 远程仓库证据（只读检查，2026-07-14）
 
-- GitHub 远程目前只有 `main` 分支，最新远程 commit 为 `6a9a90dcde6c65d28beb8bbb33198bc3ffadc3d3`；当前本地 `feature/work-assistant`（`917dda3`）仍有未提交改动且没有 upstream。
+- GitHub 远程目前只有 `main` 分支，最新远程 commit 为 `6a9a90dcde6c65d28beb8bbb33198bc3ffadc3d3`；当前本地 `feature/work-assistant`（`14226ef`）已提交但没有 upstream。
 - GitHub Actions API 返回 `total_count=0`；远程 `.github/workflows` 内容接口返回 404。因此没有可引用的远程 CI run、跨平台 artifact 或下载 smoke 证据。
 - 上述只读结果不改变总体 `pending` 状态，也不关闭 `REL-CERT-PENDING`。

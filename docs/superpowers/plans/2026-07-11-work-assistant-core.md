@@ -10,8 +10,8 @@
 
 ## Implementation Audit (2026-07-14)
 
-`[x]` marks implementation or test steps with current-worktree evidence. Commit steps remain
-unchecked because the branch is uncommitted. The current local evidence is 35 desktop unit-test
+`[x]` marks implementation, test, or locally completed commit steps. The consolidated local
+commit is `14226ef`. The current local evidence is 35 desktop unit-test
 files/166 tests, 116 Rust tests, and a passing Windows portable check; it also includes the
 structured `/goal` cancellation regression. A real-user-file smoke transaction and cross-platform
 device evidence are not substitutes for the release gate and remain pending in the release report.
@@ -97,7 +97,7 @@ Run: `npm run test:unit -- src/test/smoke.test.ts`
 
 Expected: PASS.
 
-- [ ] **Step 4: Commit the harness only**
+- [x] **Step 4: Commit the harness only**
 
 ```powershell
 git add package.json package-lock.json vitest.config.ts src/test/setup.ts src/test/smoke.test.ts
@@ -446,7 +446,7 @@ Run: `npm run test:unit -- src/services/workAssistantProtocol.test.ts src/servic
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add src/services/workAssistantProtocol.ts src/services/workAssistantProtocol.test.ts src/services/workAssistantEventReducer.ts src/services/workAssistantEventReducer.test.ts
@@ -634,7 +634,7 @@ export function scopeAllows(grant: AssistantApprovalScope, request: AssistantApp
 
 `scopeAllows` must compare tool name, root ID, target parent, conflict policy, operation kind, and maximum item count. It must return `false` for delete, overwrite, app launch, download, external navigation, send, publish, and submit operations.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run: `npm run test:unit -- src/services/workAssistantRegistry.test.ts src/services/workAssistantPolicy.test.ts`
 
@@ -799,7 +799,7 @@ app.manage(state);
 
 Use a temporary directory created from `std::env::temp_dir().join(format!("papyrus-test-{}", Uuid::new_v4()))`. Test that append writes one JSON object per line, malformed trailing lines are skipped during reads, and clear truncates the file without deleting the directory.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml work_assistant`
 
@@ -891,7 +891,7 @@ const MAX_EXCERPT_CHARS: usize = 8_000;
 
 Skip hidden/system paths and extensions `exe`, `dll`, `msi`, `app`, `dmg`, `pkg`, `sh`, `bat`, `cmd`, `ps1`, `com`, `scr`, `lnk`, `desktop` from text inspection.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml path_policy workspace`
 
@@ -1015,7 +1015,7 @@ Rules:
 - Check cancellation between items and return completed, skipped, failed, and remaining lists.
 - Append one audit record per preview decision and one per executed item.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml preview file_ops approval`
 
@@ -1084,7 +1084,7 @@ macOS accepts `.app` bundles and launches them with fixed `open -a`; Windows/Lin
 
 Return newest-first records with pagination `{ offset, limit }`, capped at 200. Clear requires a direct settings action and writes a final `audit_cleared` marker after truncation.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run: `cargo test --manifest-path src-tauri/Cargo.toml desktop platform audit`
 
@@ -1194,7 +1194,7 @@ type WorkAssistantStore = {
 
 Limit retained runs to 20 and do not persist them. Durable history comes from native audit records.
 
-- [ ] **Step 6: Extend event binding and commit**
+- [x] **Step 6: Extend event binding and commit**
 
 Update `useAgentStream` to listen for `work_assistant_event` and dispatch the payload to `useWorkAssistantStore`. Keep the existing three `agent_step_*` listeners.
 
@@ -1312,7 +1312,7 @@ In `sendFlowMessage`:
 
 Expand planner tool names only from `enabledToolDefinitions`; never hard-code unavailable tools into the prompt.
 
-- [ ] **Step 6: Run and commit**
+- [x] **Step 6: Run and commit**
 
 Run:
 
@@ -1375,7 +1375,7 @@ Render Todo, subagents, background tools, and queued prompts in a stable block i
 
 While a run is active, show a stop icon beside the send/queue control. A two-second no-activity indicator appears only when status is `running`, never while `awaiting_approval`. On cancellation, preserve partial assistant text and mark unfinished tools/subagents cancelled.
 
-- [ ] **Step 6: Run and commit**
+- [x] **Step 6: Run and commit**
 
 Run:
 
@@ -1434,7 +1434,7 @@ Add `assistant` to `SettingsSectionId` and sidebar label `电脑助手`. The sec
 
 Do not expose raw JSON configuration fields.
 
-- [ ] **Step 5: Test and commit**
+- [x] **Step 5: Test and commit**
 
 Run:
 
@@ -1507,7 +1507,7 @@ git diff --check
 
 Expected: all commands exit 0. Existing unrelated lint failures must be recorded with exact file/line evidence; do not hide them by weakening lint rules.
 
-- [ ] **Step 6: Commit the verified core**
+- [x] **Step 6: Commit the verified core**
 
 ```powershell
 git add package.json package-lock.json README.md docs/FEATURES.md docs/AGENT_ARCHITECTURE.md src src-tauri

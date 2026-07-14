@@ -10,8 +10,8 @@
 
 ## Implementation Audit (2026-07-14)
 
-`[x]` below means the implementation and the available Windows/local evidence were checked in the
-current worktree. Commit steps remain unchecked because this branch still has uncommitted changes.
+`[x]` below means the implementation, test, or locally completed commit step is backed by current
+evidence. The consolidated local implementation commit is `14226ef`.
 The complete canonical href is now bound to the native preview through an opaque fingerprint, and
 execution re-checks the current element target plus public-URL/DNS policy. Chromium regression
 coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is 33
@@ -149,7 +149,7 @@ The wrapper must map native `blocked`, `network`, `timeout`, `unsupported_conten
 
 In Rust, create one `CancellationToken` per active run and wrap DNS resolution, request send, and body reads in `tokio::select!`; cancellation returns `user_cancelled` without waiting for the request timeout.
 
-- [ ] **Step 6: Run and commit**
+- [x] **Step 6: Run and commit**
 
 Run:
 
@@ -267,7 +267,7 @@ Archive content only after approval. Do not write the page into long-term memory
 
 In `workAssistantRuntime`, dispatch by manifest executor. Native approvals remain minted by Rust. Project approvals use the same inline UI but are bound to a locally generated preview revision based on canonical URL plus text hash.
 
-- [ ] **Step 5: Test and commit**
+- [x] **Step 5: Test and commit**
 
 Run: `npm run test:unit -- src/services/webArchiveService.test.ts src/services/workAssistantRuntime.test.ts`
 
@@ -409,7 +409,7 @@ Pairing tokens are 32 random bytes encoded with URL-safe base64, expire after fi
 
 Test token expiry, token reuse, wrong extension ID, tab switch, origin change, heartbeat timeout, snapshot replacement, and disconnect cleanup.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
 Run:
 
@@ -479,7 +479,7 @@ work_assistant_browser_execute_action,
 
 `browserBridgeClient.ts` maps native status to `disabled`, `listening`, `pairing`, `connected`, `stale`, or `error`; it exposes typed start-pairing, disconnect, snapshot, preview, and execute calls.
 
-- [ ] **Step 6: Test and commit**
+- [x] **Step 6: Test and commit**
 
 Run:
 
@@ -583,7 +583,7 @@ The popup accepts `{ port, token }` copied from Papyrus. On `连接当前标签�
 
 Mock `chrome.tabs`, `chrome.scripting`, and `chrome.storage.session`. Test missing active tab, restricted scheme, failed injection, wrong pairing response, successful connection, tab close, and service-worker restart recovery.
 
-- [ ] **Step 5: Build and commit**
+- [x] **Step 5: Build and commit**
 
 Run:
 
@@ -635,7 +635,7 @@ Store the map only in the content script. The app receives IDs, never DOM paths 
 
 Before any action, require matching snapshot ID, `element.isConnected`, unchanged fingerprint, unchanged origin, and a non-restricted page. Return `stale_snapshot` instead of searching for a similar element.
 
-- [ ] **Step 4: Test and commit**
+- [x] **Step 4: Test and commit**
 
 Run: `npm run browser:test`
 
@@ -705,7 +705,7 @@ Every action preview includes origin, page title, element role/name, visible fie
 
 Rust verifies pairing, tab ID, origin, snapshot ID, page revision, approval token, and action hash before sending `action.request`. The extension returns a post-action snapshot for fill/click/submit and download metadata for download. A changed page invalidates the previous approval.
 
-- [ ] **Step 5: Test and commit**
+- [x] **Step 5: Test and commit**
 
 Run:
 
@@ -762,7 +762,7 @@ The system prompt must state:
 
 Opening or summarizing one page remains a single-Agent task. Existing subagents are used only for complex research/verification or a mixed deliverable, not for routine browser clicks or form filling.
 
-- [ ] **Step 5: Test and commit**
+- [x] **Step 5: Test and commit**
 
 Run:
 
@@ -820,7 +820,7 @@ Do not render the token after successful pairing and do not persist it in Zustan
 
 Browser tool rows show site origin, element label, action, visible draft summary, risk, and approval controls. Password-like text must be redacted before it enters any UI state or audit record.
 
-- [ ] **Step 5: Test and commit**
+- [x] **Step 5: Test and commit**
 
 Run:
 
@@ -882,7 +882,7 @@ git diff --check
 
 Expected: all commands exit 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add package.json package-lock.json README.md docs src apps/browser-bridge src-tauri
