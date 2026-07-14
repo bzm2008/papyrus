@@ -68,6 +68,7 @@ impl<'a> PathPolicy<'a> {
         let root = self.authorized_root(root_id)?;
         let root_path = canonical_root(root)?;
         let candidate = self.relative_candidate(&root_path, requested_path.as_ref())?;
+        reject_existing_destination_links(&root_path, &candidate)?;
         let existing_ancestor = nearest_existing_ancestor(&candidate)?;
 
         ensure_within_root(&root_path, &existing_ancestor)?;
@@ -481,6 +482,36 @@ fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, WorkAssistantError>
     }
 }
 
+fn reject_existing_destination_links(
+    root: &Path,
+    candidate: &Path,
+) -> Result<(), WorkAssistantError> {
+    let relative = candidate.strip_prefix(root).map_err(|_| {
+        WorkAssistantError::path_outside_workspace(
+            "destination is outside the authorized workspace",
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if is_link_or_reparse_point(&metadata) => {
+                return Err(WorkAssistantError::blocked(
+                    "destination paths may not contain links or reparse points",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(WorkAssistantError::blocked(format!(
+                    "could not inspect destination path: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ensure_within_root(root: &Path, path: &Path) -> Result<(), WorkAssistantError> {
     if path_is_within(root, path) {
         Ok(())
@@ -737,6 +768,60 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, "path_outside_workspace");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_rejects_an_existing_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_dir();
+        let root_path = directory.join("workspace");
+        let outside_path = directory.join("outside.txt");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::write(&outside_path, "outside").unwrap();
+        symlink(&outside_path, root_path.join("output.txt")).unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&root_path).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let error = PathPolicy::new(&[root])
+            .resolve_destination("root", Path::new("output.txt"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_rejects_a_symlinked_parent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_dir();
+        let root_path = directory.join("workspace");
+        let outside_path = directory.join("outside");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::create_dir_all(&outside_path).unwrap();
+        symlink(&outside_path, root_path.join("mutable")).unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&root_path).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        let error = PathPolicy::new(&[root])
+            .resolve_destination("root", Path::new("mutable/output.txt"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "blocked");
         fs::remove_dir_all(directory).unwrap();
     }
 

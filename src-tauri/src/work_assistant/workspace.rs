@@ -345,12 +345,27 @@ fn open_candidate_file(candidate: &Path) -> io::Result<fs::File> {
         .open(candidate)
 }
 
+#[cfg(target_os = "macos")]
+fn open_candidate_file(candidate: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(candidate)
+}
+
 #[cfg(windows)]
 fn open_candidate_file(candidate: &Path) -> io::Result<fs::File> {
     fs::File::open(candidate)
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos"
+)))]
 fn open_candidate_file(_: &Path) -> io::Result<fs::File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -365,6 +380,23 @@ fn opened_file_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
     fs::canonicalize(format!("/proc/self/fd/{}", file.as_raw_fd())).map_err(|error| {
         WorkAssistantError::blocked(format!("could not resolve opened workspace file: {error}"))
     })
+}
+
+#[cfg(target_os = "macos")]
+fn opened_file_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
+    use std::{ffi::CStr, os::fd::AsRawFd, os::unix::ffi::OsStrExt};
+
+    const F_GETPATH: libc::c_int = 50;
+    let mut buffer = [0 as libc::c_char; libc::PATH_MAX as usize];
+    let result = unsafe { libc::fcntl(file.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr()) };
+    if result == -1 {
+        return Err(WorkAssistantError::blocked(format!(
+            "could not resolve opened workspace file: {}",
+            io::Error::last_os_error()
+        )));
+    }
+    let bytes = unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_bytes();
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
 }
 
 #[cfg(windows)]
@@ -399,7 +431,12 @@ fn opened_file_path(file: &fs::File) -> Result<PathBuf, WorkAssistantError> {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos"
+)))]
 fn opened_file_path(_: &fs::File) -> Result<PathBuf, WorkAssistantError> {
     Err(WorkAssistantError::blocked(
         "verified workspace file opens are not supported on this platform",
