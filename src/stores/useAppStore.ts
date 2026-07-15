@@ -149,6 +149,14 @@ export type ScallionUser = {
   level_name?: string
 }
 
+export type ScallionPlan = {
+  key: string
+  name: string
+  expiresAt?: string | null
+  availableModels: string[]
+  updatedAt: number
+}
+
 export type ScallionModelMetadata = {
   id: string
   label: string
@@ -976,6 +984,7 @@ type AppState = TokenSnapshot & {
   scallionUser?: ScallionUser
   scallionToken?: string
   scallionModels: ScallionModelMetadata[]
+  scallionPlan?: ScallionPlan
   scallionQuota?: ScallionQuota
   scallionSync: ScallionSyncState
   hardwareCapabilityProfile: HardwareCapabilityProfile
@@ -1195,6 +1204,7 @@ type AppState = TokenSnapshot & {
   expireScallionSession: () => void
   clearScallionSession: () => void
   setScallionModelMetadata: (models: ScallionModelMetadata[]) => void
+  setScallionPlan: (plan?: ScallionPlan) => void
   setScallionQuota: (quota?: ScallionQuota) => void
   setScallionSyncState: (
     channel: keyof ScallionSyncState,
@@ -1375,6 +1385,7 @@ export const useAppStore = create<AppState>()(
       scallionUser: undefined,
       scallionToken: undefined,
       scallionModels: [],
+      scallionPlan: undefined,
       scallionQuota: undefined,
       scallionSync: defaultScallionSyncState(),
       hardwareCapabilityProfile: defaultHardwareProfile(),
@@ -3029,6 +3040,7 @@ export const useAppStore = create<AppState>()(
             ...(tokenChanged
               ? {
                   scallionModels: [],
+                  scallionPlan: undefined,
                   scallionQuota: undefined,
                   scallionSync: defaultScallionSyncState(),
                   providerConfigs: {
@@ -3051,6 +3063,7 @@ export const useAppStore = create<AppState>()(
           scallionToken: undefined,
           scallionUser: undefined,
           scallionModels: [],
+          scallionPlan: undefined,
           scallionQuota: undefined,
           scallionSync: defaultScallionSyncState(),
           authDeviceCode: undefined,
@@ -3070,6 +3083,7 @@ export const useAppStore = create<AppState>()(
           scallionToken: undefined,
           scallionUser: undefined,
           scallionModels: [],
+          scallionPlan: undefined,
           scallionQuota: undefined,
           scallionSync: defaultScallionSyncState(),
           authDeviceCode: undefined,
@@ -3141,7 +3155,12 @@ export const useAppStore = create<AppState>()(
                 : state.modelContextSource,
           }
         }),
-      setScallionQuota: (scallionQuota) => set({ scallionQuota }),
+      setScallionPlan: (scallionPlan) => set({ scallionPlan: sanitizeScallionPlan(scallionPlan) }),
+      setScallionQuota: (scallionQuota) =>
+        set({
+          scallionQuota,
+          scallionPlan: scallionPlanFromQuota(scallionQuota),
+        }),
       setScallionSyncState: (channel, patch) =>
         set((state) => ({
           scallionSync: {
@@ -3552,6 +3571,8 @@ export const useAppStore = create<AppState>()(
           updateProgress: 0,
           authStatus: (persistedState.scallionToken ? 'approved' : 'idle') as ScallionAuthStatus,
           scallionModels: sanitizeScallionModels(persistedState.scallionModels),
+          // Plan metadata is fetched again for the current JWT; never restore it from local storage.
+          scallionPlan: undefined,
           scallionQuota: sanitizeScallionQuota(persistedState.scallionQuota),
           hardwareCapabilityProfile: sanitizeHardwareCapabilityProfile(
             persistedState.hardwareCapabilityProfile,
@@ -4465,6 +4486,46 @@ function sanitizeSecretaryGoal(value: unknown): SecretaryGoal | undefined {
     createdAt: typeof item.createdAt === 'number' ? item.createdAt : now,
     updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : now,
   }
+}
+
+function sanitizeScallionPlan(value: unknown): ScallionPlan | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+
+  const item = value as Partial<ScallionPlan>
+  const key = typeof item.key === 'string' ? item.key.trim().toLowerCase() : ''
+  const name = typeof item.name === 'string' ? item.name.trim() : ''
+  if (!key && !name) {
+    return undefined
+  }
+
+  const availableModels = Array.isArray(item.availableModels)
+    ? item.availableModels.filter((model): model is string => typeof model === 'string' && model.trim().length > 0).map((model) => model.trim())
+    : []
+
+  return {
+    key: key || name.toLowerCase(),
+    name: name || key,
+    expiresAt:
+      typeof item.expiresAt === 'string' || item.expiresAt === null ? item.expiresAt : undefined,
+    availableModels,
+    updatedAt: typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now(),
+  }
+}
+
+function scallionPlanFromQuota(quota?: ScallionQuota) {
+  if (!quota || (!quota.planKey && !quota.planName)) {
+    return undefined
+  }
+
+  return sanitizeScallionPlan({
+    key: quota.planKey,
+    name: quota.planName,
+    expiresAt: quota.planExpiresAt,
+    availableModels: [],
+    updatedAt: quota.updatedAt,
+  })
 }
 
 function sanitizeGoalCheckpoints(value: unknown): GoalCheckpoint[] {

@@ -44,6 +44,7 @@ import {
   type MaintenanceTab,
   type ProviderId,
   type ScallionAuthStatus,
+  type ScallionPlan,
   type ScallionQuota,
   type ScallionSyncChannelState,
 } from '../stores/useAppStore'
@@ -83,6 +84,7 @@ export function MaintenanceConsole() {
   const scallionToken = useAppStore((state) => state.scallionToken)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionModels = useAppStore((state) => state.scallionModels)
   const scallionSync = useAppStore((state) => state.scallionSync)
   const authStatus = useAppStore((state) => state.authStatus)
@@ -301,6 +303,7 @@ export function MaintenanceConsole() {
               token={scallionToken}
               username={scallionUser?.username}
               memberType={scallionUser?.member_type}
+              plan={scallionPlan}
               quota={scallionQuota}
               sync={scallionSync.quota}
               authStatus={authStatus}
@@ -319,6 +322,7 @@ export function MaintenanceConsole() {
                 models={scallionModels}
                 scallionToken={scallionToken}
                 scallionQuota={scallionQuota}
+                scallionPlan={scallionPlan}
                 scallionSync={scallionSync.models}
                 testingProviderId={testingProviderId}
                 onSetActiveProvider={setActiveProviderId}
@@ -389,6 +393,7 @@ function ModelsPanel({
   customProviderLabel,
   models,
   scallionToken,
+  scallionPlan,
   scallionQuota,
   scallionSync,
   testingProviderId,
@@ -402,6 +407,7 @@ function ModelsPanel({
   customProviderLabel: string
   models: ReturnType<typeof useAppStore.getState>['scallionModels']
   scallionToken?: string
+  scallionPlan?: ScallionPlan
   scallionQuota: ReturnType<typeof useAppStore.getState>['scallionQuota']
   scallionSync: ReturnType<typeof useAppStore.getState>['scallionSync']['models']
   testingProviderId: ProviderId | null
@@ -439,6 +445,7 @@ function ModelsPanel({
       <ScallionMaintenanceModelDirectory
         models={models}
         hasToken={Boolean(scallionToken)}
+        plan={scallionPlan}
         quota={scallionQuota}
         sync={scallionSync}
         onRefresh={() => void refreshScallionRuntimeMetadata()}
@@ -642,6 +649,7 @@ function ScallionAccountSummary({
   token,
   username,
   memberType,
+  plan: storedPlan,
   quota,
   sync,
   authStatus,
@@ -650,6 +658,7 @@ function ScallionAccountSummary({
   token?: string
   username?: string
   memberType?: string
+  plan?: ScallionPlan
   quota?: ScallionQuota
   sync: ScallionSyncChannelState
   authStatus: ScallionAuthStatus
@@ -658,6 +667,8 @@ function ScallionAccountSummary({
   const plan =
     quota?.planName ||
     (quota?.planKey ? formatScallionPlanName(quota.planKey) : undefined) ||
+    storedPlan?.name ||
+    storedPlan?.key ||
     (memberType ? formatScallionPlanName(memberType) : undefined)
   const points = quota?.pointsBalance ?? quota?.remaining
   const pointsAreCached = !token || sync.status !== 'ready'
@@ -742,12 +753,14 @@ function ScallionAccountSummary({
 function ScallionMaintenanceModelDirectory({
   models,
   hasToken,
+  plan,
   quota,
   sync,
   onRefresh,
 }: {
   models: ReturnType<typeof useAppStore.getState>['scallionModels']
   hasToken: boolean
+  plan?: ScallionPlan
   quota?: ScallionQuota
   sync: ScallionSyncChannelState
   onRefresh: () => void
@@ -755,7 +768,11 @@ function ScallionMaintenanceModelDirectory({
   const availableCount = models.filter((model) => getScallionModelAccess(model).status === 'available').length
   const restrictedCount = models.filter((model) => getScallionModelAccess(model).status === 'plan_unavailable').length
   const temporaryCount = models.length - availableCount - restrictedCount
-  const plan = quota?.planName || (quota?.planKey ? formatScallionPlanName(quota.planKey) : undefined)
+  const planLabel =
+    quota?.planName ||
+    (quota?.planKey ? formatScallionPlanName(quota.planKey) : undefined) ||
+    plan?.name ||
+    plan?.key
 
   return (
     <section className="mt-5 rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">
@@ -763,7 +780,7 @@ function ScallionMaintenanceModelDirectory({
         <div>
           <div className="text-sm font-semibold text-[#2f2b22]">Scallion 完整模型目录</div>
           <div className="mt-1 text-xs leading-5 text-[#7d7a70]">
-            {plan ? `当前套餐：${plan}。` : hasToken ? '当前套餐同步中。' : '登录后读取套餐权限。'}
+            {planLabel ? `当前套餐：${planLabel}。` : hasToken ? '当前套餐同步中。' : '登录后读取套餐权限。'}
             {' '}目录中的套餐受限模型仍会展示，但不会进入请求。
           </div>
           {hasToken ? (

@@ -24,6 +24,7 @@ import {
 import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
+import { getScallionQuotaDisplay } from '../services/scallionAccountService'
 import { formatScallionPlanName } from '../services/scallionModelCatalog'
 import { shouldShowSecretaryPartialReply } from '../services/secretaryPartialReply'
 import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
@@ -844,8 +845,10 @@ function SecretaryUsageOverview({
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const scallionToken = useAppStore((state) => state.scallionToken)
+  const scallionQuotaSyncStatus = useAppStore((state) => state.scallionSync.quota.status)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
   const cacheStats = getModelCacheStats()
@@ -858,16 +861,31 @@ function SecretaryUsageOverview({
     modelRoutingMode === 'auto'
       ? 'Auto 调度'
       : providerConfigs[activeProviderId]?.label ?? '未选择'
-  const quotaValue =
-    scallionQuota?.pointsBalance ??
-    scallionQuota?.remaining ??
-    scallionUser?.points ??
-    scallionUser?.balance ??
-    0
+  const quotaDisplay = getScallionQuotaDisplay({
+    token: scallionToken,
+    quota: scallionQuota,
+    user: scallionUser,
+    syncStatus: scallionQuotaSyncStatus,
+  })
+  const quotaValue = quotaDisplay.value
   const quotaUnit = scallionQuota?.unit ?? '积分'
+  const quotaFreshness =
+    quotaDisplay.source === 'realtime'
+      ? '实时'
+      : quotaDisplay.source === 'cached'
+        ? quotaDisplay.status === 'stale'
+          ? '缓存·可能过期'
+          : '缓存'
+        : quotaDisplay.status === 'error'
+          ? '同步失败'
+          : scallionToken
+            ? '同步中'
+            : '未登录'
   const planLabel =
     scallionQuota?.planName ??
     scallionQuota?.planKey ??
+    scallionPlan?.name ??
+    scallionPlan?.key ??
     (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined)
   const contextTitle = [
     `已用 ${formatCompactNumber(contextUsedTokens)} / 上限 ${formatCompactNumber(effectiveContextLimitTokens)} tokens`,
@@ -915,7 +933,9 @@ function SecretaryUsageOverview({
               <UsageMetric label="当前模型" value={modelLabel} />
               <UsageMetric
                 label="套餐 / 积分"
-                value={`${planLabel ?? (scallionToken ? '同步中' : '未登录')} · ${quotaValue} ${quotaUnit}`}
+                value={`${planLabel ?? (scallionToken ? '同步中' : '未登录')} · ${
+                  quotaValue === undefined ? quotaFreshness : `${quotaValue} ${quotaUnit} · ${quotaFreshness}`
+                }`}
               />
               <UsageMetric label="缓存命中" value={`${cacheStats.hitRate}%`} />
               <UsageMetric label="累计修改" value={formatCompactNumber(totalChanged)} />

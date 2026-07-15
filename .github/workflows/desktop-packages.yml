@@ -55,7 +55,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xvfb dbus-x11
 
       - name: Install JavaScript dependencies
         run: npm ci
@@ -85,6 +85,20 @@ jobs:
       # never presented as production releases.
       - name: Build unsigned platform bundle
         run: npm run tauri -- build --config "${{ matrix.config }}"
+
+      - name: Run hosted-runner bundle smoke
+        env:
+          PAPYRUS_SMOKE_DIR: ${{ runner.temp }}/papyrus-bundle-smoke
+        run: node scripts/smoke-tauri-bundle.mjs --bundle-dir src-tauri/target/release/bundle --output "$PAPYRUS_SMOKE_DIR"
+
+      - name: Upload bundle smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: papyrus-bundle-smoke-${{ steps.packaged.outputs.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/papyrus-bundle-smoke
 
       - name: Package Browser Bridge
         run: npm run browser:package

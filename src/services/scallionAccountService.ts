@@ -1,15 +1,22 @@
-import { fetchScallionProxyModels } from './llmClient'
+import { fetchScallionProxyModelCatalog } from './llmClient'
 import { buildModelTierAssessments } from './modelGovernanceService'
 import {
   useAppStore,
   type ScallionModelMetadata,
   type ScallionQuota,
+  type ScallionSyncStatus,
   type ScallionUser,
 } from '../stores/useAppStore'
 
 const SCALLION_QUOTA_API = 'https://scallion.uno/api/papyrus/llm/quota'
 const DEFAULT_UPGRADE_URL = 'https://scallion.uno/pricing'
 const SCALLION_REQUEST_TIMEOUT_MS = 15_000
+
+export type ScallionQuotaDisplay = {
+  value?: number
+  source: 'realtime' | 'cached' | 'unavailable'
+  status: ScallionSyncStatus
+}
 
 let quotaRefreshInFlight: { token: string; promise: Promise<ScallionQuota | undefined> } | undefined
 let modelsRefreshInFlight: { token: string; promise: Promise<ScallionModelMetadata[]> } | undefined
@@ -56,6 +63,7 @@ export function refreshScallionModels() {
 
   if (!state.scallionToken) {
     state.setScallionModelMetadata([])
+    state.setScallionPlan(undefined)
     state.setScallionSyncState('models', { status: 'idle', error: undefined, attemptedAt: Date.now() })
     return Promise.resolve([])
   }
@@ -109,13 +117,13 @@ export function refreshScallionModels() {
 async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<ScallionModelMetadata[]> {
   const state = useAppStore.getState()
   const provider = state.providerConfigs.qwen36
-  let models: Awaited<ReturnType<typeof fetchScallionProxyModels>>
+  let catalog: Awaited<ReturnType<typeof fetchScallionProxyModelCatalog>>
 
   try {
     // The selector must be able to explain plan restrictions, so always ask
     // the gateway for its complete public catalog. The gateway still remains
     // the authority for which entries are callable.
-    models = await fetchScallionProxyModels(provider, { includeUnavailable: true })
+    catalog = await fetchScallionProxyModelCatalog(provider, { includeUnavailable: true })
   } catch (error) {
     if (isUnauthorizedError(error) && useAppStore.getState().scallionToken === tokenAtRequest) {
       useAppStore.getState().expireScallionSession()
@@ -125,6 +133,15 @@ async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<Scalli
   if (useAppStore.getState().scallionToken !== tokenAtRequest) {
     return []
   }
+  if (catalog.plan) {
+    const current = useAppStore.getState()
+    // A successful quota response is the billing authority. Do not let a
+    // slower model-directory response overwrite a newer quota plan.
+    if (current.scallionSync.quota.status !== 'ready') {
+      current.setScallionPlan(catalog.plan)
+    }
+  }
+  const models = catalog.models
   const now = Date.now()
   const metadata: ScallionModelMetadata[] = models.map((model, index) => ({
     id: model.id || model.modelName || `scallion-${index}`,
@@ -256,9 +273,16 @@ async function refreshScallionQuotaOnce(token: string, userAtRequest?: ScallionU
     }
 
     const current = useAppStore.getState()
+    const planFromModelCatalog = current.scallionPlan
     const fallback = current.scallionQuota ?? quotaFromUser(current.scallionUser ?? userAtRequest)
     if (fallback && current.scallionQuota !== fallback) {
       current.setScallionQuota(fallback)
+      // A model catalog response carries the same entitlement and may win the
+      // race while the quota endpoint is temporarily unavailable. Keep it
+      // instead of replacing it with an older user snapshot.
+      if (planFromModelCatalog) {
+        current.setScallionPlan(planFromModelCatalog)
+      }
     }
     current.setScallionSyncState('quota', {
       status: fallback ? 'stale' : 'error',
@@ -297,6 +321,37 @@ export function quotaFromUser(user?: ScallionUser): ScallionQuota | undefined {
     upgradeUrl: DEFAULT_UPGRADE_URL,
     topUpUrl: DEFAULT_UPGRADE_URL,
     updatedAt: Date.now(),
+  }
+}
+
+/**
+ * Keep quota labels honest at every surface. Only a successful quota response
+ * carrying points_balance is allowed to be called realtime; persisted account
+ * data and the last successful value are explicitly treated as cached.
+ */
+export function getScallionQuotaDisplay(input: {
+  token?: string
+  quota?: ScallionQuota
+  user?: ScallionUser
+  syncStatus?: ScallionSyncStatus
+}): ScallionQuotaDisplay {
+  const status = input.syncStatus ?? 'idle'
+  const livePoints = finiteNumber(input.quota?.pointsBalance)
+  const fallbackPoints = firstFiniteNumber(
+    input.quota?.remaining,
+    input.user?.points,
+    input.user?.balance,
+  )
+
+  if (input.token?.trim() && status === 'ready' && livePoints !== undefined) {
+    return { value: livePoints, source: 'realtime', status }
+  }
+
+  const cachedValue = livePoints ?? fallbackPoints
+  return {
+    value: cachedValue,
+    source: cachedValue === undefined ? 'unavailable' : 'cached',
+    status,
   }
 }
 
@@ -390,6 +445,24 @@ function firstNumber(...values: unknown[]) {
   }
 
   return 0
+}
+
+function firstFiniteNumber(...values: unknown[]) {
+  for (const value of values) {
+    const number = finiteNumber(value)
+    if (number !== undefined) {
+      return number
+    }
+  }
+  return undefined
+}
+
+function finiteNumber(value: unknown) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return undefined
+  }
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? Math.max(0, number) : undefined
 }
 
 function hasQuotaBalance(payload: AccountPayload, user?: ScallionUser) {

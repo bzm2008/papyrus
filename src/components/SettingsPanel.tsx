@@ -80,6 +80,7 @@ export function SettingsPanel() {
   const updateProgress = useAppStore((state) => state.updateProgress)
   const updateVersion = useAppStore((state) => state.updateVersion)
   const scallionUser = useAppStore((state) => state.scallionUser)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
   const scallionModels = useAppStore((state) => state.scallionModels)
   const scallionSync = useAppStore((state) => state.scallionSync)
@@ -225,10 +226,12 @@ export function SettingsPanel() {
                           <div className="mt-1 text-xs text-[#8f897a]">
                             {scallionQuota?.planName ||
                               (scallionQuota?.planKey ? formatScallionPlanName(scallionQuota.planKey) : undefined) ||
+                              scallionPlan?.name ||
+                              scallionPlan?.key ||
                               (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined) ||
                               (scallionQuota?.isMember || scallionUser?.is_member ? '会员账号' : '普通账号')}
-                            {scallionQuota?.planExpiresAt
-                              ? ` · 到期 ${formatQuotaExpiry(scallionQuota.planExpiresAt)}`
+                            {(scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt)
+                              ? ` · 到期 ${formatQuotaExpiry((scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt) as string)}`
                               : ''}
                           </div>
                         </div>
@@ -538,6 +541,7 @@ function ScallionModelDirectory({
   onRefresh: () => void
 }) {
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const latestSync = models.reduce<number | undefined>(
     (latest, model) => (latest === undefined || model.updatedAt > latest ? model.updatedAt : latest),
@@ -549,6 +553,8 @@ function ScallionModelDirectory({
   const planLabel =
     scallionQuota?.planName ||
     (scallionQuota?.planKey ? formatScallionPlanName(scallionQuota.planKey) : undefined) ||
+    scallionPlan?.name ||
+    scallionPlan?.key ||
     (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined)
 
   return (
