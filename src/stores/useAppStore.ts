@@ -7,6 +7,7 @@ import {
   isProviderValidated,
   mergeProviderConfigs,
   providerOrder,
+  providerValidationSignature,
   type CustomContextTier,
   type LlmProviderConfig,
   type ModelContextSource,
@@ -34,7 +35,7 @@ export type FlowTraceStatus = 'pending' | 'running' | 'completed' | 'error'
 export type FlowTraceKind = 'plan' | 'agent' | 'tool' | 'document' | 'memory'
 export type AgentStepType = 'plan' | 'tool' | 'sub_agent' | 'generation'
 export type AgentStepStatus = 'pending' | 'running' | 'completed' | 'error'
-export type AgentRunStatus = 'running' | 'completed' | 'failed'
+export type AgentRunStatus = 'running' | 'completed' | 'failed' | 'cancelled'
 export type AgentRunSource = 'local' | 'remote' | 'system'
 export type AgentMemoryScope = 'global' | 'chat' | 'project' | 'remote'
 export type AgentMemoryKind =
@@ -121,6 +122,20 @@ export type ScallionAuthStatus =
   | 'denied'
   | 'error'
 
+export type ScallionSyncStatus = 'idle' | 'syncing' | 'ready' | 'stale' | 'error'
+
+export type ScallionSyncChannelState = {
+  status: ScallionSyncStatus
+  error?: string
+  attemptedAt?: number
+  updatedAt?: number
+}
+
+export type ScallionSyncState = {
+  models: ScallionSyncChannelState
+  quota: ScallionSyncChannelState
+}
+
 export type ScallionUser = {
   id: number | string
   username: string
@@ -138,6 +153,14 @@ export type ScallionModelMetadata = {
   id: string
   label: string
   modelName: string
+  name?: string
+  provider?: string
+  billingMode?: string
+  callPrice?: number
+  contextWindowLabel?: string
+  planAvailable?: boolean
+  requiredPlan?: string
+  availabilityReason?: string
   contextWindowTokens?: number
   available: boolean
   tier?: ModelCapabilityTier
@@ -172,6 +195,13 @@ export type HardwareCapabilityProfile = {
 
 export type ScallionQuota = {
   remaining: number
+  pointsBalance?: number
+  balance?: number
+  quota?: number
+  unifiedPoints?: boolean
+  planKey?: string
+  planName?: string
+  planExpiresAt?: string | null
   total?: number
   unit: string
   isMember: boolean
@@ -438,6 +468,12 @@ export type ImportedResource = {
   tokenCount: number
   includedInContext: boolean
   importedAt: number
+  /** Original URL returned by the extractor (kept separate from the canonical key). */
+  sourceUrl?: string
+  /** Canonical URL used to identify repeated web archives. */
+  canonicalUrl?: string
+  /** Stable deduplication key; currently canonical URL for web resources. */
+  dedupeKey?: string
 }
 
 export type AgentMemoryRecord = {
@@ -941,6 +977,7 @@ type AppState = TokenSnapshot & {
   scallionToken?: string
   scallionModels: ScallionModelMetadata[]
   scallionQuota?: ScallionQuota
+  scallionSync: ScallionSyncState
   hardwareCapabilityProfile: HardwareCapabilityProfile
   authDeviceCode?: string
   authUserCode?: string
@@ -1155,9 +1192,14 @@ type AppState = TokenSnapshot & {
   setScallionDevice: (deviceCode: string, userCode: string) => void
   setScallionAuthStatus: (status: ScallionAuthStatus) => void
   setScallionSession: (token: string, user: ScallionUser) => void
+  expireScallionSession: () => void
   clearScallionSession: () => void
   setScallionModelMetadata: (models: ScallionModelMetadata[]) => void
   setScallionQuota: (quota?: ScallionQuota) => void
+  setScallionSyncState: (
+    channel: keyof ScallionSyncState,
+    patch: Partial<ScallionSyncChannelState>,
+  ) => void
   setRemoteRelayConfig: (patch: {
     enabled?: boolean
     endpoint?: string
@@ -1334,6 +1376,7 @@ export const useAppStore = create<AppState>()(
       scallionToken: undefined,
       scallionModels: [],
       scallionQuota: undefined,
+      scallionSync: defaultScallionSyncState(),
       hardwareCapabilityProfile: defaultHardwareProfile(),
       authDeviceCode: undefined,
       authUserCode: undefined,
@@ -2636,10 +2679,12 @@ export const useAppStore = create<AppState>()(
       clearHiveTelemetry: () => set({ hiveTelemetry: emptyHiveTelemetry() }),
       addResources: (resources) =>
         set((state) => {
+          const resourceKey = (resource: ImportedResource) =>
+            resource.dedupeKey ?? resource.canonicalUrl ?? resource.path
           const merged = [
             ...resources,
             ...state.resources.filter(
-              (existing) => !resources.some((resource) => resource.path === existing.path),
+              (existing) => !resources.some((resource) => resourceKey(resource) === resourceKey(existing)),
             ),
           ].slice(0, 80)
 
@@ -2909,6 +2954,18 @@ export const useAppStore = create<AppState>()(
             serverContextWindowTokens:
               patch.contextWindowTokens ?? existing.serverContextWindowTokens,
             modelName: patch.modelName?.trim() || existing.modelName,
+            ...(providerId === 'qwen36' && state.scallionToken
+              ? {
+                  validatedAt: Date.now(),
+                  lastValidatedSignature: providerValidationSignature({
+                    ...existing,
+                    label: patch.label?.trim() || existing.label,
+                    serverContextWindowTokens:
+                      patch.contextWindowTokens ?? existing.serverContextWindowTokens,
+                    modelName: patch.modelName?.trim() || existing.modelName,
+                  }),
+                }
+              : {}),
           }
           const providerConfigs = {
             ...state.providerConfigs,
@@ -2963,35 +3020,92 @@ export const useAppStore = create<AppState>()(
         set({ authDeviceCode, authUserCode, authStatus: 'polling' }),
       setScallionAuthStatus: (authStatus) => set({ authStatus }),
       setScallionSession: (scallionToken, scallionUser) =>
-        set({
-          scallionToken,
-          scallionUser,
-          authStatus: 'approved',
-          authDeviceCode: undefined,
-          authUserCode: undefined,
+        set((state) => {
+          const tokenChanged = state.scallionToken !== scallionToken
+
+          return {
+            scallionToken,
+            scallionUser,
+            ...(tokenChanged
+              ? {
+                  scallionModels: [],
+                  scallionQuota: undefined,
+                  scallionSync: defaultScallionSyncState(),
+                  providerConfigs: {
+                    ...state.providerConfigs,
+                    qwen36: {
+                      ...state.providerConfigs.qwen36,
+                      validatedAt: undefined,
+                      lastValidatedSignature: undefined,
+                    },
+                  },
+                }
+              : {}),
+            authStatus: 'approved' as const,
+            authDeviceCode: undefined,
+            authUserCode: undefined,
+          }
         }),
-      clearScallionSession: () =>
-        set({
+      expireScallionSession: () =>
+        set((state) => ({
           scallionToken: undefined,
           scallionUser: undefined,
+          scallionModels: [],
           scallionQuota: undefined,
+          scallionSync: defaultScallionSyncState(),
+          authDeviceCode: undefined,
+          authUserCode: undefined,
+          authStatus: 'expired',
+          providerConfigs: {
+            ...state.providerConfigs,
+            qwen36: {
+              ...state.providerConfigs.qwen36,
+              validatedAt: undefined,
+              lastValidatedSignature: undefined,
+            },
+          },
+        })),
+      clearScallionSession: () =>
+        set((state) => ({
+          scallionToken: undefined,
+          scallionUser: undefined,
+          scallionModels: [],
+          scallionQuota: undefined,
+          scallionSync: defaultScallionSyncState(),
           authDeviceCode: undefined,
           authUserCode: undefined,
           authStatus: 'idle',
-        }),
+          providerConfigs: {
+            ...state.providerConfigs,
+            qwen36: {
+              ...state.providerConfigs.qwen36,
+              validatedAt: undefined,
+              lastValidatedSignature: undefined,
+            },
+          },
+        })),
       setScallionModelMetadata: (scallionModels) =>
         set((state) => {
           const normalized = sanitizeScallionModels(scallionModels)
           const currentProvider = state.providerConfigs.qwen36
           const primary =
             normalized.find(
-              (model) => model.available && model.modelName === currentProvider.modelName,
+              (model) => model.available && model.planAvailable !== false && model.modelName === currentProvider.modelName,
             ) ??
-            normalized.find((model) => model.available) ??
-            normalized[0]
+            normalized.find((model) => model.available && model.planAvailable !== false)
 
           if (!primary) {
-            return { scallionModels: normalized }
+            return {
+              scallionModels: normalized,
+              providerConfigs: {
+                ...state.providerConfigs,
+                qwen36: {
+                  ...currentProvider,
+                  validatedAt: undefined,
+                  lastValidatedSignature: undefined,
+                },
+              },
+            }
           }
 
           const provider = currentProvider
@@ -3000,7 +3114,12 @@ export const useAppStore = create<AppState>()(
             label: primary.label || provider.label,
             modelName: primary.modelName || provider.modelName,
             serverContextWindowTokens: primary.contextWindowTokens ?? provider.serverContextWindowTokens,
+            validatedAt: state.scallionToken ? Date.now() : undefined,
+            lastValidatedSignature: undefined as string | undefined,
           }
+          updatedProvider.lastValidatedSignature = state.scallionToken
+            ? providerValidationSignature(updatedProvider)
+            : undefined
 
           return {
             scallionModels: normalized,
@@ -3023,6 +3142,16 @@ export const useAppStore = create<AppState>()(
           }
         }),
       setScallionQuota: (scallionQuota) => set({ scallionQuota }),
+      setScallionSyncState: (channel, patch) =>
+        set((state) => ({
+          scallionSync: {
+            ...state.scallionSync,
+            [channel]: {
+              ...state.scallionSync[channel],
+              ...patch,
+            },
+          },
+        })),
       setRemoteRelayConfig: (patch) =>
         set((state) => ({
           remoteRelayEnabled: patch.enabled ?? state.remoteRelayEnabled,
@@ -3340,6 +3469,13 @@ export const useAppStore = create<AppState>()(
       merge: (persisted, current) => {
         const persistedState = persisted as Partial<AppState>
         const providerConfigs = mergeProviderConfigs(persistedState.providerConfigs)
+        if (!persistedState.scallionToken) {
+          providerConfigs.qwen36 = {
+            ...providerConfigs.qwen36,
+            validatedAt: undefined,
+            lastValidatedSignature: undefined,
+          }
+        }
         const requestedProviderId = providerConfigs[persistedState.activeProviderId ?? 'qwen36']
           ? (persistedState.activeProviderId ?? 'qwen36')
           : 'qwen36'
@@ -3938,6 +4074,13 @@ function normalizeModelCapabilityTier(value: unknown): ModelCapabilityTier {
   return value === 'T1' || value === 'T2' || value === 'T3' ? value : 'T2'
 }
 
+function defaultScallionSyncState(): ScallionSyncState {
+  return {
+    models: { status: 'idle' },
+    quota: { status: 'idle' },
+  }
+}
+
 function defaultHardwareProfile(): HardwareCapabilityProfile {
   return {
     cpuCores: 4,
@@ -4029,11 +4172,34 @@ function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
             ? item.label.trim()
             : modelName || `内置模型 ${index + 1}`,
         modelName: modelName || id,
+        name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : undefined,
+        provider: typeof item.provider === 'string' && item.provider.trim() ? item.provider.trim() : undefined,
+        billingMode:
+          typeof item.billingMode === 'string' && item.billingMode.trim()
+            ? item.billingMode.trim()
+            : undefined,
+        callPrice:
+          typeof item.callPrice === 'number' && Number.isFinite(item.callPrice) && item.callPrice >= 0
+            ? item.callPrice
+            : undefined,
+        contextWindowLabel:
+          typeof item.contextWindowLabel === 'string' && item.contextWindowLabel.trim()
+            ? item.contextWindowLabel.trim()
+            : undefined,
+        planAvailable: item.planAvailable !== false,
+        requiredPlan:
+          typeof item.requiredPlan === 'string' && item.requiredPlan.trim()
+            ? item.requiredPlan.trim()
+            : undefined,
+        availabilityReason:
+          typeof item.availabilityReason === 'string' && item.availabilityReason.trim()
+            ? item.availabilityReason.trim()
+            : undefined,
         contextWindowTokens:
           typeof item.contextWindowTokens === 'number' && item.contextWindowTokens > 0
             ? Math.round(item.contextWindowTokens)
             : undefined,
-        available: item.available !== false,
+        available: item.available !== false && item.planAvailable !== false,
         tier: item.tier ? normalizeModelCapabilityTier(item.tier) : undefined,
         score:
           typeof item.score === 'number' && Number.isFinite(item.score)
@@ -4046,8 +4212,7 @@ function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
         updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
       } satisfies ScallionModelMetadata
     })
-    .filter(Boolean)
-    .slice(0, 24) as ScallionModelMetadata[]
+    .filter(Boolean) as ScallionModelMetadata[]
 }
 
 function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
@@ -4058,6 +4223,17 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
   const item = value as Partial<ScallionQuota>
   return {
     remaining: Math.max(0, Number(item.remaining ?? 0)),
+    pointsBalance:
+      item.pointsBalance === undefined ? undefined : Math.max(0, Number(item.pointsBalance) || 0),
+    balance: item.balance === undefined ? undefined : Math.max(0, Number(item.balance) || 0),
+    quota: item.quota === undefined ? undefined : Math.max(0, Number(item.quota) || 0),
+    unifiedPoints: item.unifiedPoints === true,
+    planKey: typeof item.planKey === 'string' ? item.planKey.trim() || undefined : undefined,
+    planName: typeof item.planName === 'string' ? item.planName.trim() || undefined : undefined,
+    planExpiresAt:
+      typeof item.planExpiresAt === 'string' || item.planExpiresAt === null
+        ? item.planExpiresAt
+        : undefined,
     total:
       item.total === undefined || item.total === null
         ? undefined

@@ -1,6 +1,6 @@
 # Papyrus Agent 架构与模型治理
 
-Papyrus 的目标不是把所有 Agent 拉进同一个聊天室，而是让秘书长按任务阶段组织写作、研究、审校和长期记忆。下面记录当前实现中的关键机制，方便公开仓库后理解设计取舍。
+这份概念参考说明 Papyrus 如何把模型编排、工作区能力和安全写回分开。Papyrus 可以继续承担写作、研究和审校任务，也可以在授权范围内协助管理本机文件；模型只能提出意图，原生代理负责校验、审批和执行。
 
 ## 动态采样
 
@@ -87,6 +87,72 @@ Hive runtime 还包含：
 - 早停判断。
 
 这让 Papyrus 能在复杂任务中保持可追踪、可恢复，而不是把多 Agent 协作藏成一团不可解释的长提示词。
+
+## 电脑管家能力的边界
+
+电脑管家模式把本机操作当作受控能力，而不是给模型一个通用终端。模型可以请求工作区列表、扫描、搜索、检查和受限的批量文件计划；写操作只能引用已授权的工作区根、已生成的预览和一次性审批令牌。
+
+前端循环最多允许八次工具调用，严格接收 `tool_call` 或 `final` JSON。只读工具可直接执行；可逆操作支持单次、本轮或拒绝，高风险操作只允许单次或拒绝。相同参数连续失败两次后停止，取消和协议失败均形成终止事件。原生层保存审计记录，模型只收到清洗后的摘要与不透明 ID，不能得到恢复库路径、授权根绝对路径或审批令牌。
+
+原生代理只接受结构化的 `file_plan_batch` 协议。它不会执行模型生成的命令、脚本或任意绝对路径，也不会把回收站、文件管理器或其他桌面程序当作绕过审批的后门。所有写操作都要经过路径策略、身份快照和用户审批；事务再按类型选择原语：复制和跨设备移动需要临时 staging，移入恢复库和覆盖需要 recovery 预检，新目标发布和同卷移动/重命名需要 no-replace。
+
+## 浏览器工具链
+
+浏览器工具与本地工具共用秘书循环的严格 JSON 协议，但按 executor 分发：`native` 负责公共网页提取，`project` 负责审批后的 HTML `ImportedResource` 归档，`browser_bridge` 负责已配对标签页的快照与动作。未配对时模型工具目录不会暴露 tab 操作；扩展配对后仍只允许当前 tab，并且所有动作都携带最新 `pageRevision` 和不透明元素 token。
+
+网页提取在 Rust 中关闭自动重定向，逐跳校验 scheme、凭据、主机解析结果和固定 SocketAddr；正文只保留可见文本，移除脚本、样式、导航、页脚、表单控件和隐藏节点。大小、类型、超时、网络和取消错误会转换为可恢复的用户状态。归档预览绑定 canonical URL、正文哈希和有效期，审批前不改变项目资源。
+
+交互动作是 fail-closed 的：敏感页面不会把密码、验证码、支付或账号安全字段放入快照；普通草稿填写不提交；点击、下载和提交按风险等待一次性审批；导航、来源、标签页切换或 DOM 替换会清除旧修订，动作失败为 `stale_page`，绝不自动猜测新元素。扩展权限和打包产物由发布脚本检查，真实 Chromium 回归与跨平台 CI 属于独立发布证据。
+
+## 恢复库、回收站与 receipt
+
+需要恢复保护的删除、覆盖、跨设备移动或替换路径会先进入 Papyrus 私有的同卷恢复库。恢复库目录名固定为 `.papyrus-recovery`，位置由原生适配器根据源文件或旧目标所在的授权父目录选择；模型不能提供恢复库路径或目录名。恢复对象使用适配器生成的 UUID 叶子，并保存 `content` 与 `receipt.json`。新目标同卷 `Move` / `Rename` 直接使用 no-replace rename，不产生 recovery 内容。
+
+每个 receipt 都可以由用户追溯和恢复，包含预览 ID、批次序号、原始相对路径、平台文件身份和不透明的恢复库范围标识。receipt 不包含绝对路径，也不依赖操作系统回收站；UI 应显示原始相对路径和可恢复状态，让用户在确认后恢复或定位对象。
+
+系统回收站不是安全原语。若桌面适配器提供系统回收站派发，它只能在私有 recovery receipt 持久化并完成审计后 best-effort 执行；派发失败不能删除或覆盖 Papyrus 的恢复对象，也不能把已完成的操作改报成失败。当前 `file_trash` 的安全语义仍是移动到 `.papyrus-recovery`，不是直接调用系统回收站。
+
+## 跨平台安全原语
+
+三个桌面平台都执行同一组不变量：拒绝链接和重解析点，比较授权根、父目录和源文件身份，保存文件版本与内容摘要，并在提交前重新验证快照。不同操作只启用必要的原语：创建目录只验证父目录并创建一个新叶子；复制到新目标会先 staging，再用 no-replace 发布；同卷移动或重命名直接使用源句柄和 no-replace rename；移入恢复库、覆盖和跨设备移动才需要 recovery receipt。任何身份、路径组件、共享模式或所需预检不匹配都会 fail closed。
+
+| 事务 | 原生执行路径 |
+| --- | --- |
+| `CreateDirectory` | 校验目标父目录后创建一个新目录叶子，不创建 staging 文件或 recovery 内容 |
+| 新目标 `Copy` | 读取已打开的源快照，写入目标父目录的临时 staging 文件，校验摘要后用 no-replace 发布 |
+| 新目标同卷 `Move` / `Rename` | 重新验证源快照后，使用平台的相对 no-replace rename；不复制 staging 内容 |
+| `Trash` | 将已验证的源文件移动到同卷 `.papyrus-recovery`，写入 receipt |
+| 覆盖或跨设备 `Move` / `Rename` | 先 staging 并校验；覆盖时先恢复旧目标，跨设备移动发布并校验副本后再恢复原文件 |
+
+| 平台 | 路径与身份校验 | 原子发布与恢复保护 |
+| --- | --- | --- |
+| Windows | 使用 `FILE_FLAG_OPEN_REPARSE_POINT` 和 `FileAttributeTagInfo` 拒绝 junction、symbolic link 等 reparse point；比较 `FILE_ID_INFO` 和文件版本；保留受共享模式保护的句柄 | 使用句柄相对的 `NtSetInformationFile(FileRenameInformation)`，设置 no-replace；恢复库目录使用当前用户私有 DACL |
+| Linux | 使用 `openat`、`O_NOFOLLOW` 和 `fstatat(AT_SYMLINK_NOFOLLOW)` 逐组件检查；每次写入前从授权根重新绑定并比较设备与 inode 身份 | 使用 `renameat2(RENAME_NOREPLACE)`；内核没有该原语时返回不可用并拒绝降级到普通覆盖式 rename |
+| macOS | 使用 `openat`、`O_DIRECTORY`、`O_NOFOLLOW` 和 `fstatat(AT_SYMLINK_NOFOLLOW)` 逐组件检查；每次写入前重新绑定授权根和父目录 | 使用 `renameatx_np(RENAME_EXCL)`；原语不可用时 fail closed，跨设备错误只有在复制、校验和恢复流程可用时才受控降级 |
+
+`work_assistant_capabilities` 的 `available` 字段按编译目标报告平台级支持：Windows、Linux 和 macOS 构建会静态列出原生文件能力，其他目标列为不可用。它不会承诺当前内核或文件系统一定提供每个运行时原语。执行时仍会检查恢复预检、身份和 no-replace 能力；旧内核缺少 `renameat2` 等原语，或运行环境不能建立并清理 receipt 预检文件时，当前事务必须 fail closed，并返回 `recovery_unavailable` 或 `blocked`。UI 应在该次运行中禁用受影响操作，不应把运行时错误误解为 capability 列表已经动态更新。
+
+跨设备移动只在能先复制、校验发布结果，再把原文件移入同卷恢复库时继续，不得改用未经保护的路径操作。
+
+## 并发边界与威胁模型
+
+原生代理可以防御模型参数导致的遍历、链接或重解析点跳转、过期预览以及普通并发修改。Windows 句柄共享策略和 POSIX 每次重新绑定还可以阻止常见的根目录替换和父目录移动。
+
+仍有一个操作系统边界：同一身份的恶意进程如果在 Papyrus 建立快照之前已经持有破坏性 OS 句柄，非特权桌面应用不能完全撤销该句柄的能力。这个边界不等于允许模型控制路径，也不应通过放宽共享模式或取消身份校验来“修复”。能力状态和安全说明必须明确它，出现身份或共享冲突时仍然 fail closed。
+
+## 运行结果与 UI 语义
+
+UI 必须把原生执行结果当作状态机，而不是只显示一条成功或失败消息：
+
+- `completed`：操作已完成；对应条目可带 `recoveryReceipts`，UI 应保留恢复入口
+- `cancelled`：用户或运行取消；未发布的条目进入 `remaining`，不伪造 `failed`，允许用户明确重试
+- `stale_preview`：快照、身份、版本或摘要不再匹配；预览前不应改变目标或恢复库，提示重新生成预览
+- `partial_transaction`：事务可能已经产生部分状态变化，具体是否有 recovery 对象或 receipt 取决于失败条目和已完成步骤；当前失败条目可能只有可恢复的错误码、摘要和调用方保留的 `previewId`，也可能没有 `recoveryReceipts` 或新的 recovery 审计条目。UI 不能声称“没有发生任何变化”，也不能声称当前版本已经能按 `previewId` 自动定位 receipt；后续恢复入口或审计查询必须显式支持这条链路
+- `audit_unavailable`：文件事务已经完成，但审计追加失败；保留 `completed` 和 receipt，显示可恢复的审计警告，不回滚文件
+- `recovery_cleanup_unavailable`：取消、预检失败或未执行的事务留下空恢复槽清理警告；保留主结果，提示用户重试清理或检查恢复库
+- `recovery_unavailable`：恢复库或 receipt 预检失败；批次在审批令牌消耗前停止，不写入目标
+
+错误摘要只返回操作状态和相对上下文，不把绝对路径、恢复库绝对路径或系统诊断原文交给模型。真实 UI/WPS 手测和 Unix/macOS 目标编译属于独立发布门禁；本页不把未执行的验证写成通过。
 
 ## 长篇创作增强
 

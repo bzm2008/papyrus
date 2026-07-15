@@ -53,6 +53,7 @@ export type WpsRetryRequest = {
   snapshot?: WpsDocumentSnapshot
   assistantId: string
   selectedSkill?: AgentSkill
+  model?: string
 }
 
 export type ChatMessage = {
@@ -83,6 +84,51 @@ export type ScallionUser = {
   is_member?: boolean
 }
 
+export type WpsScallionModel = {
+  id: string
+  name: string
+  modelName: string
+  provider?: string
+  contextWindowTokens?: number
+  contextWindowLabel?: string
+  planAvailable: boolean
+  requiredPlan?: string
+  availabilityReason?: string
+  available: boolean
+}
+
+export type WpsScallionQuota = {
+  pointsBalance: number
+  balance?: number
+  quota?: number
+  planKey?: string
+  planName?: string
+  planExpiresAt?: string | null
+  updatedAt: number
+}
+
+export type WpsScallionPlan = {
+  key?: string
+  name?: string
+  expiresAt?: string | null
+}
+
+export type WpsScallionSyncStatus = 'syncing' | 'ready' | 'stale' | 'error'
+
+export type WpsScallionChannelState = {
+  status: WpsScallionSyncStatus
+  error?: string
+  updatedAt?: number
+}
+
+export type WpsScallionRuntimeMetadata = {
+  models: WpsScallionModel[]
+  plan?: WpsScallionPlan
+  quota?: WpsScallionQuota
+  modelsSync: WpsScallionChannelState
+  quotaSync: WpsScallionChannelState
+}
+
 export type ScallionSession = {
   token: string
   user: ScallionUser
@@ -92,6 +138,7 @@ export type AgentRunInput = {
   prompt: string
   snapshot: WpsDocumentSnapshot
   selectedSkill?: AgentSkill
+  model?: string
   token?: string
   approvedPlan?: WpsPlanDraft
   onStatus?: (status: string) => void

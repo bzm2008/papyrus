@@ -16,7 +16,12 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { importResourceFiles, insertResourceIntoDocument, openProjectFolder } from '../services/resourceImportService'
+import {
+  AUTHORIZED_WORKSPACE_IMPORT_MESSAGE,
+  importResourceFiles,
+  insertResourceIntoDocument,
+  openProjectFolder,
+} from '../services/resourceImportService'
 import { useAppStore, type ArticleRecord, type ChatSession, type ImportedResource } from '../stores/useAppStore'
 
 export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean }) {
@@ -49,8 +54,16 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
           <SmallAction icon={Plus} label="新建对话" primary onClick={newChatSession} />
           <SmallAction icon={FilePlus2} label="新建文章" onClick={() => newArticleInChat()} />
           <SmallAction icon={Gauge} label="作品体检" onClick={() => setStoryDashboardOpen(true)} />
-          <SmallAction icon={Upload} label="导入文件" onClick={() => void importResourceFiles()} />
-          <SmallAction icon={FolderPlus} label="打开文件夹" onClick={() => void openProjectFolder()} />
+          <SmallAction
+            icon={Upload}
+            label="导入文件"
+            onClick={() => void importResourceFiles().catch(showResourceImportUnavailable)}
+          />
+          <SmallAction
+            icon={FolderPlus}
+            label="打开文件夹"
+            onClick={() => void openProjectFolder().catch(showResourceImportUnavailable)}
+          />
         </div>
       ) : null}
 
@@ -135,6 +148,10 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
       </div>
     </div>
   )
+}
+
+function showResourceImportUnavailable(error: unknown) {
+  window.alert(error instanceof Error ? error.message : AUTHORIZED_WORKSPACE_IMPORT_MESSAGE)
 }
 
 function ResourceItem({

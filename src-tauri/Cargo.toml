@@ -6,7 +6,7 @@ authors = ["Scallion"]
 license = ""
 repository = ""
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.88.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -26,6 +26,18 @@ tauri-plugin-log = "2"
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "json", "stream"] }
 scraper = "0.23"
 urlencoding = "2"
+sha2 = "0.10"
+uuid = { version = "=1.20.0", features = ["v4", "serde"] }
+dunce = "1"
+trash = "=5.2.3"
+sysinfo = { version = "0.33", default-features = false, features = ["disk", "system"] }
+open = "5"
+libc = "=0.2.186"
+tungstenite = "0.27"
+tokio = { version = "1", features = ["macros", "net", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

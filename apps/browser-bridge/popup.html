@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Papyrus Browser Bridge</title>
+    <style>
+      :root { color-scheme: light; font: 13px/1.5 system-ui, sans-serif; }
+      body { width: 340px; margin: 0; padding: 16px; background: #fffdf7; color: #332f27; }
+      h1 { font-size: 15px; margin: 0 0 5px; }
+      p { margin: 0 0 10px; color: #817a6d; font-size: 12px; }
+      label { display: block; margin-top: 9px; color: #625c50; font-size: 11px; }
+      input { width: 100%; box-sizing: border-box; margin-top: 3px; border: 1px solid #d8cfc0; border-radius: 6px; padding: 7px; font: inherit; }
+      button { margin-top: 12px; border: 0; border-radius: 6px; padding: 8px 12px; background: #20201d; color: #fff; cursor: pointer; }
+      button.secondary { margin-left: 6px; background: #f0eadd; color: #332f27; }
+      #status { margin-top: 10px; min-height: 18px; font-size: 12px; color: #416746; }
+      #status.error { color: #92483d; }
+    </style>
+  </head>
+  <body>
+    <h1>Papyrus Browser Bridge</h1>
+    <p>只授权当前标签页；不会读取 Cookie、Storage 或其他标签页。</p>
+    <label>WebSocket 地址<input id="wsUrl" placeholder="ws://127.0.0.1:port/bridge" /></label>
+    <label>一次性 Token<input id="token" autocomplete="off" /></label>
+    <label>Nonce<input id="nonce" autocomplete="off" /></label>
+    <button id="connect">连接当前标签页</button><button id="disconnect" class="secondary">断开</button>
+    <div id="status"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

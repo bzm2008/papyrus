@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Account security verification</title>
+  </head>
+  <body>
+    <main>
+      <h1>Account security verification</h1>
+      <p>This security page requires a password, one-time code (OTP), and payment card details.</p>
+      <p>账户安全验证、验证码、支付和银行卡信息不能由助手代填。</p>
+      <form id="security-form">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" />
+        <label for="otp">One-time code</label>
+        <input id="otp" name="otp" type="text" inputmode="numeric" autocomplete="one-time-code" />
+        <label for="card">Payment card number</label>
+        <input id="card" name="card-number" type="text" autocomplete="cc-number" />
+        <input id="hidden-credential" name="hidden-credential" type="hidden" value="secret" />
+        <input id="ordinary" name="ordinary" type="text" aria-label="Ordinary field" />
+        <button id="continue" type="submit">Continue verification</button>
+      </form>
+    </main>
+  </body>
+</html>

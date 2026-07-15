@@ -25,6 +25,7 @@ import {
   rebuildProjectIndex,
   testModelConnection,
 } from '../services/maintenance'
+import { getMaintenanceReadiness } from '../services/maintenanceReadiness'
 import {
   customContextTiers,
   isProviderValidated,
@@ -70,8 +71,8 @@ export function MaintenanceConsole() {
   const activeProvider = providerConfigs[activeProviderId]
   const cloudProvider = providerConfigs.qwen36
   const customProvider = providerConfigs.custom
-  const allGreen = useMemo(
-    () => maintenanceChecks.every((check) => check.status === 'ok'),
+  const readiness = useMemo(
+    () => getMaintenanceReadiness(maintenanceChecks),
     [maintenanceChecks],
   )
 
@@ -210,14 +211,16 @@ export function MaintenanceConsole() {
           <button
             type="button"
             onClick={() => setEnvReady(true)}
-            disabled={!allGreen}
+            disabled={!readiness.canEnter}
             className="flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-[#171714] text-sm font-medium text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-not-allowed disabled:bg-[#c9c0ae]"
           >
             <Play size={15} />
             进入 Papyrus
           </button>
           <p className="mt-2 text-center text-xs leading-5 text-[#8f897a]">
-            三项连接检测全部通过后即可进入工作站
+            {readiness.limitedMode
+              ? '将以受限模式进入；登录或配置模型后可启用 AI 能力'
+              : '桌面后端与本地存储通过后即可进入工作站'}
           </p>
         </div>
       </aside>
@@ -391,7 +394,7 @@ function ModelCard({
 }) {
   const provider = useAppStore((state) => state.providerConfigs[providerId])
   const updateProviderConfig = useAppStore((state) => state.updateProviderConfig)
-  const ready = provider.type === 'scallion_proxy' || isProviderValidated(provider)
+  const ready = isProviderValidated(provider)
 
   return (
     <div className="rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">

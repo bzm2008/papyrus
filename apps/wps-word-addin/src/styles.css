@@ -110,6 +110,66 @@ button {
   color: #8a641d;
 }
 
+.runtime-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfdf8;
+  padding: 7px 10px;
+}
+
+.runtime-account {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.runtime-account strong,
+.runtime-account span,
+.runtime-model-picker span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-account strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.runtime-account span,
+.runtime-model-picker span {
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.runtime-model-picker {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.runtime-model-picker select {
+  max-width: 190px;
+  min-height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.runtime-model-status {
+  max-width: 150px;
+  color: #9a4338 !important;
+  font-size: 10px !important;
+}
+
 .brand-mark {
   display: grid;
   width: 30px;

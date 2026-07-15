@@ -32,6 +32,13 @@ import {
   type LoginDevice,
 } from './services/wpsScallionSession'
 import { createWpsPlanDraft, runUnifiedAgent } from './services/wpsUnifiedAgent'
+import { shouldRefreshWpsQuotaAfterError } from './services/wpsAgentRuntime'
+import {
+  beginWpsRuntimeMetadataRefresh,
+  fetchWpsScallionRuntimeMetadata,
+  getWpsModelAccess,
+  mergeWpsRuntimeMetadata,
+} from './services/wpsScallionMetadata'
 import type {
   AgentSkill,
   ChatMessage,
@@ -42,6 +49,7 @@ import type {
   WpsPatchOperation,
   WpsPlanDraft,
   WpsRetryRequest,
+  WpsScallionRuntimeMetadata,
 } from './types'
 
 const emptySnapshot: WpsDocumentSnapshot = {
@@ -81,6 +89,33 @@ export default function App() {
   const [agentTodos, setAgentTodos] = useState<WpsAgentTodo[]>([])
   const [agentTrace, setAgentTrace] = useState<string[]>([])
   const [runtimeDetail, setRuntimeDetail] = useState('')
+  const [runtimeMetadata, setRuntimeMetadata] = useState<WpsScallionRuntimeMetadata | undefined>()
+  const [selectedModel, setSelectedModel] = useState('')
+
+  const beginRuntimeMetadataRefresh = useCallback(() => {
+    setRuntimeMetadata((previous) => beginWpsRuntimeMetadataRefresh(previous))
+  }, [])
+  const applyRuntimeMetadata = useCallback((metadata: WpsScallionRuntimeMetadata) => {
+    setRuntimeMetadata((previous) => mergeWpsRuntimeMetadata(previous, metadata))
+    if (metadata.modelsSync.status === 'ready') {
+      setSelectedModel((current) =>
+        metadata.models.some((model) => model.id === current && model.available && model.planAvailable !== false)
+          ? current
+          : metadata.models.find((model) => model.available && model.planAvailable !== false)?.id ?? '',
+      )
+    }
+  }, [])
+
+  const quotaSyncStatus = runtimeMetadata?.quotaSync.status
+  const quotaSyncSuffix =
+    quotaSyncStatus === 'syncing'
+      ? ' · 更新中'
+      : quotaSyncStatus === 'stale'
+        ? ' · 可能过期'
+        : quotaSyncStatus === 'error'
+          ? ' · 同步失败'
+          : ''
+  const quotaHealthTone = quotaSyncStatus === 'ready' ? 'ok' : 'warn'
 
   const skillQuery = getSkillQuery(prompt)
   const visibleSkills = useMemo(() => searchSkills(skillQuery ?? ''), [skillQuery])
@@ -99,6 +134,19 @@ export default function App() {
     { label: session ? '已登录' : '未登录', tone: session ? 'ok' : 'warn' },
     { label: snapshot.cursorAvailable ? contextLabel : '未连接文档', tone: snapshot.cursorAvailable ? 'ok' : 'warn' },
     ...(runtimeDetail ? [{ label: runtimeDetail, tone: 'neutral' as const }] : []),
+    ...(runtimeMetadata?.quota?.planName || runtimeMetadata?.quota?.planKey || runtimeMetadata?.plan?.name || runtimeMetadata?.plan?.key
+      ? [{ label: runtimeMetadata.quota?.planName || runtimeMetadata.quota?.planKey || runtimeMetadata.plan?.name || runtimeMetadata.plan?.key || '套餐', tone: 'neutral' as const }]
+      : []),
+    ...(runtimeMetadata?.quotaSync
+      ? [{
+          label: runtimeMetadata.quota
+            ? `余 ${runtimeMetadata.quota.pointsBalance} 积分${quotaSyncSuffix}`
+            : quotaSyncStatus === 'error'
+              ? '积分同步失败'
+              : '积分同步中',
+          tone: quotaHealthTone as 'ok' | 'warn',
+        }]
+      : []),
     { label: `v${addinVersion}`, tone: 'neutral' },
   ] as const
 
@@ -124,6 +172,41 @@ export default function App() {
 
     return () => window.clearTimeout(timer)
   }, [refreshSnapshot])
+
+  useEffect(() => {
+    if (!session?.token) {
+      const timer = window.setTimeout(() => {
+        setRuntimeMetadata(undefined)
+        setSelectedModel('')
+      }, 0)
+      return () => window.clearTimeout(timer)
+    }
+
+    let cancelled = false
+    const refresh = async () => {
+      beginRuntimeMetadataRefresh()
+      try {
+        const metadata = await fetchWpsScallionRuntimeMetadata(session.token)
+        if (cancelled) return
+        applyRuntimeMetadata(metadata)
+      } catch (error) {
+        if (cancelled) return
+        const typed = error as Error & { code?: string }
+        if (typed.code === 'unauthorized') {
+          clearSession()
+          setSession(undefined)
+        }
+        setLastError(typed.message || '无法同步 Scallion 套餐信息')
+      }
+    }
+
+    void refresh()
+    const timer = window.setInterval(() => void refresh(), 30000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [applyRuntimeMetadata, beginRuntimeMetadataRefresh, session?.token])
 
   useEffect(() => {
     if (!loginDevice || loginStatus !== 'polling') {
@@ -273,6 +356,7 @@ export default function App() {
         snapshot: latestSnapshot,
         selectedSkill,
         token: session?.token,
+        model: selectedModel || undefined,
         signal: controller.signal,
       })
       setPlanDraft(draft)
@@ -286,6 +370,12 @@ export default function App() {
       setLastError('规划已生成，确认后再执行')
     } catch (error) {
       const cancelled = controller.signal.aborted
+      if (!cancelled && session?.token) {
+        beginRuntimeMetadataRefresh()
+        void fetchWpsScallionRuntimeMetadata(session.token)
+          .then((metadata) => applyRuntimeMetadata(metadata))
+          .catch(() => undefined)
+      }
       setRunState(cancelled ? 'cancelled' : 'error')
       setLastError(cancelled ? '已取消规划生成。' : error instanceof Error ? error.message : '规划生成失败')
     } finally {
@@ -312,6 +402,7 @@ export default function App() {
         snapshot: latestSnapshot,
         selectedSkill,
         token: session?.token,
+        model: selectedModel || undefined,
         previousPlan: planDraft,
         feedback,
         signal: controller.signal,
@@ -327,6 +418,12 @@ export default function App() {
       setLastError('规划已修订')
     } catch (error) {
       const cancelled = controller.signal.aborted
+      if (!cancelled && session?.token) {
+        beginRuntimeMetadataRefresh()
+        void fetchWpsScallionRuntimeMetadata(session.token)
+          .then((metadata) => applyRuntimeMetadata(metadata))
+          .catch(() => undefined)
+      }
       setRunState(cancelled ? 'cancelled' : 'error')
       setLastError(cancelled ? '已取消规划修订。' : error instanceof Error ? error.message : '规划修订失败')
     } finally {
@@ -387,12 +484,14 @@ export default function App() {
     abortControllerRef.current = controller
     const assistantId = retry?.assistantId ?? createId()
     const selectedSkillForRun = retry?.selectedSkill ?? selectedSkill
+    const modelForRun = retry?.model ?? selectedModel
     const baseRetry: WpsRetryRequest = {
       executionPrompt,
       displayPrompt,
       approvedPlan,
       assistantId,
       selectedSkill: selectedSkillForRun,
+      model: modelForRun || undefined,
     }
 
     if (retry) {
@@ -417,6 +516,7 @@ export default function App() {
         prompt: executionPrompt,
         snapshot: latestSnapshot,
         selectedSkill: selectedSkillForRun,
+        model: modelForRun || undefined,
         token: session?.token,
         approvedPlan,
         signal: controller.signal,
@@ -433,6 +533,14 @@ export default function App() {
           setRuntimeDetail(`${runtime.model} · ${runtime.transport === 'stream' ? '流式' : '非流式'}${runtime.usedFallback ? ' · 已降级' : ''}`)
         },
       })
+      if (session?.token) {
+        beginRuntimeMetadataRefresh()
+        void fetchWpsScallionRuntimeMetadata(session.token)
+          .then((metadata) => {
+            applyRuntimeMetadata(metadata)
+          })
+          .catch(() => undefined)
+      }
       setAgentTodos(result.todos ?? [])
       setAgentTrace(result.trace ?? [])
       const patch = result.patch
@@ -467,15 +575,37 @@ export default function App() {
       setRuntimeDetail(result.model ? `${result.model} · ${result.transport === 'stream' ? '流式' : '非流式'}${result.usedFallback ? ' · 已降级' : ''}` : '')
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Papyrus 处理失败'
+      const typedError = error as Error & { code?: string; status?: number; retryable?: boolean }
+      const authExpired = typedError.code === 'unauthorized' || typedError.status === 401
       const cancelled = abortControllerRef.current?.signal.aborted
+      const sessionToken = session?.token
+      if (authExpired) {
+        clearSession()
+        setSession(undefined)
+      }
+      if (!cancelled && !authExpired && shouldRefreshWpsQuotaAfterError(error) && sessionToken) {
+        beginRuntimeMetadataRefresh()
+        void fetchWpsScallionRuntimeMetadata(sessionToken)
+          .then((metadata) => {
+            applyRuntimeMetadata(metadata)
+          })
+          .catch(() => undefined)
+      }
+      const displayMessage = cancelled
+        ? '已取消本次生成。'
+        : authExpired
+          ? '登录已过期，请重新登录 Scallion。'
+          : typedError.code === 'plan_model_forbidden'
+            ? '当前套餐不可用该模型，已刷新模型目录，请选择套餐内模型后重试。'
+            : message
       setRunState(cancelled ? 'cancelled' : 'error')
-      setLastError(cancelled ? '已取消本次生成。' : message)
+      setLastError(displayMessage)
       setMessages((items) =>
         items.map((item) =>
           item.id === assistantId
             ? {
                 ...item,
-                content: cancelled ? '已取消本次生成。' : message,
+                content: displayMessage,
                 runStatus: cancelled ? 'cancelled' : 'failed',
                 canRetry: !cancelled,
                 retryRequest: cancelled ? undefined : baseRetry,
@@ -575,6 +705,48 @@ export default function App() {
             {item.label}
           </span>
         ))}
+      </section>
+
+      <section className="runtime-strip" aria-label="Scallion 套餐和模型">
+        <div className="runtime-account">
+          <strong>
+            {runtimeMetadata?.quota?.planName || runtimeMetadata?.quota?.planKey || runtimeMetadata?.plan?.name || runtimeMetadata?.plan?.key || (session ? '套餐同步中' : '未登录 Scallion')}
+            {runtimeMetadata?.plan?.expiresAt ? ` · 到期 ${new Date(runtimeMetadata.plan.expiresAt).toLocaleDateString('zh-CN')}` : ''}
+            {runtimeMetadata?.quota && quotaSyncStatus && quotaSyncStatus !== 'ready' ? ' · 可能过期' : ''}
+          </strong>
+          <span>
+            {runtimeMetadata?.quota
+              ? `剩余 ${runtimeMetadata.quota.pointsBalance} 积分${quotaSyncSuffix}`
+              : session
+                ? quotaSyncStatus === 'error'
+                  ? `积分同步失败${runtimeMetadata?.quotaSync.error ? `：${runtimeMetadata.quotaSync.error}` : ''}`
+                  : '套餐与实时积分同步中'
+                : '登录后同步套餐与实时积分'}
+          </span>
+        </div>
+        <label className="runtime-model-picker">
+          <span>模型</span>
+          <select
+            value={selectedModel}
+            onChange={(event) => setSelectedModel(event.target.value)}
+            disabled={!runtimeMetadata || runtimeMetadata.models.length === 0}
+          >
+            <option value="">自动选择套餐内模型</option>
+            {(runtimeMetadata?.models ?? []).map((model) => {
+              const access = getWpsModelAccess(model)
+              return (
+                <option key={model.id} value={model.id} disabled={!access.usable}>
+                  {model.name || model.id}{access.usable ? '' : ` · ${access.label} · ${access.detail}`}
+                </option>
+              )
+            })}
+          </select>
+          {runtimeMetadata?.modelsSync.status === 'stale' || runtimeMetadata?.modelsSync.status === 'error' ? (
+            <span className="runtime-model-status">
+              {runtimeMetadata?.modelsSync.error || '模型目录可能已过期'}
+            </span>
+          ) : null}
+        </label>
       </section>
 
       {planDraft ? <PlanDraftCard draft={planDraft} running={runState === 'running'} onExecute={executePlan} onCancel={() => setPlanDraft(undefined)} /> : null}

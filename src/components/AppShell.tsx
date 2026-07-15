@@ -80,6 +80,29 @@ function MainWorkbench() {
   }, [scallionToken])
 
   useEffect(() => {
+    if (!scallionToken) {
+      return undefined
+    }
+
+    const refresh = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshScallionRuntimeMetadata()
+      }
+    }
+    const timer = window.setInterval(() => {
+      refresh()
+    }, 30000)
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+    }
+  }, [scallionToken])
+
+  useEffect(() => {
     refreshHardwareCapabilityProfile()
   }, [])
 

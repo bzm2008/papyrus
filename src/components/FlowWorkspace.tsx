@@ -10,16 +10,26 @@ import {
   RotateCcw,
   Send,
   Sparkles,
+  Square,
   Trash2,
   Undo2,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useAgentStream } from '../hooks/useAgentStream'
-import { createSecretaryPlanDraft, reviseSecretaryPlanDraft } from '../services/agentOrchestrator'
+import {
+  createSecretaryPlanDraft,
+  reviseSecretaryPlanDraft,
+  shouldContinueSecretaryGoalCycle,
+} from '../services/agentOrchestrator'
 import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
+import { formatScallionPlanName } from '../services/scallionModelCatalog'
+import { shouldShowSecretaryPartialReply } from '../services/secretaryPartialReply'
 import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
+import { cancelSecretaryRun } from '../services/secretaryRunController'
+import { resolveAssistantApproval } from '../services/workAssistantRuntime'
+import type { AssistantApprovalRequest } from '../services/workAssistantProtocol'
 import {
   type AgentStep,
   type AgentTodo,
@@ -40,13 +50,19 @@ import {
   ExecutionReceipt,
   MarkdownMessage,
   SecretaryWorkbenchPanel,
+  type WorkbenchView,
   ThoughtSummaryBlock,
 } from './SecretaryWorkbenchPanel'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
+import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
+import { SecretaryToolStep } from './SecretaryToolStep'
+import { SecretaryFileWorkbench } from './SecretaryFileWorkbench'
+import { SecretaryBrowserWorkbench } from './SecretaryBrowserWorkbench'
+import { SecretaryPartialReply } from './SecretaryPartialReply'
+import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type AgentTodos = AgentTodo[]
-type WorkbenchView = 'workbench' | 'manuscript'
 type ReceiptSnapshot = {
   todos: AgentTodo[]
   steps: AgentStep[]
@@ -58,7 +74,7 @@ export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const [rightPanelPinned, setRightPanelPinned] = useState(false)
-  const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('workbench')
+  const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('run')
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
   const autoWorkbenchTimerRef = useRef<number | undefined>(undefined)
@@ -86,6 +102,16 @@ export function FlowWorkspace() {
   const removeQueuedUserInput = useAppStore((state) => state.removeQueuedUserInput)
   const sendQueuedInputAsGuidance = useAppStore((state) => state.sendQueuedInputAsGuidance)
   const activeSecretaryGoal = useAppStore((state) => state.activeSecretaryGoal)
+  const activeAgentRunId = useAppStore((state) => state.activeAgentRunId)
+  const activeWorkAssistantRunId = useWorkAssistantStore((state) => state.activeRunId)
+  const activeWorkAssistantRun = useWorkAssistantStore((state) => activeWorkAssistantRunId ? state.runs[activeWorkAssistantRunId] : undefined)
+  const selectWorkAssistantTool = useWorkAssistantStore((state) => state.selectToolCall)
+  const selectedWorkAssistantToolId = useWorkAssistantStore((state) => state.selectedToolCallId)
+  const activeWorkAssistantCalls = activeWorkAssistantRun ? Object.values(activeWorkAssistantRun.toolCalls) : []
+  const selectedWorkAssistantCall = activeWorkAssistantCalls.find((call) => call.id === selectedWorkAssistantToolId)
+  const showCancelledPartialReply = shouldShowSecretaryPartialReply(activeWorkAssistantRun, activeAgentRunId)
+  const filePlanCall = selectedWorkAssistantCall?.name === 'file_plan_batch' ? selectedWorkAssistantCall : [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_plan_batch')
+  const fileApplyCall = [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_apply_batch')
   const updateSecretaryGoal = useAppStore((state) => state.updateSecretaryGoal)
   const clearSecretaryGoal = useAppStore((state) => state.clearSecretaryGoal)
   const goalCheckpoints = useAppStore((state) => state.goalCheckpoints)
@@ -125,7 +151,7 @@ export function FlowWorkspace() {
     const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
     const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
 
-    if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'workbench') {
+    if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'run') {
       setRightPanelOpen(false)
     }
 
@@ -139,7 +165,7 @@ export function FlowWorkspace() {
       !isBusy ||
       rightPanelOpen ||
       rightPanelPinned ||
-      rightPanelView !== 'workbench' ||
+      rightPanelView !== 'run' ||
       !shouldAutoOpenWorkbench
     ) {
       if (autoWorkbenchTimerRef.current !== undefined) {
@@ -150,7 +176,7 @@ export function FlowWorkspace() {
     }
 
     autoWorkbenchTimerRef.current = window.setTimeout(() => {
-      setRightPanelView('workbench')
+      setRightPanelView('run')
       setRightPanelOpen(true)
       autoWorkbenchTimerRef.current = undefined
     }, 420)
@@ -211,12 +237,16 @@ export function FlowWorkspace() {
       }
 
       round += 1
-      await sendFlowMessage(currentRequest, {
+      const runOutcome = await sendFlowMessage(currentRequest, {
         displayPrompt: currentDisplay,
         thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
         goalId: goal.id,
         queuedInputId: currentQueuedInputId,
       })
+
+      if (!shouldContinueSecretaryGoalCycle(runOutcome)) {
+        break
+      }
 
       const afterRunGoal = useAppStore.getState().activeSecretaryGoal
 
@@ -406,16 +436,16 @@ export function FlowWorkspace() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              title={rightPanelOpen && rightPanelView === 'workbench' ? '隐藏工作台' : '显示工作台'}
+              title={rightPanelOpen && rightPanelView === 'run' ? '隐藏工作台' : '显示工作台'}
               onClick={() => {
-                if (rightPanelOpen && rightPanelView === 'workbench') {
+                if (rightPanelOpen && rightPanelView === 'run') {
                   setRightPanelOpen(false)
                   setRightPanelPinned(false)
                   return
                 }
 
                 setRightPanelOpen(true)
-                setRightPanelView('workbench')
+                setRightPanelView('run')
               }}
               className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
             >
@@ -483,6 +513,19 @@ export function FlowWorkspace() {
                 {shouldShowPendingThinking ? (
                   <ThinkingBubble key="thinking" todos={agentTodos} steps={agentSteps} runState={llmRunState} />
                 ) : null}
+                {showCancelledPartialReply ? <SecretaryPartialReply text={activeWorkAssistantRun?.messageText ?? ''} /> : null}
+                {activeWorkAssistantRun && ['running', 'awaiting_approval', 'completed', 'failed', 'cancelled'].includes(activeWorkAssistantRun.status)
+                  ? Object.values(activeWorkAssistantRun.toolCalls).map((toolCall) => (
+                      <SecretaryToolStep
+                        key={toolCall.id}
+                        toolCall={toolCall}
+                        approval={toolCall.status === 'awaiting_approval' ? toolCall.preview as AssistantApprovalRequest : undefined}
+                        onApprove={(choice) => toolCall.preview && resolveAssistantApproval(toolCall.preview.id, choice)}
+                        onSelect={() => selectWorkAssistantTool(toolCall.id)}
+                        onRetry={toolCall.result?.recoverable ? () => setPrompt(toolCall.result?.errorCode === 'stale_preview' ? '请根据当前文件状态重新生成预览' : `请重试：${toolCall.intent}`) : undefined}
+                      />
+                    ))
+                  : null}
               </AnimatePresence>
             </div>
           </div>
@@ -513,6 +556,7 @@ export function FlowWorkspace() {
               onGuide={(id) => sendQueuedInputAsGuidance(id)}
             />
           ) : null}
+          <SecretaryRunStatusStack run={activeWorkAssistantRun} todos={agentTodos} queuedCount={queuedUserInputs.filter((input) => input.status === 'queued').length} />
           <form onSubmit={submitFlowPrompt} className="papyrus-command-bar mx-auto max-w-[920px] rounded-xl p-2">
             <div className="mb-1.5 flex flex-wrap items-center gap-1.5 px-1">
               <ModelSelector compact />
@@ -550,6 +594,17 @@ export function FlowWorkspace() {
               >
                 <Send size={15} />
               </button>
+              {activeWorkAssistantRun && (activeWorkAssistantRun.status === 'running' || activeWorkAssistantRun.status === 'awaiting_approval') ? (
+                <button
+                  type="button"
+                  title="停止电脑助手"
+                  aria-label="停止电脑助手"
+                  onClick={cancelSecretaryRun}
+                  className="papyrus-control grid size-9 shrink-0 place-items-center rounded-lg text-[#8b4138]"
+                >
+                  <Square size={14} fill="currentColor" />
+                </button>
+              ) : null}
             </div>
           </form>
         </div>
@@ -572,6 +627,8 @@ export function FlowWorkspace() {
             }}
             changeStat={latestRunChangeStat}
             manuscript={<EditorPane />}
+            files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
+            browser={<SecretaryBrowserWorkbench />}
           />
         ) : null}
       </AnimatePresence>
@@ -788,6 +845,7 @@ function SecretaryUsageOverview({
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
   const scallionUser = useAppStore((state) => state.scallionUser)
+  const scallionToken = useAppStore((state) => state.scallionToken)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
   const cacheStats = getModelCacheStats()
@@ -801,8 +859,16 @@ function SecretaryUsageOverview({
       ? 'Auto 调度'
       : providerConfigs[activeProviderId]?.label ?? '未选择'
   const quotaValue =
-    scallionQuota?.remaining ?? scallionUser?.points ?? scallionUser?.balance ?? 0
+    scallionQuota?.pointsBalance ??
+    scallionQuota?.remaining ??
+    scallionUser?.points ??
+    scallionUser?.balance ??
+    0
   const quotaUnit = scallionQuota?.unit ?? '积分'
+  const planLabel =
+    scallionQuota?.planName ??
+    scallionQuota?.planKey ??
+    (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined)
   const contextTitle = [
     `已用 ${formatCompactNumber(contextUsedTokens)} / 上限 ${formatCompactNumber(effectiveContextLimitTokens)} tokens`,
     `正文 ${formatCompactNumber(editorTokens)}`,
@@ -847,7 +913,10 @@ function SecretaryUsageOverview({
               <UsageMetric label="本轮 Token" value={formatCompactNumber(contextUsedTokens)} />
               <UsageMetric label="上下文" value={`${contextPercent}%`} title={contextTitle} />
               <UsageMetric label="当前模型" value={modelLabel} />
-              <UsageMetric label="内置额度" value={`${quotaValue} ${quotaUnit}`} />
+              <UsageMetric
+                label="套餐 / 积分"
+                value={`${planLabel ?? (scallionToken ? '同步中' : '未登录')} · ${quotaValue} ${quotaUnit}`}
+              />
               <UsageMetric label="缓存命中" value={`${cacheStats.hitRate}%`} />
               <UsageMetric label="累计修改" value={formatCompactNumber(totalChanged)} />
             </div>

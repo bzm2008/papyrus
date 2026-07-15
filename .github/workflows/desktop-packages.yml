@@ -1,0 +1,100 @@
+name: Desktop package smoke builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit, branch, or tag to package'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            config: src-tauri/ci/windows.json
+            artifact: papyrus-windows-smoke
+          - os: macos-latest
+            config: src-tauri/ci/macos.json
+            artifact: papyrus-macos-smoke
+          - os: ubuntu-24.04
+            config: src-tauri/ci/linux.json
+            artifact: papyrus-linux-smoke
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Resolve checked-out commit
+        id: packaged
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Install Chromium dependencies on Linux
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium on macOS and Windows
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+
+      - name: Run application and release checks
+        run: npm run ci:desktop
+
+      - name: Run real Chromium browser tests
+        run: npm run test:browser:e2e
+
+      - name: Run Rust verification
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml
+          cargo check --manifest-path src-tauri/Cargo.toml
+
+      # Smoke builds intentionally disable updater artifacts. Production Windows signing,
+      # macOS signing/notarization, Linux repository signing, and Tauri updater signing must
+      # run only in a protected release workflow with credentials; unsigned smoke artifacts are
+      # never presented as production releases.
+      - name: Build unsigned platform bundle
+        run: npm run tauri -- build --config "${{ matrix.config }}"
+
+      - name: Package Browser Bridge
+        run: npm run browser:package
+
+      - name: Upload smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ steps.packaged.outputs.sha }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle
+            artifacts/browser-bridge/*.zip

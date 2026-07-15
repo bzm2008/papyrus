@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { useAppStore, type LlmProviderConfig } from '../stores/useAppStore'
 
+const SCALLION_MODELS_TIMEOUT_MS = 15_000
+
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant'
   content: string
@@ -18,6 +20,9 @@ type ChatCompletionResponse = {
   }>
   error?: {
     message?: string
+    type?: string
+    code?: string
+    plan?: string
   }
 }
 
@@ -34,19 +39,35 @@ export type LlmSamplingOptions = {
   presencePenalty?: number
 }
 
-type ScallionModel = {
+export type ScallionModel = {
   id?: string
   name?: string
   displayName?: string
   label?: string
   modelName?: string
   model_name?: string
+  provider?: string
+  billingMode?: string
+  billing_mode?: string
+  callPrice?: number
+  call_price?: number
   available?: boolean
   enabled?: boolean
+  planAvailable?: boolean
+  plan_available?: boolean
+  availableForPlan?: boolean
+  available_for_plan?: boolean
+  allowed?: boolean
+  requiredPlan?: string
+  required_plan?: string
+  availabilityReason?: string
+  availability_reason?: string
   contextWindowTokens?: number
   context_window_tokens?: number
   contextWindow?: number
   context_window?: number
+  contextWindowLabel?: string
+  context_window_label?: string
 }
 
 type ScallionModelResponse = {
@@ -55,6 +76,43 @@ type ScallionModelResponse = {
 }
 
 type ScallionModelPayload = ScallionModelResponse | ScallionModel[]
+
+export type LlmErrorCode =
+  | 'unauthorized'
+  | 'quota_exhausted'
+  | 'plan_model_forbidden'
+  | 'forbidden'
+  | 'rate_limited'
+  | 'server_error'
+  | 'network_error'
+  | 'protocol_error'
+  | 'aborted'
+  | 'request_uncertain'
+  | 'http_error'
+
+export class LlmRequestError extends Error {
+  readonly code: LlmErrorCode
+  readonly status?: number
+  readonly plan?: string
+  readonly recoverable: boolean
+
+  constructor(
+    message: string,
+    options: {
+      code: LlmErrorCode
+      status?: number
+      plan?: string
+      recoverable?: boolean
+    },
+  ) {
+    super(message)
+    this.name = 'LlmRequestError'
+    this.code = options.code
+    this.status = options.status
+    this.plan = options.plan
+    this.recoverable = options.recoverable ?? false
+  }
+}
 
 type NativeLlmPayload = {
   request: {
@@ -84,12 +142,15 @@ async function callOpenAICompatibleOnce(
   messages: ChatMessage[],
   signal?: AbortSignal,
   sampling?: LlmSamplingOptions,
+  allowModelRecovery = true,
 ) {
   const modelName = resolveProviderModelName(provider)
 
   if (!modelName) {
     throw new Error('Model Name 不能为空')
   }
+
+  assertScallionModelListed(provider, modelName)
 
   const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
@@ -124,16 +185,44 @@ async function callOpenAICompatibleOnce(
       throw error
     }
 
-    return callViaTauri(provider, messages, {
+    if (provider.type === 'scallion_proxy') {
+      scheduleScallionQuotaRefresh(provider)
+      throw new LlmRequestError('Scallion 请求结果不确定，未自动重试以避免重复扣费。请确认额度后重试。', {
+        code: 'request_uncertain',
+        recoverable: true,
+      })
+    }
+
+    const fallback = await callViaTauri(provider, messages, {
       temperature: requestBody.temperature,
       maxTokens: requestBody.max_tokens,
     })
+    scheduleScallionQuotaRefresh(provider)
+    return fallback
   }
 
   const payload = (await response.json().catch(() => ({}))) as ChatCompletionResponse
 
   if (!response.ok) {
-    throw new Error(payload.error?.message || `LLM 请求失败：HTTP ${response.status}`)
+    const error = createHttpError(response.status, payload)
+
+    if (provider.type === 'scallion_proxy') {
+      if (error.code === 'unauthorized') {
+        useAppStore.getState().expireScallionSession()
+      } else if (error.code === 'quota_exhausted') {
+        scheduleScallionQuotaRefresh(provider)
+      }
+    }
+
+    if (allowModelRecovery && provider.type === 'scallion_proxy' && error.code === 'plan_model_forbidden') {
+      const recoveredProvider = await recoverScallionModel(provider)
+
+      if (recoveredProvider) {
+        return callOpenAICompatibleOnce(recoveredProvider, messages, signal, sampling, false)
+      }
+    }
+
+    throw error
   }
 
   const content = payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text
@@ -142,6 +231,7 @@ async function callOpenAICompatibleOnce(
     throw new Error('LLM 没有返回可用文本')
   }
 
+  scheduleScallionQuotaRefresh(provider)
   return content.trim()
 }
 
@@ -150,19 +240,38 @@ export async function callOpenAICompatibleStream(
   messages: ChatMessage[],
   { signal, onToken, sampling }: StreamOptions,
 ) {
-  return withLlmRetry(() => callOpenAICompatibleStreamOnce(provider, messages, { signal, onToken, sampling }))
+  let receivedToken = false
+
+  return withLlmRetry(
+    () =>
+      callOpenAICompatibleStreamOnce(provider, messages, {
+        signal,
+        sampling,
+        onToken: (token) => {
+          if (token) {
+            receivedToken = true
+          }
+          onToken(token)
+        },
+      }),
+    3,
+    (error) => !receivedToken && !signal?.aborted && isTransientLlmError(error),
+  )
 }
 
 async function callOpenAICompatibleStreamOnce(
   provider: LlmProviderConfig,
   messages: ChatMessage[],
   { signal, onToken, sampling }: StreamOptions,
+  allowModelRecovery = true,
 ) {
   const modelName = resolveProviderModelName(provider)
 
   if (!modelName) {
     throw new Error('Model Name 不能为空')
   }
+
+  assertScallionModelListed(provider, modelName)
 
   const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
@@ -196,6 +305,14 @@ async function callOpenAICompatibleStreamOnce(
       throw error
     }
 
+    if (provider.type === 'scallion_proxy') {
+      scheduleScallionQuotaRefresh(provider)
+      throw new LlmRequestError('Scallion 流式请求结果不确定，未自动重试以避免重复扣费。请确认额度后重试。', {
+        code: 'request_uncertain',
+        recoverable: true,
+      })
+    }
+
     const fallback = await callViaTauri(provider, messages, {
       temperature: sampling?.temperature ?? 0.45,
       maxTokens: sampling?.maxTokens ?? 8192,
@@ -203,12 +320,36 @@ async function callOpenAICompatibleStreamOnce(
       presencePenalty: sampling?.presencePenalty,
     })
     onToken(fallback)
+    scheduleScallionQuotaRefresh(provider)
     return fallback
   }
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as ChatCompletionResponse
-    throw new Error(payload.error?.message || `LLM 请求失败：HTTP ${response.status}`)
+    const error = createHttpError(response.status, payload)
+
+    if (provider.type === 'scallion_proxy') {
+      if (error.code === 'unauthorized') {
+        useAppStore.getState().expireScallionSession()
+      } else if (error.code === 'quota_exhausted') {
+        scheduleScallionQuotaRefresh(provider)
+      }
+    }
+
+    if (allowModelRecovery && provider.type === 'scallion_proxy' && error.code === 'plan_model_forbidden') {
+      const recoveredProvider = await recoverScallionModel(provider)
+
+      if (recoveredProvider) {
+        return callOpenAICompatibleStreamOnce(
+          recoveredProvider,
+          messages,
+          { signal, onToken, sampling },
+          false,
+        )
+      }
+    }
+
+    throw error
   }
 
   if (!response.body) {
@@ -263,18 +404,29 @@ async function callOpenAICompatibleStreamOnce(
     }
 
     onToken(content)
+    scheduleScallionQuotaRefresh(provider)
     return content.trim()
   }
 
+  scheduleScallionQuotaRefresh(provider)
   return fullText.trim()
 }
 
-export async function fetchScallionProxyModels(provider: LlmProviderConfig) {
+export async function fetchScallionProxyModels(
+  provider: LlmProviderConfig,
+  options: { includeUnavailable?: boolean } = {},
+) {
   if (provider.type !== 'scallion_proxy' || !provider.baseUrl.trim()) {
     return []
   }
 
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models`
+  if (!resolveProviderApiKey(provider)) {
+    return []
+  }
+
+  const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models${
+    options.includeUnavailable === false ? '' : '?include_unavailable=1'
+  }`
   const headers: Record<string, string> = {}
   const apiKey = resolveProviderApiKey(provider)
 
@@ -282,35 +434,77 @@ export async function fetchScallionProxyModels(provider: LlmProviderConfig) {
     headers.Authorization = `Bearer ${apiKey}`
   }
 
-  const response = await fetch(endpoint, { method: 'GET', headers })
+  const controller = new AbortController()
+  const timeout = globalThis.setTimeout(() => controller.abort(), SCALLION_MODELS_TIMEOUT_MS)
+  let response: Response
+
+  try {
+    response = await fetch(endpoint, { method: 'GET', headers, signal: controller.signal })
+  } catch {
+    if (controller.signal.aborted) {
+      throw new LlmRequestError('模型目录请求超时，请稍后重试。', {
+        code: 'network_error',
+        recoverable: true,
+      })
+    }
+    throw new LlmRequestError('无法读取 Scallion 模型目录，请检查网络后重试。', {
+      code: 'network_error',
+      recoverable: true,
+    })
+  } finally {
+    globalThis.clearTimeout(timeout)
+  }
   const payload = (await response.json().catch(() => ({}))) as ScallionModelPayload
 
   if (!response.ok) {
-    throw new Error(`模型元数据请求失败：HTTP ${response.status}`)
+    throw createHttpError(response.status, payload as ChatCompletionResponse)
   }
 
   const models = Array.isArray(payload) ? payload : payload.models ?? payload.data ?? []
 
-  return (
-    models.map((model) => ({
-      id: model.id || model.modelName || model.model_name || model.name || model.displayName || '',
-      label: model.label || model.displayName || model.name || model.modelName || model.model_name || model.id || '',
-      modelName: model.id || model.modelName || model.model_name || model.name || '',
-      available: model.available ?? model.enabled ?? true,
-      contextWindowTokens:
-        model.contextWindowTokens ??
-        model.context_window_tokens ??
-        model.contextWindow ??
-        model.context_window,
-    }))
-  ).filter((model) => model.id || model.modelName || model.contextWindowTokens)
+  return models
+    .map((model) => {
+      const id = model.id?.trim() || model.modelName?.trim() || model.model_name?.trim() || ''
+      const name = model.name?.trim() || model.displayName?.trim() || model.label?.trim() || id
+      const contextWindowTokens = toPositiveNumber(
+        model.context_window_tokens ?? model.contextWindowTokens ?? model.context_window ?? model.contextWindow,
+      )
+
+      return {
+        id,
+        label: name,
+        modelName: id,
+        name,
+        provider: model.provider,
+        billingMode: model.billingMode ?? model.billing_mode,
+        callPrice: toPositiveNumber(model.callPrice ?? model.call_price),
+        planAvailable:
+          model.planAvailable ??
+          model.plan_available ??
+          model.availableForPlan ??
+          model.available_for_plan ??
+          model.allowed ??
+          true,
+        requiredPlan: model.requiredPlan ?? model.required_plan,
+        availabilityReason: model.availabilityReason ?? model.availability_reason,
+        available: model.available ?? model.enabled ?? true,
+        contextWindowTokens,
+        contextWindowLabel: model.contextWindowLabel ?? model.context_window_label,
+      }
+    })
+    .filter((model) => Boolean(model.id))
 }
 
 export function canCallProvider(provider: LlmProviderConfig) {
   const modelName = resolveProviderModelName(provider)
 
   if (provider.type === 'scallion_proxy') {
-    return Boolean(provider.baseUrl.trim() && modelName && resolveProviderApiKey(provider))
+    const stateModels = useAppStore.getState().scallionModels
+    const listedModelIsUsable = stateModels.some(
+      (model) => model.id === modelName && model.available && model.planAvailable !== false,
+    )
+
+    return Boolean(provider.baseUrl.trim() && modelName && resolveProviderApiKey(provider) && listedModelIsUsable)
   }
 
   if (provider.type === 'custom') {
@@ -326,6 +520,23 @@ export function canCallProvider(provider: LlmProviderConfig) {
 
 function resolveProviderModelName(provider: LlmProviderConfig) {
   return provider.modelName.trim()
+}
+
+function assertScallionModelListed(provider: LlmProviderConfig, modelName: string) {
+  if (provider.type !== 'scallion_proxy') {
+    return
+  }
+
+  const listed = useAppStore.getState().scallionModels.some(
+    (model) => model.id === modelName && model.available && model.planAvailable !== false,
+  )
+
+  if (!listed) {
+    throw new LlmRequestError('当前模型不在套餐模型目录中，请刷新模型列表后重试。', {
+      code: 'protocol_error',
+      recoverable: true,
+    })
+  }
 }
 
 function resolveProviderApiKey(provider: LlmProviderConfig) {
@@ -404,7 +615,72 @@ function parseStreamLine(line: string) {
   }
 }
 
-async function withLlmRetry<T>(run: () => Promise<T>, maxAttempts = 3): Promise<T> {
+function createHttpError(status: number, payload: ChatCompletionResponse) {
+  const payloadError = payload.error
+  const message = payloadError?.message || `LLM 请求失败：HTTP ${status}`
+  const type = payloadError?.type || payloadError?.code
+  let code: LlmErrorCode = 'http_error'
+
+  if (status === 401) code = 'unauthorized'
+  else if (status === 402) code = 'quota_exhausted'
+  else if (status === 403 && type === 'plan_model_forbidden') code = 'plan_model_forbidden'
+  else if (status === 403) code = 'forbidden'
+  else if (status === 429) code = 'rate_limited'
+  else if (status >= 500) code = 'server_error'
+
+  return new LlmRequestError(message, {
+    code,
+    status,
+    plan: payloadError?.plan,
+    recoverable: code === 'plan_model_forbidden' || code === 'server_error' || code === 'rate_limited',
+  })
+}
+
+async function recoverScallionModel(provider: LlmProviderConfig) {
+  try {
+    const { refreshScallionModels, refreshScallionQuota } = await import('./scallionAccountService')
+    await Promise.allSettled([refreshScallionModels(), refreshScallionQuota()])
+    const state = useAppStore.getState()
+    const next = state.scallionModels.find(
+      (model) => model.available && model.planAvailable !== false && model.id,
+    )
+
+    if (!next) {
+      return undefined
+    }
+
+    return {
+      ...state.providerConfigs.qwen36,
+      ...provider,
+      modelName: next.id,
+      label: next.label || provider.label,
+      serverContextWindowTokens: next.contextWindowTokens ?? provider.serverContextWindowTokens,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function scheduleScallionQuotaRefresh(provider: LlmProviderConfig) {
+  if (provider.type !== 'scallion_proxy') {
+    return
+  }
+
+  void import('./scallionAccountService')
+    .then(({ refreshScallionQuota }) => refreshScallionQuota())
+    .catch(() => undefined)
+}
+
+function toPositiveNumber(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) && number > 0 ? Math.round(number) : undefined
+}
+
+async function withLlmRetry<T>(
+  run: () => Promise<T>,
+  maxAttempts = 3,
+  shouldRetry: (error: unknown) => boolean = isTransientLlmError,
+): Promise<T> {
   let lastError: unknown
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -425,7 +701,7 @@ async function withLlmRetry<T>(run: () => Promise<T>, maxAttempts = 3): Promise<
     } catch (error) {
       lastError = error
 
-      if (!isTransientLlmError(error) || attempt >= maxAttempts) {
+      if (!shouldRetry(error) || attempt >= maxAttempts) {
         break
       }
 
@@ -437,6 +713,10 @@ async function withLlmRetry<T>(run: () => Promise<T>, maxAttempts = 3): Promise<
 }
 
 function isTransientLlmError(error: unknown) {
+  if (error instanceof LlmRequestError) {
+    return error.code === 'server_error' || error.code === 'rate_limited' || error.code === 'network_error'
+  }
+
   if (!(error instanceof Error)) {
     return true
   }
