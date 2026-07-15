@@ -600,7 +600,7 @@ export function FlowWorkspace() {
                   type="button"
                   title="停止电脑助手"
                   aria-label="停止电脑助手"
-                  onClick={cancelSecretaryRun}
+                  onClick={() => cancelSecretaryRun()}
                   className="papyrus-control grid size-9 shrink-0 place-items-center rounded-lg text-[#8b4138]"
                 >
                   <Square size={14} fill="currentColor" />

@@ -7,6 +7,7 @@ vi.mock('./llmClient', () => ({
 }))
 
 import { callOpenAICompatible, callOpenAICompatibleStream } from './llmClient'
+import { defaultProviderConfigs } from './modelCatalog'
 import { sendFlowMessage, shouldContinueSecretaryGoalCycle, streamOrCall } from './agentOrchestrator'
 import { activeSecretaryRunId, cancelSecretaryRun, finishSecretaryRun } from './secretaryRunController'
 
@@ -49,7 +50,7 @@ describe('stream fallback ownership', () => {
 
     await expect(
       streamOrCall(
-        { id: 'test', label: 'Test', type: 'openai_compatible', baseUrl: 'https://example.invalid', modelName: 'test' },
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
         [{ role: 'user', content: '测试' }],
         vi.fn(),
       ),

@@ -9,6 +9,7 @@ use std::{
 use tauri::Manager;
 use uuid::Uuid;
 
+mod desktop_lifecycle;
 pub mod secretary_ledger;
 mod work_assistant;
 
@@ -19,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            desktop_lifecycle::install(app)?;
             app.manage(work_assistant::init_state(&app.handle())?);
             app.manage(work_assistant::browser_bridge::init_browser_bridge_state());
             if cfg!(debug_assertions) {
@@ -64,6 +66,7 @@ pub fn run() {
             secretary_ledger::secretary_ledger_save_checkpoint,
             secretary_ledger::secretary_ledger_load_latest_checkpoint,
             secretary_ledger::secretary_ledger_import_legacy_batch,
+            desktop_lifecycle::complete_explicit_exit,
             work_assistant::work_assistant_capabilities,
             work_assistant::work_assistant_list_roots,
             work_assistant::work_assistant_add_root,
@@ -111,6 +114,7 @@ pub fn run() {
             work_assistant::work_assistant_browser_execute_action,
             work_assistant::work_assistant_web_extract,
         ])
+        .on_window_event(desktop_lifecycle::handle_window_event)
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

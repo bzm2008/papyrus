@@ -4,6 +4,8 @@ import {
   activeSecretaryRunId,
   cancelSecretaryRun,
   finishSecretaryRun,
+  getSecretaryRunCancellationReason,
+  pauseSecretaryRun,
   startSecretaryRun,
 } from './secretaryRunController'
 
@@ -40,5 +42,14 @@ describe('secretaryRunController', () => {
 
     expect(signal.aborted).toBe(true)
     expect(activeSecretaryRunId()).toBe('run-1')
+  })
+
+  it('marks a paused run separately from a cancelled run', () => {
+    const signal = startSecretaryRun('run-1')
+
+    pauseSecretaryRun()
+
+    expect(signal.aborted).toBe(true)
+    expect(getSecretaryRunCancellationReason('run-1')).toBe('paused')
   })
 })

@@ -5,7 +5,9 @@ import { useContextAutomation } from '../hooks/useContextAutomation'
 import { useProjectGuidance } from '../hooks/useProjectGuidance'
 import { useRemoteRelay } from '../hooks/useRemoteRelay'
 import { refreshHardwareCapabilityProfile } from '../services/hardwareCapabilityService'
+import { installDesktopLifecycleHandlers } from '../services/desktopLifecycleService'
 import { refreshScallionQuota, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import { initializeSecretaryLedgerRuntime } from '../services/secretaryLedgerRuntime'
 import { useAppStore } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { EditorPane } from './EditorPane'
@@ -112,6 +114,12 @@ function MainWorkbench() {
   useEffect(() => {
     refreshHardwareCapabilityProfile()
   }, [])
+
+  useEffect(() => {
+    void initializeSecretaryLedgerRuntime()
+  }, [])
+
+  useEffect(() => installDesktopLifecycleHandlers(), [])
 
   const isFlowMode = mode === 'flow'
   const showLeft = columnMode === 3
