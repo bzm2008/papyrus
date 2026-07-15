@@ -37,21 +37,35 @@ export function validateOutputDirectory(outputDir, bundleDir, rootDir = ROOT, cw
   return output
 }
 
-export async function assertNoSymlinkAncestors(targetPath, protectedPaths = []) {
+export async function assertNoSymlinkAncestors(targetPath, protectedPaths = [], trustedTemporaryRoots = [os.tmpdir()]) {
   const protectedResolved = await Promise.all(protectedPaths.map((value) => canonicalPath(value)))
+  const trustedTemporaryResolved = await Promise.all(trustedTemporaryRoots.map(async (value) => ({
+    syntactic: path.resolve(value),
+    canonical: await canonicalPath(value),
+  })))
   const targetResolved = path.resolve(targetPath)
   let current = targetResolved
   while (true) {
     try {
       const stat = await fs.lstat(current)
       if (stat.isSymbolicLink()) {
-        const realTarget = await fs.realpath(current).catch(() => current)
-        const expandedTarget = path.resolve(realTarget, path.relative(current, targetResolved))
+        const realTarget = await fs.realpath(current).catch(() => undefined)
+        const expandedTarget = realTarget && path.resolve(realTarget, path.relative(current, targetResolved))
         const pointsAtProtectedPath = protectedResolved.some(
-          (protectedPath) => isPathWithin(protectedPath, expandedTarget),
+          (protectedPath) => expandedTarget && isPathWithin(protectedPath, expandedTarget),
         )
         if (pointsAtProtectedPath) {
           throw new Error(`smoke output path cannot contain a symlink or junction to a protected path: ${current}`)
+        }
+        // Only aliases needed to reach a trusted system temporary root may be traversed.
+        const trustedTemporaryAlias = realTarget && trustedTemporaryResolved.some(({ syntactic, canonical }) => (
+          isPathWithin(current, syntactic) &&
+          isPathWithin(syntactic, targetResolved) &&
+          isPathWithin(realTarget, canonical) &&
+          isPathWithin(canonical, expandedTarget)
+        ))
+        if (!trustedTemporaryAlias) {
+          throw new Error(`smoke output path cannot contain an untrusted symlink or junction: ${current}`)
         }
       }
     } catch (error) {
@@ -93,9 +107,9 @@ async function hasOwnedSmokeMarker(markerPath) {
   }
 }
 
-export async function prepareOutputDirectory(outputDir, bundleDir) {
+export async function prepareOutputDirectory(outputDir, bundleDir, trustedTemporaryRoots = [os.tmpdir()]) {
   const output = validateOutputDirectory(outputDir, bundleDir)
-  await assertNoSymlinkAncestors(output, [ROOT, process.cwd(), bundleDir])
+  await assertNoSymlinkAncestors(output, [ROOT, process.cwd(), bundleDir], trustedTemporaryRoots)
   const marker = path.join(output, OUTPUT_MARKER)
   let existing
   try {

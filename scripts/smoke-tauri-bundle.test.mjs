@@ -104,29 +104,44 @@ test('bundle smoke rejects destructive output directory targets', async () => {
   }
 })
 
-test('bundle smoke permits system-style symlink ancestors but rejects protected targets when the host permits links', async () => {
+test('bundle smoke permits only trusted system-style temporary aliases when the host permits links', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-smoke-symlink-'))
-  const real = path.join(root, 'real')
-  const link = path.join(root, 'link')
-  const protectedTarget = path.join(root, 'protected')
+  const bundle = path.join(root, 'bundle')
+  const systemTempTarget = path.join(root, 'system-temp-target')
+  const systemTempAlias = path.join(root, 'system-temp-alias')
+  const userControlledTarget = path.join(root, 'user-controlled-target')
+  const userControlledLink = path.join(root, 'user-controlled-link')
   const protectedLink = path.join(root, 'protected-link')
   try {
-    await fs.mkdir(real, { recursive: true })
-    await fs.mkdir(protectedTarget, { recursive: true })
+    await fs.mkdir(bundle, { recursive: true })
+    await fs.mkdir(systemTempTarget, { recursive: true })
+    await fs.mkdir(userControlledTarget, { recursive: true })
     try {
-      await fs.symlink(real, link, process.platform === 'win32' ? 'junction' : 'dir')
+      await fs.symlink(systemTempTarget, systemTempAlias, process.platform === 'win32' ? 'junction' : 'dir')
+      await fs.symlink(userControlledTarget, userControlledLink, process.platform === 'win32' ? 'junction' : 'dir')
     } catch {
       return
     }
-    await assert.doesNotReject(assertNoSymlinkAncestors(path.join(link, 'output')))
-    await assert.doesNotReject(assertNoSymlinkAncestors(path.join(link, 'output'), [path.join(root, 'protected')]))
-    try {
-      await fs.symlink(protectedTarget, protectedLink, process.platform === 'win32' ? 'junction' : 'dir')
-      await assert.rejects(assertNoSymlinkAncestors(path.join(protectedLink, 'output'), [protectedTarget]), /protected path/)
-      await assert.rejects(assertNoSymlinkAncestors(path.join(protectedLink, 'output'), [protectedLink]), /protected path/)
-    } catch {
-      // Link creation may be unavailable even when the first link succeeded.
-    }
+    await assert.doesNotReject(
+      assertNoSymlinkAncestors(path.join(systemTempAlias, 'output'), [], [systemTempAlias]),
+    )
+    await assert.doesNotReject(
+      prepareOutputDirectory(path.join(systemTempAlias, 'approved-output'), bundle, [systemTempAlias]),
+    )
+    await assert.rejects(
+      prepareOutputDirectory(path.join(userControlledLink, 'output'), bundle),
+      /untrusted symlink or junction/,
+    )
+
+    await fs.symlink(bundle, protectedLink, process.platform === 'win32' ? 'junction' : 'dir')
+    await assert.rejects(
+      assertNoSymlinkAncestors(path.join(protectedLink, 'output'), [bundle], [protectedLink]),
+      /protected path/,
+    )
+    await assert.rejects(
+      prepareOutputDirectory(path.join(protectedLink, 'output'), bundle, [protectedLink]),
+      /protected path/,
+    )
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }
