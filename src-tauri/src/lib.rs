@@ -248,16 +248,20 @@ fn clear_global_memory(app: tauri::AppHandle) -> Result<MaintenanceStatus, Strin
     let memory_dir = memory_dir(&app)?;
 
     if memory_dir.exists() {
-        fs::remove_dir_all(&memory_dir).map_err(|error| format!("清空记忆目录失败：{}", error))?;
+        fs::remove_dir_all(&memory_dir).map_err(|_| "清空本地记忆失败".to_string())?;
     }
 
-    fs::create_dir_all(&memory_dir).map_err(|error| format!("重建记忆目录失败：{}", error))?;
+    fs::create_dir_all(&memory_dir).map_err(|_| "重建本地记忆失败".to_string())?;
+    let ledger_bytes = secretary_ledger::SecretaryLedger::open_for_app(&app)
+        .and_then(|ledger| ledger.clear())
+        .map_err(|error| error.safe_message().to_string())?;
+    let bytes = directory_size(&memory_dir).saturating_add(ledger_bytes);
 
     Ok(MaintenanceStatus {
         status: "ok".into(),
         message: "全局记忆已清空".into(),
         latency_ms: None,
-        bytes: Some(0),
+        bytes: Some(bytes),
     })
 }
 
