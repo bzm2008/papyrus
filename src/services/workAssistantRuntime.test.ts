@@ -133,6 +133,93 @@ describe('work assistant runtime', () => {
     expect(invoke).not.toHaveBeenCalledWith('work_assistant_preview', expect.anything())
   })
 
+  it('cancels an in-flight native file execution before it can finish', async () => {
+    let resolveExecute: ((value: Record<string, unknown>) => void) | undefined
+    let resolveExecuteStarted: (() => void) | undefined
+    let cancelCalled = false
+    const executeStarted = new Promise<void>((resolve) => { resolveExecuteStarted = resolve })
+    const invoke = vi.fn((command: string) => {
+      if (command === 'work_assistant_preview') {
+        return Promise.resolve({ id: 'in-flight-preview', revision: '1', risk: 'reversible', title: '整理文件', targetSummary: 'Downloads', impactSummary: '移动文件', reversible: true, scope: ['downloads'], expiresAt: Date.now() + 60_000 })
+      }
+      if (command === 'work_assistant_approve') {
+        return Promise.resolve({ token: 'in-flight-token', previewId: 'in-flight-preview', expires: Date.now() + 60_000 })
+      }
+      if (command === 'work_assistant_execute') {
+        resolveExecuteStarted?.()
+        return new Promise<Record<string, unknown>>((resolve) => { resolveExecute = resolve })
+      }
+      if (command === 'work_assistant_cancel_run') {
+        cancelCalled = true
+        return Promise.resolve(undefined)
+      }
+      return Promise.resolve(undefined)
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const controller = new AbortController()
+    const args = { rootId: 'downloads', conflictPolicy: 'rename', operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'PDF/a.pdf' }] }
+
+    await executeAssistantToolCall({ runId: 'run-in-flight', toolCall: call('file_plan_batch', args, 'in-flight-plan') })
+    const pending = executeAssistantToolCall({ runId: 'run-in-flight', toolCall: call('file_apply_batch', { previewId: 'in-flight-preview' }, 'in-flight-apply'), signal: controller.signal })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('in-flight-preview', 'once')).toBe(true)
+    await executeStarted
+
+    controller.abort()
+    await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
+    expect(cancelCalled).toBe(true)
+    resolveExecute?.({ completed: [], skipped: [], failed: [], remaining: [], cancelled: true })
+  })
+
+  it('cancels a native execution when the run event arrives without a signal', async () => {
+    let resolveExecute: ((value: Record<string, unknown>) => void) | undefined
+    const invoke = vi.fn((command: string) => {
+      if (command === 'work_assistant_preview') {
+        return Promise.resolve({ id: 'event-preview', revision: '1', risk: 'reversible', title: '整理文件', targetSummary: 'Downloads', impactSummary: '移动文件', reversible: true, expiresAt: Date.now() + 60_000 })
+      }
+      if (command === 'work_assistant_approve') {
+        return Promise.resolve({ token: 'event-token', previewId: 'event-preview', expires: Date.now() + 60_000 })
+      }
+      if (command === 'work_assistant_execute') {
+        return new Promise<Record<string, unknown>>((resolve) => { resolveExecute = resolve })
+      }
+      return Promise.resolve(undefined)
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const args = { rootId: 'downloads', conflictPolicy: 'rename', operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'PDF/a.pdf' }] }
+
+    await executeAssistantToolCall({ runId: 'run-event-cancel', toolCall: call('file_plan_batch', args, 'event-plan') })
+    const pending = executeAssistantToolCall({ runId: 'run-event-cancel', toolCall: call('file_apply_batch', { previewId: 'event-preview' }, 'event-apply') })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('event-preview', 'once')).toBe(true)
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('work_assistant_execute', expect.anything()))
+
+    dispatchOrderedWorkAssistantEvent({ type: 'run.cancelled', runId: 'run-event-cancel', at: Date.now() })
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('work_assistant_cancel_run', { run: 'run-event-cancel' }))
+    resolveExecute?.({ completed: [], skipped: [], failed: [], remaining: [], cancelled: true })
+
+    await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
+  })
+
+  it('does not start a native tool after a terminal run event', async () => {
+    const invoke = vi.fn(async () => undefined)
+    setWorkAssistantInvokerForTests(invoke)
+    dispatchOrderedWorkAssistantEvent({ type: 'run.started', runId: 'run-ended', at: Date.now() })
+    dispatchOrderedWorkAssistantEvent({ type: 'run.completed', runId: 'run-ended', response: 'done', at: Date.now() })
+
+    const result = await executeAssistantToolCall({
+      runId: 'run-ended',
+      toolCall: call('file_plan_batch', {
+        rootId: 'downloads',
+        conflictPolicy: 'rename',
+        operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'PDF/a.pdf' }],
+      }),
+    })
+
+    expect(result).toMatchObject({ ok: false, errorCode: 'run_ended' })
+    expect(invoke).not.toHaveBeenCalledWith('work_assistant_preview', expect.anything())
+  })
+
   it('reuses a structured run grant only for a narrower item bound', async () => {
     let previewNumber = 0
     const scope = (maxItemCount: number) => JSON.stringify({

@@ -226,6 +226,12 @@ async function refreshScallionQuotaOnce(token: string, userAtRequest?: ScallionU
       return undefined
     }
 
+    if (!hasQuotaBalance(payload, payload.user ?? userAtRequest)) {
+      const error = new Error('Scallion 额度响应缺少 points_balance，请稍后重试')
+      ;(error as Error & { code?: string }).code = 'protocol_error'
+      throw error
+    }
+
     if (payload.user) {
       useAppStore.getState().setScallionSession(token, payload.user)
     }
@@ -383,6 +389,35 @@ function firstNumber(...values: unknown[]) {
   }
 
   return 0
+}
+
+function hasQuotaBalance(payload: AccountPayload, user?: ScallionUser) {
+  const quotaObject = payload.quota && typeof payload.quota === 'object' ? payload.quota : undefined
+  const values: unknown[] = [
+    payload.points_balance,
+    quotaObject?.points_balance,
+    quotaObject?.pointsBalance,
+    quotaObject?.remainingPoints,
+    quotaObject?.remaining_points,
+    quotaObject?.points,
+    payload.points,
+    payload.remainingPoints,
+    payload.remaining_points,
+    payload.balance,
+    typeof payload.quota === 'number' ? payload.quota : undefined,
+    quotaObject?.quota,
+    quotaObject?.remaining,
+    user?.points,
+    user?.balance,
+  ]
+
+  return values.some((value) => {
+    if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+      return false
+    }
+    const number = typeof value === 'number' ? value : Number(value)
+    return Number.isFinite(number)
+  })
 }
 
 function isUnauthorizedError(error: unknown) {

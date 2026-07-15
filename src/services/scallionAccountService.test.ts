@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { normalizeQuota, quotaFromUser, refreshScallionModels, refreshScallionQuota } from './scallionAccountService'
+import {
+  normalizeQuota,
+  quotaFromUser,
+  refreshScallionModels,
+  refreshScallionQuota,
+  refreshScallionRuntimeMetadata,
+} from './scallionAccountService'
 import { useAppStore } from '../stores/useAppStore'
 
 afterEach(() => {
@@ -148,6 +154,47 @@ describe('normalizeQuota', () => {
     )
   })
 
+  it('stores the live plan and canonical points balance from a quota refresh', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            balance: 999,
+            points_balance: 504,
+            quota: 504,
+            unified_points: true,
+            plan: {
+              key: 'briefly',
+              name: 'Briefly',
+              expires_at: '2026-08-12T00:00:00.000Z',
+            },
+          }),
+        }) as Response,
+      ),
+    )
+
+    await expect(refreshScallionQuota()).resolves.toEqual(
+      expect.objectContaining({
+        pointsBalance: 504,
+        remaining: 504,
+        balance: 999,
+        quota: 504,
+        unifiedPoints: true,
+        planKey: 'briefly',
+        planName: 'Briefly',
+        planExpiresAt: '2026-08-12T00:00:00.000Z',
+      }),
+    )
+    expect(useAppStore.getState().scallionQuota).toEqual(
+      expect.objectContaining({ pointsBalance: 504, planKey: 'briefly', planName: 'Briefly' }),
+    )
+    expect(useAppStore.getState().scallionSync.quota.status).toBe('ready')
+  })
+
   it('preserves the last successful quota when a later refresh is temporarily unavailable', async () => {
     useAppStore.setState({
       scallionToken: 'jwt-token',
@@ -281,6 +328,140 @@ describe('refreshScallionModels', () => {
     await expect(refreshScallionModels()).rejects.toThrow()
     expect(useAppStore.getState().scallionSync.models).toEqual(
       expect.objectContaining({ status: 'error', error: expect.any(String) }),
+    )
+  })
+
+  it('keeps the last successful quota when a successful response omits balance fields', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      scallionQuota: {
+        remaining: 503,
+        pointsBalance: 503,
+        planKey: 'free',
+        planName: 'Free',
+        unit: '积分',
+        isMember: false,
+        memberPriceLabel: '9.9 元/月',
+        upgradeUrl: 'https://scallion.uno/pricing',
+        topUpUrl: 'https://scallion.uno/pricing',
+        updatedAt: 100,
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ plan: { key: 'briefly', name: 'Briefly' } }),
+      }) as Response),
+    )
+
+    await expect(refreshScallionQuota()).resolves.toEqual(
+      expect.objectContaining({ pointsBalance: 503, updatedAt: 100 }),
+    )
+    expect(useAppStore.getState().scallionSync.quota).toEqual(
+      expect.objectContaining({ status: 'stale', error: expect.stringContaining('points_balance') }),
+    )
+  })
+
+  it('keeps the previous catalog when a successful response is not a model directory', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      scallionModels: [
+        {
+          id: 'agnes-2.0-flash',
+          label: 'Agnes 2.0 Flash',
+          modelName: 'agnes-2.0-flash',
+          available: true,
+          planAvailable: true,
+          updatedAt: 100,
+        },
+      ],
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({ message: 'not a model directory' }),
+        }) as Response,
+      ),
+    )
+
+    await expect(refreshScallionModels()).rejects.toMatchObject({
+      code: 'protocol_error',
+      recoverable: true,
+    })
+    expect(useAppStore.getState().scallionModels).toEqual([
+      expect.objectContaining({ id: 'agnes-2.0-flash' }),
+    ])
+    expect(useAppStore.getState().scallionSync.models).toEqual(
+      expect.objectContaining({ status: 'stale', error: expect.any(String) }),
+    )
+  })
+})
+
+describe('refreshScallionRuntimeMetadata', () => {
+  it('refreshes the full model catalog and live quota together', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/models')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [
+              {
+                id: 'agnes-2.0-flash',
+                name: 'Agnes 2.0 Flash',
+                plan_available: true,
+              },
+              {
+                id: 'nemotron',
+                name: 'Nemotron',
+                plan_available: false,
+                required_plan: 'deeper',
+                availability_reason: '当前 Free 套餐不可用',
+              },
+            ],
+          }),
+        } as Response
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          points_balance: 503,
+          plan: { key: 'free', name: 'Free', expires_at: null },
+        }),
+      } as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await refreshScallionRuntimeMetadata()
+
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('/models?include_unavailable=1'),
+        'https://scallion.uno/api/papyrus/llm/quota',
+      ]),
+    )
+    expect(useAppStore.getState().scallionModels).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'agnes-2.0-flash', available: true, planAvailable: true }),
+        expect.objectContaining({
+          id: 'nemotron',
+          available: false,
+          planAvailable: false,
+          requiredPlan: 'deeper',
+        }),
+      ]),
+    )
+    expect(useAppStore.getState().scallionQuota).toEqual(
+      expect.objectContaining({ pointsBalance: 503, planKey: 'free', planName: 'Free' }),
     )
   })
 })

@@ -40,6 +40,10 @@ let invokeFn: InvokeFn = (command, args) => invoke(command, args)
 const invokeTyped = <T>(command: string, args?: Record<string, unknown>) =>
   invokeFn(command, args) as Promise<T>
 
+function abortError() {
+  return new DOMException('Run cancelled', 'AbortError')
+}
+
 export function setWorkAssistantInvokerForTests(next: InvokeFn) {
   invokeFn = next
 }
@@ -81,11 +85,74 @@ export const approveWorkAssistantAction = (
   choice: AssistantApprovalChoice,
 ) => invokeTyped<ApprovalGrant>('work_assistant_approve', { previewId, runId, choice })
 
-export const executeWorkAssistantAction = (previewId: string, approvalToken: string) =>
-  invokeTyped<NativeBatchExecutionResult>('work_assistant_execute', { previewId, approvalToken })
-
 export const cancelWorkAssistantRun = (runId: string) =>
   invokeTyped<void>('work_assistant_cancel_run', { run: runId })
+
+export function executeWorkAssistantAction(
+  previewId: string,
+  approvalToken: string,
+  runId?: string,
+  signal?: AbortSignal,
+) {
+  if (signal?.aborted) {
+    try {
+      if (runId) void cancelWorkAssistantRun(runId).catch(() => undefined)
+    } catch {
+      // A disposed bridge cannot acknowledge cancellation, but the caller
+      // still receives the deterministic AbortError below.
+    }
+    return Promise.reject<NativeBatchExecutionResult>(abortError())
+  }
+
+  let pending: Promise<NativeBatchExecutionResult>
+  try {
+    pending = invokeTyped<NativeBatchExecutionResult>('work_assistant_execute', { previewId, approvalToken })
+  } catch (error) {
+    return Promise.reject<NativeBatchExecutionResult>(error)
+  }
+  if (!signal) return pending
+
+  const requestCancel = () => {
+    if (!runId) return
+    try {
+      void cancelWorkAssistantRun(runId).catch(() => undefined)
+    } catch {
+      // Cancellation is best effort after the native request has started.
+    }
+  }
+
+  return new Promise<NativeBatchExecutionResult>((resolve, reject) => {
+    let settled = false
+    let nativeFinished = false
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    const onAbort = () => {
+      if (settled || nativeFinished) return
+      settled = true
+      cleanup()
+      requestCancel()
+      reject(abortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    pending.then(
+      (value) => {
+        nativeFinished = true
+        if (settled) return
+        settled = true
+        cleanup()
+        // Once the native promise has completed, its result is authoritative.
+        // A late abort must not turn a completed file operation into a retryable
+        // cancellation that could duplicate side effects.
+        resolve(value)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      },
+    )
+  })
+}
 
 export const getWorkAssistantDesktopStatus = () =>
   invokeTyped<Record<string, unknown>>('work_assistant_desktop_status')

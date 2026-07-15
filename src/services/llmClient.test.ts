@@ -127,6 +127,27 @@ describe('Scallion production contract', () => {
     })
   })
 
+  it('classifies a malformed successful model catalog response as a recoverable protocol error', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError('invalid json')
+          },
+        }) as unknown as Response,
+      ),
+    )
+
+    await expect(fetchScallionProxyModels(defaultProviderConfigs.qwen36)).rejects.toMatchObject({
+      code: 'protocol_error',
+      recoverable: true,
+    })
+  })
+
   it('refreshes access after a plan-model 403 and retries once with the returned model id', async () => {
     useAppStore.setState({
       scallionToken: 'jwt-token',

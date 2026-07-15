@@ -75,8 +75,6 @@ type ScallionModelResponse = {
   models?: ScallionModel[]
 }
 
-type ScallionModelPayload = ScallionModelResponse | ScallionModel[]
-
 export type LlmErrorCode =
   | 'unauthorized'
   | 'quota_exhausted'
@@ -454,13 +452,37 @@ export async function fetchScallionProxyModels(
   } finally {
     globalThis.clearTimeout(timeout)
   }
-  const payload = (await response.json().catch(() => ({}))) as ScallionModelPayload
+  let payload: unknown
+
+  try {
+    payload = await response.json()
+  } catch {
+    throw new LlmRequestError('Scallion 模型目录响应格式无效，请稍后重试。', {
+      code: 'protocol_error',
+      recoverable: true,
+    })
+  }
 
   if (!response.ok) {
     throw createHttpError(response.status, payload as ChatCompletionResponse)
   }
 
-  const models = Array.isArray(payload) ? payload : payload.models ?? payload.data ?? []
+  const models = Array.isArray(payload)
+    ? payload
+    : payload && typeof payload === 'object'
+      ? Array.isArray((payload as ScallionModelResponse).models)
+        ? (payload as ScallionModelResponse).models
+        : Array.isArray((payload as ScallionModelResponse).data)
+          ? (payload as ScallionModelResponse).data
+          : undefined
+      : undefined
+
+  if (!models) {
+    throw new LlmRequestError('Scallion 模型目录响应格式无效，请稍后重试。', {
+      code: 'protocol_error',
+      recoverable: true,
+    })
+  }
 
   return models
     .map((model) => {

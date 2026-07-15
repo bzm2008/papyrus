@@ -39,6 +39,7 @@ import type {
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type PendingApproval = {
+  runId: string
   resolve: (choice: AssistantApprovalChoice) => void
   reject: (error: Error) => void
   abort?: () => void
@@ -58,12 +59,19 @@ type CachedRunApprovalGrant = {
 
 const pendingApprovals = new Map<string, PendingApproval>()
 const previewCache = new Map<string, AssistantToolPreview>()
+const previewRunIds = new Map<string, string>()
 const runApprovalGrants = new Map<string, CachedRunApprovalGrant>()
 const webExtractCache = new Map<string, { result: WebExtractResult; expiresAt: number }>()
 const webArchivePreviewCache = new Map<string, { result: WebExtractResult; preview: WebArchivePreview }>()
+const webArchivePreviewRunIds = new Map<string, string>()
+const workspaceRunIds = new Set<string>()
+const browserRunIds = new Set<string>()
 const failureCounts = new Map<string, number>()
 const MAX_CANCELLED_RUNS = 256
 const cancelledRuns = new Set<string>()
+const MAX_ENDED_RUNS = 256
+const endedRuns = new Set<string>()
+let runtimeEpoch = 0
 
 const queuedDeltas = new Map<string, { runId: string; messageId: string; text: string; at: number }>()
 let deltaTimer: ReturnType<typeof setTimeout> | undefined
@@ -131,12 +139,43 @@ function clearRunApprovalGrants(runId: string) {
   }
 }
 
+class RunEndedError extends Error {
+  constructor() {
+    super('Run has already ended')
+    this.name = 'RunEndedError'
+  }
+}
+
+function clearRunLocalState(runId: string, reason: 'cancelled' | 'ended' = 'cancelled') {
+  for (const [approvalId, pending] of pendingApprovals) {
+    if (pending.runId !== runId) continue
+    pendingApprovals.delete(approvalId)
+    pending.abort?.()
+    pending.reject(reason === 'cancelled' ? abortError() : new RunEndedError())
+  }
+  for (const [previewId, previewRunId] of previewRunIds) {
+    if (previewRunId !== runId) continue
+    previewRunIds.delete(previewId)
+    previewCache.delete(previewId)
+  }
+  for (const [previewId, previewRunId] of webArchivePreviewRunIds) {
+    if (previewRunId !== runId) continue
+    webArchivePreviewRunIds.delete(previewId)
+    webArchivePreviewCache.delete(previewId)
+  }
+  for (const key of webExtractCache.keys()) {
+    if (key.startsWith(`${runId}:`)) webExtractCache.delete(key)
+  }
+  clearRunApprovalGrants(runId)
+}
+
 function abortError() {
   return new DOMException('Run cancelled', 'AbortError')
 }
 
 function throwIfRunCancelled(runId: string, signal?: AbortSignal) {
   if (signal?.aborted || cancelledRuns.has(runId)) throw abortError()
+  if (endedRuns.has(runId)) throw new RunEndedError()
 }
 
 function markRunCancelled(runId: string) {
@@ -147,14 +186,32 @@ function markRunCancelled(runId: string) {
   cancelledRuns.add(runId)
 }
 
-async function cancelRunScopedState(runId: string) {
+function markRunEnded(runId: string) {
+  if (!endedRuns.has(runId) && endedRuns.size >= MAX_ENDED_RUNS) {
+    const oldest = endedRuns.values().next().value
+    if (typeof oldest === 'string') endedRuns.delete(oldest)
+  }
+  endedRuns.add(runId)
+}
+
+async function cancelRunScopedState(runId: string): Promise<string[]> {
+  const cancelWorkspace = workspaceRunIds.has(runId)
+  const cancelBrowser = browserRunIds.has(runId)
   markRunCancelled(runId)
-  clearRunApprovalGrants(runId)
+  clearRunLocalState(runId)
+  const failures: string[] = []
   // Browser approval tokens live in a separate native state map. Keep this
   // cleanup independent from the workspace cancellation command so a browser
   // token cannot survive a cancelled run even when no file tool was involved.
-  await Promise.resolve().then(() => cancelBrowserBridgeRun(runId)).catch(() => undefined)
-  await Promise.resolve().then(() => cancelWorkAssistantRun(runId)).catch(() => undefined)
+  if (cancelBrowser) {
+    await Promise.resolve().then(() => cancelBrowserBridgeRun(runId)).catch(() => { failures.push('browser') })
+  }
+  if (cancelWorkspace) {
+    await Promise.resolve().then(() => cancelWorkAssistantRun(runId)).catch(() => { failures.push('workspace') })
+  }
+  workspaceRunIds.delete(runId)
+  browserRunIds.delete(runId)
+  return failures
 }
 
 export function resolveAssistantApproval(id: string, choice: AssistantApprovalChoice) {
@@ -175,6 +232,7 @@ function waitForApproval(request: AssistantApprovalRequest, signal?: AbortSignal
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     pendingApprovals.set(request.id, {
+      runId: request.runId,
       resolve,
       reject,
       abort: () => signal?.removeEventListener('abort', onAbort),
@@ -249,6 +307,7 @@ function safeToolFailure(error: unknown) {
 }
 
 async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal): Promise<unknown> {
+  workspaceRunIds.add(call.runId)
   const args = call.arguments
   switch (call.name) {
     case 'workspace_list': return listWorkAssistantRoots()
@@ -272,6 +331,7 @@ async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal):
 }
 
 async function executeBrowserBridgeTool(call: AssistantToolCall, signal?: AbortSignal): Promise<unknown> {
+  browserRunIds.add(call.runId)
   throwIfRunCancelled(call.runId, signal)
   const args = call.arguments
   switch (call.name) {
@@ -369,6 +429,9 @@ function syntheticPreview(call: AssistantToolCall, risk: AssistantToolPreview['r
 export async function executeAssistantToolCall(input: ExecuteToolInput): Promise<AssistantToolResult> {
   const emit = input.emit ?? dispatch
   const call = { ...input.toolCall, runId: input.runId }
+  const initialManifest = ALL_WORK_ASSISTANT_TOOLS.find((item) => item.name === call.name)
+  if (initialManifest?.executor === 'browser_bridge') browserRunIds.add(input.runId)
+  if (initialManifest?.executor === 'native') workspaceRunIds.add(input.runId)
   const key = failureKey(call)
   emit({ type: 'tool.started', runId: input.runId, toolCall: call, at: now() })
 
@@ -384,6 +447,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     let preview: AssistantToolPreview | undefined
 
     if (call.name === 'file_plan_batch') {
+      workspaceRunIds.add(input.runId)
       emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '正在生成安全预览', at: now() })
       preview = await previewWorkAssistantAction({
         runId: input.runId,
@@ -393,6 +457,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       })
       throwIfRunCancelled(input.runId, input.signal)
       previewCache.set(preview.id, preview)
+      previewRunIds.set(preview.id, input.runId)
       const result = { ok: true, summary: '文件操作预览已生成。', data: { previewId: preview.id, preview } }
       emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
       return result
@@ -411,13 +476,17 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       const archivePreview = createWebArchivePreview(archiveInput.result, archiveInput.resourceName)
       preview = archivePreview
       webArchivePreviewCache.set(archivePreview.id, { result: archiveInput.result, preview: archivePreview })
+      webArchivePreviewRunIds.set(archivePreview.id, input.runId)
     } else if (manifest.executor === 'browser_bridge' && manifest.defaultRisk !== 'read') {
+      browserRunIds.add(input.runId)
       preview = await previewBrowserBridgeAction(call, input.signal)
     } else if (manifest.defaultRisk !== 'read') {
       preview = syntheticPreview(call, manifest.defaultRisk)
     }
 
     if (preview) {
+      if (manifest.executor === 'browser_bridge') browserRunIds.add(input.runId)
+      if (manifest.executor === 'native') workspaceRunIds.add(input.runId)
       const risk = effectiveRisk(manifest.defaultRisk, preview.risk)
       const approvalKey =
         call.name === 'file_apply_batch' && Array.isArray(preview.scope) && preview.scope.length
@@ -461,19 +530,33 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       throwIfRunCancelled(input.runId, input.signal)
       emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '审批通过，正在执行', at: now() })
       if (call.name === 'file_apply_batch') {
+        workspaceRunIds.add(input.runId)
         nativeGrant ??= await approveWorkAssistantAction(preview.id, input.runId, choice)
         throwIfRunCancelled(input.runId, input.signal)
         if (choice === 'run' && approvalKey) {
           runApprovalGrants.set(approvalKey, { grant: nativeGrant, scope: preview.scope ?? [] })
         }
-        const data = await executeWorkAssistantAction(preview.id, nativeGrant.token)
-        throwIfRunCancelled(input.runId, input.signal)
+        const data = await executeWorkAssistantAction(preview.id, nativeGrant.token, input.runId, input.signal)
+        const cancellationRequested = input.signal?.aborted || cancelledRuns.has(input.runId)
         const failed = data.failed.length > 0
+        const completedAfterCancellation = cancellationRequested && !data.cancelled
         const result = {
-          ok: !failed && !data.cancelled,
-          summary: data.cancelled ? '文件操作已取消。' : failed ? '部分文件操作未完成。' : '文件操作已完成。',
+          ok: !failed && !data.cancelled && !completedAfterCancellation,
+          summary: data.cancelled
+            ? '文件操作已取消。'
+            : completedAfterCancellation
+              ? '文件操作已完成；取消请求到达时操作已提交。'
+              : failed
+                ? '部分文件操作未完成。'
+                : '文件操作已完成。',
           data: data as unknown as Record<string, unknown>,
-          errorCode: failed ? 'partial_transaction' : data.cancelled ? 'cancelled' : undefined,
+          errorCode: failed
+            ? 'partial_transaction'
+            : data.cancelled
+              ? 'cancelled'
+              : completedAfterCancellation
+                ? 'request_uncertain'
+                : undefined,
           recoverable: failed || data.cancelled,
         }
         if (!result.ok && approvalKey && (result.errorCode === 'stale_preview' || result.errorCode === 'blocked')) {
@@ -487,6 +570,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         if (!pending) throw new Error('网页归档预览不可用，请重新提取。')
         const result = applyWebArchive(pending.result, pending.preview)
         webArchivePreviewCache.delete(preview.id)
+        webArchivePreviewRunIds.delete(preview.id)
         emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
       }
@@ -532,9 +616,16 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     return result
   } catch (error) {
     if (activeApprovalKey) runApprovalGrants.delete(activeApprovalKey)
+    if (error instanceof RunEndedError) {
+      const ended = { ok: false, summary: '运行已结束，已忽略待处理审批。', errorCode: 'run_ended', recoverable: false }
+      emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: ended, at: now() })
+      return ended
+    }
     if (error instanceof DOMException && error.name === 'AbortError') {
-      await cancelRunScopedState(input.runId)
-      const cancelled = { ok: false, summary: '运行已取消。', errorCode: 'cancelled', recoverable: true }
+      const cancellationFailures = await cancelRunScopedState(input.runId)
+      const cancelled = cancellationFailures.length > 0
+        ? { ok: false, summary: '运行已取消，但部分本地操作未能确认停止，请检查工作助手状态。', errorCode: 'cancel_failed', recoverable: true }
+        : { ok: false, summary: '运行已取消。', errorCode: 'cancelled', recoverable: true }
       emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: cancelled, at: now() })
       return cancelled
     }
@@ -594,10 +685,28 @@ export function dispatchOrderedWorkAssistantEvent(event: WorkAssistantEvent) {
     flushRunDeltas(event.runId)
     if (event.type === 'run.cancelled') {
       markRunCancelled(event.runId)
-      clearRunApprovalGrants(event.runId)
+      clearRunLocalState(event.runId)
+      const epoch = runtimeEpoch
+      void cancelRunScopedState(event.runId).then((failures) => {
+        const run = useWorkAssistantStore.getState().runs[event.runId]
+        if (epoch !== runtimeEpoch || run?.status !== 'cancelled') return
+        if (failures.length > 0) {
+          dispatch({
+            type: 'run.failed',
+            runId: event.runId,
+            code: 'cancel_failed',
+            message: '取消未能确认所有本地操作已停止，请检查工作助手状态。',
+            recoverable: true,
+            at: now(),
+          })
+        }
+      })
     }
     if (event.type === 'run.completed' || event.type === 'run.failed') {
-      clearRunApprovalGrants(event.runId)
+      markRunEnded(event.runId)
+      clearRunLocalState(event.runId, 'ended')
+      workspaceRunIds.delete(event.runId)
+      browserRunIds.delete(event.runId)
       // Keep a cancelled run marked until bounded eviction; a late terminal
       // event must not reopen its browser capability window.
     }
@@ -606,14 +715,20 @@ export function dispatchOrderedWorkAssistantEvent(event: WorkAssistantEvent) {
 }
 
 export function resetWorkAssistantRuntimeForTests() {
+  runtimeEpoch += 1
   flushAllWorkAssistantDeltas()
   pendingApprovals.clear()
   previewCache.clear()
+  previewRunIds.clear()
   runApprovalGrants.clear()
   webExtractCache.clear()
   webArchivePreviewCache.clear()
+  webArchivePreviewRunIds.clear()
+  workspaceRunIds.clear()
+  browserRunIds.clear()
   failureCounts.clear()
   cancelledRuns.clear()
+  endedRuns.clear()
   useWorkAssistantStore.getState().resetAllRuns()
   useWorkAssistantStore.setState({ capabilityStatus: [] })
 }

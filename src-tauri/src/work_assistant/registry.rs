@@ -336,11 +336,12 @@ fn record_cancelled_run(state: &WorkAssistantState, run: String) -> Result<(), W
         .lock()
         .map_err(|_| WorkAssistantError::protocol("cancelled runs lock is unavailable"))?;
     if !runs.contains(&run) && runs.len() >= MAX_CANCELLED_RUNS {
-        return Err(WorkAssistantError {
-            code: "blocked".into(),
-            message: "cancelled run capacity has been reached".into(),
-            recoverable: true,
-        });
+        // Cancellation markers are a bounded replay-prevention cache. Evict
+        // one old marker instead of rejecting a valid user cancellation once
+        // the process has handled many runs.
+        if let Some(oldest) = runs.iter().next().cloned() {
+            runs.remove(&oldest);
+        }
     }
     runs.insert(run.clone());
     drop(runs);
@@ -507,22 +508,18 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_rejects_new_runs_when_full_without_discarding_existing_ids() {
+    fn cancellation_evicts_old_markers_when_full() {
         let state = test_state();
         for index in 0..256 {
             record_cancelled_run(&state, format!("run-{index}")).unwrap();
         }
 
         record_cancelled_run(&state, "run-0".into()).unwrap();
-        let overflow = record_cancelled_run(&state, "overflow".into()).unwrap_err();
+        record_cancelled_run(&state, "overflow".into()).unwrap();
 
         let runs = state.cancelled_runs.lock().unwrap();
         assert_eq!(runs.len(), 256);
-        assert!(runs.contains("run-0"));
-        assert!(runs.contains("run-255"));
-        assert!(!runs.contains("overflow"));
-        assert_eq!(overflow.code, "blocked");
-        assert!(overflow.recoverable);
+        assert!(runs.contains("overflow"));
     }
 
     #[test]

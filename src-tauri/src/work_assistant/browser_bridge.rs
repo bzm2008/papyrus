@@ -598,6 +598,13 @@ pub async fn work_assistant_web_extract(
 fn start_pairing(
     inner: &Arc<BrowserBridgeInner>,
 ) -> Result<BrowserBridgePairing, WorkAssistantError> {
+    // Pairing and disconnect must not race with listener creation. Holding the
+    // gate across the listener/session transition guarantees a returned
+    // pairing always refers to a live listener.
+    let _action_gate = inner
+        .action_gate
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("browser action gate is unavailable"))?;
     let listener = ensure_listener(inner)?;
     let now = unix_seconds();
     let session_id = Uuid::new_v4().to_string();
@@ -701,11 +708,11 @@ fn disconnect_bridge(inner: &Arc<BrowserBridgeInner>) -> Result<(), WorkAssistan
     if let Ok(mut approvals) = inner.browser_approvals.lock() {
         approvals.clear();
     }
-    drop(action_gate);
     if let Ok(mut stop) = inner.stop.lock() {
         *stop = true;
     }
     inner.wake.notify_all();
+    drop(action_gate);
     drop(session);
     if let Ok(mut listener) = inner.listener.lock() {
         if let Some(handle) = listener.take() {
