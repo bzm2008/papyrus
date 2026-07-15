@@ -6,10 +6,10 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `2312fa1`（功能代码验证基线；后续 `21b1427`/`15ce9eb` 仅更新证据文档） |
-| Desktop CI run | [29349932387](https://github.com/bzm2008/papyrus/actions/runs/29349932387) |
+| Papyrus commit | `519ce96823c6086c07000e4ae4d3528d0b959557`（WPS 套餐降级显示、审批脱敏和稳定性回归） |
+| Desktop CI run | [29381920474](https://github.com/bzm2008/papyrus/actions/runs/29381920474) |
 | Package smoke run | `未触发：workflow 仅存在于非默认分支，Actions API 返回 404` |
-| 报告更新时间 | `2026-07-14（三平台 Desktop CI 刷新）` |
+| 报告更新时间 | `2026-07-15（三平台 Desktop CI 刷新）` |
 | 发布负责人 | `待填写` |
 | 总体状态 | `pending` |
 
@@ -81,6 +81,6 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 
 ## 远程仓库证据（2026-07-14）
 
-- 远程 `feature/work-assistant` 包含功能代码基线 `2312fa1950bba47f85d18bb23b40286be11b9d1d` 及后续证据文档提交；Desktop CI runs 29349932387、29351096131、29351784408 均在 Windows、macOS ARM、Ubuntu 24.04 全部通过。
+- 远程 `feature/work-assistant` 当前 head 为 `519ce96823c6086c07000e4ae4d3528d0b959557`；Desktop CI run [29381920474](https://github.com/bzm2008/papyrus/actions/runs/29381920474) 在 Windows、macOS ARM、Ubuntu 24.04 全部通过。
 - 该分支的 `.github/workflows/desktop-packages.yml` 尚未出现在默认分支，因此 `workflow_dispatch` 返回 404；没有可引用的 package smoke artifact。
 - 真实设备记录、生产签名/公证和 updater 产物仍未执行，不能关闭 `REL-CERT-PENDING`。
