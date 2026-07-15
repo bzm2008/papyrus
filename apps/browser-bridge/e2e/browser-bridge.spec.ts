@@ -144,6 +144,48 @@ test.describe('Browser Bridge production content script', () => {
     await expect(page.locator('#submitted')).toHaveText('submitted')
   })
 
+  test('fails closed for credential links and executable download filenames', async ({ page }) => {
+    await installProductionBridge(page)
+    await page.evaluate(() => {
+      const credentialLink = document.createElement('a')
+      credentialLink.href = 'https://user:secret@example.com/private'
+      credentialLink.textContent = 'Credential URL'
+      credentialLink.id = 'credential-link'
+      credentialLink.addEventListener('click', (event) => event.preventDefault())
+      document.body.append(credentialLink)
+
+      const executableDownload = document.createElement('a')
+      executableDownload.href = '/sample.txt'
+      executableDownload.download = 'payload.exe'
+      executableDownload.textContent = 'Executable download name'
+      executableDownload.id = 'executable-download'
+      executableDownload.addEventListener('click', () => { window.__executableDownloadClicked = true })
+      document.body.append(executableDownload)
+    })
+
+    const current = await snapshot(page)
+    const credential = elementByName(current, 'Credential URL')
+    expect(credential.href).toBeUndefined()
+    expect(credential.hrefFingerprint).toBeUndefined()
+    const credentialResult = await request<ProductionActionResult>(page, 'click', {
+      elementToken: credential.token,
+      pageRevision: current.pageRevision,
+      snapshotId: current.snapshotId,
+    })
+    expect(credentialResult.ok).toBe(false)
+    expect(credentialResult.errorCode).toBe('blocked')
+
+    const executable = elementByName(current, 'Executable download name')
+    const executableResult = await request<ProductionActionResult>(page, 'download', {
+      elementToken: executable.token,
+      pageRevision: current.pageRevision,
+      snapshotId: current.snapshotId,
+    })
+    expect(executableResult.ok).toBe(false)
+    expect(executableResult.errorCode).toBe('page_restricted')
+    expect(await page.evaluate(() => window.__executableDownloadClicked === true)).toBe(false)
+  })
+
   test('rejects actions made with a stale snapshot without re-resolving an element', async ({ page }) => {
     await installProductionBridge(page)
     const current = await snapshot(page)

@@ -116,6 +116,10 @@ function canonicalHref(node) {
   try {
     const parsed = new URL(raw, location.href)
     if (!['http:', 'https:'].includes(parsed.protocol)) return undefined
+    // Credential-bearing links are not safe to expose or execute.  Do not
+    // silently sanitize them here: doing so would make the preview show a
+    // different target from the URL the browser would actually open.
+    if (parsed.username || parsed.password) return undefined
     parsed.username = ''
     parsed.password = ''
     const value = parsed.toString()
@@ -219,6 +223,11 @@ function guard(name, payload) {
   if (pageSensitive()) return { ok: false, summary: '当前页面被安全策略阻止。', errorCode: 'page_restricted', recoverable: false }
   return null
 }
+function hasExecutableExtension(value) {
+  let candidate = String(value || '')
+  try { candidate = decodeURIComponent(candidate) } catch { /* keep the raw name */ }
+  return /\.(?:exe|msi|dmg|pkg|app|deb|rpm|sh|bat|cmd)(?:$|[?#])/i.test(candidate)
+}
 async function action(name, payload) {
   // A restricted page still returns a bounded snapshot so the app can explain
   // why actions are unavailable. Every mutating action is guarded below.
@@ -243,9 +252,10 @@ async function action(name, payload) {
     return { ok: false, summary: '该控件已禁用或只读，无法操作。', errorCode: 'disabled_control', recoverable: true }
   }
   if (name === 'click' && node.tagName.toLowerCase() === 'a') {
-    const href = node.getAttribute('href') || ''
+    const href = canonicalHref(node)
+    if (!href) return { ok: false, summary: '该链接目标无法安全验证，已阻止。', errorCode: 'blocked', recoverable: false }
     try {
-      const parsed = new URL(href, location.href)
+      const parsed = new URL(href)
       if (!isPublicHttpUrl(parsed.toString())) return { ok: false, summary: '该链接目标不符合安全策略。', errorCode: 'blocked', recoverable: false }
     } catch {
       return { ok: false, summary: '该链接地址无效。', errorCode: 'blocked', recoverable: false }
@@ -271,17 +281,19 @@ async function action(name, payload) {
   if (name === 'click') { node.click(); return { ok: true, summary: '已点击普通元素。', snapshot: snapshot() } }
   if (name === 'download') {
     if (node.tagName.toLowerCase() !== 'a') return { ok: false, summary: '仅允许触发链接下载。', errorCode: 'blocked', recoverable: false }
-    const href = node.href || node.getAttribute('href') || ''
+    const href = canonicalHref(node)
+    if (!href) return { ok: false, summary: '该下载目标无法安全验证，已阻止。', errorCode: 'blocked', recoverable: false }
+    let parsed
     try {
-      const parsed = new URL(href, location.href)
+      parsed = new URL(href)
       if (!['http:', 'https:'].includes(parsed.protocol)) return { ok: false, summary: '下载地址协议不安全。', errorCode: 'blocked', recoverable: false }
     } catch {
       return { ok: false, summary: '下载地址无效。', errorCode: 'blocked', recoverable: false }
     }
-    if (/\.(?:exe|msi|dmg|pkg|app|deb|rpm|sh|bat|cmd)(?:$|[?#])/i.test(href)) return { ok: false, summary: '可执行文件下载已阻止。', errorCode: 'page_restricted', recoverable: false }
+    const fileName = node.getAttribute('download') || parsed.pathname.split('/').pop() || 'download'
+    if (hasExecutableExtension(href) || hasExecutableExtension(fileName)) return { ok: false, summary: '可执行文件下载已阻止。', errorCode: 'page_restricted', recoverable: false }
     node.click()
-    const parsed = new URL(href, location.href)
-    return { ok: true, summary: '已触发普通下载。', download: { fileName: (node.getAttribute('download') || parsed.pathname.split('/').pop() || 'download').slice(0, 240), url: `${parsed.origin}${parsed.pathname}` }, snapshot: snapshot() }
+    return { ok: true, summary: '已触发普通下载。', download: { fileName: fileName.slice(0, 240), url: `${parsed.origin}${parsed.pathname}` }, snapshot: snapshot() }
   }
   if (name === 'submit') {
     const inputType = String(node.getAttribute('type') || '').toLowerCase()

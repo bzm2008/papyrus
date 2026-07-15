@@ -45,6 +45,7 @@ declare global {
   interface Window {
     __papyrusBridgeRequest?: (message: BridgeMessage) => Promise<unknown>
     __papyrusBridgeListeners?: Array<(message: BridgeMessage, sender: unknown, sendResponse: (value: unknown) => void) => boolean | void>
+    __executableDownloadClicked?: boolean
   }
 }
 
