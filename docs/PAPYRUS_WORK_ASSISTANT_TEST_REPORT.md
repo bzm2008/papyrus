@@ -60,7 +60,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run test:wps`：2 个文件、17 项通过；包含流式 401/403 结构化错误、模型/额度部分成功、stale 保留和套餐权限文案回归。
 - `npx tsc -p tsconfig.app.json --noEmit`：通过。
 - `npm run test:unit`：37 个文件、205 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort、审批竞态、取消清理失败提示和浏览器动作 `request_uncertain`。
-- `npm run test:browser`：扩展语法/构建、前端桥接测试和 Browser Bridge Vitest 通过；扩展 service worker 集成 14 项，Browser Bridge 原生定向测试为 39 项，包含导航代际 stale 响应、FIFO 取消淘汰、表单 action/提交按钮 `formaction` 指纹与公共 URL/DNS 复检。
+- `npm run test:browser`：扩展语法/构建、前端桥接测试和 Browser Bridge Vitest 通过；扩展 service worker 集成 14 项，Browser Bridge 原生定向测试为 41 项，包含导航代际 stale 响应、FIFO 取消淘汰、表单 action/提交按钮 `formaction` 指纹与公共 URL/DNS 复检。
 - `npm run test:browser:e2e`：真实 Chromium 11 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、form action 与 submitter `formaction` 私网变更阻断、字段变更 stale、链接 query 变化 stale、凭据链接/可执行文件名阻断和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
 - `npm run ci:desktop`：37 个 TypeScript 文件、205 项通过；portable MSVC Rust 全量门禁 138 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理、导航 origin 重绑定、导航迟到响应、表单目标校验、FIFO 取消标记和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。

@@ -11,13 +11,13 @@
 ## Completion Audit (2026-07-15)
 
 `[x]` means the files, local evidence, or locally completed commit were verified. The consolidated
-latest remote hardening commit is `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea` (`fix: stabilize hosted bundle smoke workflow`; local equivalent commit `9d4d592`).
+latest remote hardening commit is `e0ef0e71124c5a6d64916006020e13a567b28c14` (`fix: harden browser assistant and entitlement runtime`; local equivalent commit `92f200f`).
 The aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E (11 tests),
 full TypeScript suite (205 tests), 138-test portable Rust gate, doctor probes, and Windows portable
 check pass locally. The extension integration suite has 14 tests and the native Browser Bridge
-subset has 39. Desktop CI run `29408046525` and package smoke run `29408076266` pass on all three
-runners after the Windows path and Linux process-lifecycle fixes; real-device records and
-production signing remain `pending`/`blocked`.
+subset has 41. Desktop CI run `29413687379` and package smoke run `29414240914` pass on all three
+runners for the remote hardening commit; the documentation commit's Desktop CI run `29415611181`
+also passes. Real-device records and production signing remain `pending`/`blocked`.
 
 ---
 
@@ -496,14 +496,14 @@ Expected: all commands exit 0.
 
 - [x] **Step 2: Trigger Desktop CI after remote-write approval**
 
-The feature branch remote ref was updated through Git Data API and latest Desktop CI run [29408046525](https://github.com/bzm2008/papyrus/actions/runs/29408046525) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea`. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
+The feature branch remote ref was updated through Git Data API and latest Desktop CI run [29413687379](https://github.com/bzm2008/papyrus/actions/runs/29413687379) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `e0ef0e71124c5a6d64916006020e13a567b28c14`. The follow-up documentation commit's Desktop CI run [29415611181](https://github.com/bzm2008/papyrus/actions/runs/29415611181) also passed. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
 
 - [x] **Step 3: Trigger package smoke builds**
 
-Run `desktop-packages.yml` through `workflow_dispatch`. Run `29408076266` passed on Windows, macOS,
-and Ubuntu 24.04. Artifacts `8340022939`, `8339989744`, and `8340015191` contain the expected
-platform package plus Browser Bridge ZIP; platform-specific smoke logs are in `8340021879`,
-`8339987630`, and `8340009947`.
+Run `desktop-packages.yml` through `workflow_dispatch`. Run `29414240914` passed on Windows, macOS,
+and Ubuntu 24.04. Artifacts `8342536560`, `8342503640`, and `8342520662` contain the expected
+platform package plus Browser Bridge ZIP; platform-specific smoke logs are in `8342535066`,
+`8342502140`, and `8342515464`.
 
 - [ ] **Step 4: Complete real-device records**
 

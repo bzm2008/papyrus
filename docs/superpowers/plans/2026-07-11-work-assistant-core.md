@@ -18,8 +18,9 @@ use a canonical scope containing tool, root, target-parent digest, conflict poli
 and an item-count bound; browser and workspace cancellation invalidate matching state and late
 tool calls. The reducer preserves a cancelled run while surfacing native cleanup confirmation
 failures, and approved browser side effects report an uncertain result when cancellation races
-with execution. A real-user-file smoke transaction and cross-platform device evidence remain
-pending in the release report.
+with execution. A Windows 10 isolated unsigned install/launch smoke now has a record, but it is
+outside the supported matrix; a real supported-device file transaction and cross-platform device
+evidence remain pending in the release report.
 
 ---
 

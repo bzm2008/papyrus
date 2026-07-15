@@ -16,7 +16,7 @@ the completion worktree includes the additional hardening described below.
 The complete canonical href is now bound to the native preview through an opaque fingerprint, and
 execution re-checks the current element target plus public-URL/DNS policy. Chromium regression
 coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is now
-39 tests, including navigation-generation stale responses, FIFO cancellation-marker eviction,
+41 tests, including navigation-generation stale responses, FIFO cancellation-marker eviction,
 form-target validation/hash binding, an injected resolver/fetcher redirect fixture, token replay,
 wrong-tab,
 cross-origin, oversized-message, credential-link, executable-download, cancelled-run and pending
