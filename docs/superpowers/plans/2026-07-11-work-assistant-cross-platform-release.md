@@ -11,11 +11,12 @@
 ## Completion Audit (2026-07-15)
 
 `[x]` means the files, local evidence, or locally completed commit were verified. The consolidated
-latest local hardening commit is `e115a43` (`fix: harden assistant bridge and entitlement display`).
+latest remote hardening commit is `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea` (`fix: stabilize hosted bundle smoke workflow`; local equivalent commit `9d4d592`).
 The aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E (9 tests),
-full TypeScript suite (194 tests), 135-test portable Rust gate, doctor probes, and Windows portable
-check pass locally. Package smoke run `29398057472` passes on all three runners after the Linux
-artifact exclusion; real-device records and production signing remain `pending`/`blocked`.
+full TypeScript suite (200 tests), 135-test portable Rust gate, doctor probes, and Windows portable
+check pass locally. Desktop CI run `29408046525` and package smoke run `29408076266` pass on all
+three runners after the Windows path and Linux process-lifecycle fixes; real-device records and
+production signing remain `pending`/`blocked`.
 
 ---
 
@@ -494,14 +495,14 @@ Expected: all commands exit 0.
 
 - [x] **Step 2: Trigger Desktop CI after remote-write approval**
 
-The feature branch was pushed and latest Desktop CI run [29399654442](https://github.com/bzm2008/papyrus/actions/runs/29399654442) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `556a40d8d1254dd1b1a8454fb0db62bd6f24dd3e`. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
+The feature branch remote ref was updated through Git Data API and latest Desktop CI run [29408046525](https://github.com/bzm2008/papyrus/actions/runs/29408046525) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea`. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
 
 - [x] **Step 3: Trigger package smoke builds**
 
-Run `desktop-packages.yml` through `workflow_dispatch`. Run `29398057472` passed on Windows, macOS,
-and Ubuntu 24.04. Artifacts `8336049339`, `8336011570`, and `8336041656` contain the expected
-platform package plus Browser Bridge ZIP; Linux ZIP central-directory inspection found 262 entries,
-`Papyrus_0.1.2_amd64.AppImage`, `Papyrus_0.1.2_amd64.deb`, and zero case-insensitive duplicate paths.
+Run `desktop-packages.yml` through `workflow_dispatch`. Run `29408076266` passed on Windows, macOS,
+and Ubuntu 24.04. Artifacts `8340022939`, `8339989744`, and `8340015191` contain the expected
+platform package plus Browser Bridge ZIP; platform-specific smoke logs are in `8340021879`,
+`8339987630`, and `8340009947`.
 
 - [ ] **Step 4: Complete real-device records**
 
