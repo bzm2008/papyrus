@@ -18,6 +18,7 @@ import type { ApprovalGrant } from './workAssistantClient'
 import {
   approveBrowserAction,
   browserSnapshot,
+  cancelBrowserBridgeRun,
   executeApprovedBrowserAction,
   rejectBrowserAction,
   startBrowserActionPreview,
@@ -50,12 +51,19 @@ type ExecuteToolInput = {
   emit?: (event: WorkAssistantEvent) => void
 }
 
+type CachedRunApprovalGrant = {
+  grant: ApprovalGrant
+  scope: string[]
+}
+
 const pendingApprovals = new Map<string, PendingApproval>()
 const previewCache = new Map<string, AssistantToolPreview>()
-const runApprovalGrants = new Map<string, ApprovalGrant>()
+const runApprovalGrants = new Map<string, CachedRunApprovalGrant>()
 const webExtractCache = new Map<string, { result: WebExtractResult; expiresAt: number }>()
 const webArchivePreviewCache = new Map<string, { result: WebExtractResult; preview: WebArchivePreview }>()
 const failureCounts = new Map<string, number>()
+const MAX_CANCELLED_RUNS = 256
+const cancelledRuns = new Set<string>()
 
 const queuedDeltas = new Map<string, { runId: string; messageId: string; text: string; at: number }>()
 let deltaTimer: ReturnType<typeof setTimeout> | undefined
@@ -65,14 +73,88 @@ const now = () => Date.now()
 const dispatch = (event: WorkAssistantEvent) => useWorkAssistantStore.getState().dispatch(event)
 
 function runApprovalKey(runId: string, preview: AssistantToolPreview) {
-  const scope = Array.isArray(preview.scope) ? preview.scope.filter(Boolean).sort().join('|') : ''
-  return `${runId}:${scope}`
+  const scope = Array.isArray(preview.scope) ? preview.scope.filter((value): value is string => typeof value === 'string' && value.length > 0) : []
+  if (scope.length === 1) {
+    try {
+      const parsed = JSON.parse(scope[0]) as Record<string, unknown>
+      if (
+        parsed.version === 1
+        && typeof parsed.toolName === 'string'
+        && typeof parsed.rootId === 'string'
+        && typeof parsed.targetParent === 'string'
+        && typeof parsed.conflictPolicy === 'string'
+        && typeof parsed.operationKind === 'string'
+        && Number.isSafeInteger(parsed.maxItemCount)
+      ) {
+        return `${runId}:scope:${JSON.stringify({
+          version: parsed.version,
+          toolName: parsed.toolName,
+          rootId: parsed.rootId,
+          targetParent: parsed.targetParent,
+          conflictPolicy: parsed.conflictPolicy,
+          operationKind: parsed.operationKind,
+        })}`
+      }
+    } catch {
+      // Preserve the legacy opaque-array key below. Native execution still validates it.
+    }
+  }
+  return `${runId}:opaque:${JSON.stringify(scope)}`
+}
+
+function runScopeAllows(grantScope: string[], requestScope: string[]) {
+  if (grantScope.length !== 1 || requestScope.length !== 1) {
+    return JSON.stringify(grantScope) === JSON.stringify(requestScope)
+  }
+  try {
+    const grant = JSON.parse(grantScope[0]) as Record<string, unknown>
+    const request = JSON.parse(requestScope[0]) as Record<string, unknown>
+    const fields = ['version', 'toolName', 'rootId', 'targetParent', 'conflictPolicy', 'operationKind'] as const
+    const structured = (value: Record<string, unknown>) => fields.every((field) => typeof value[field] === 'string' || field === 'version')
+    if (!structured(grant) || !structured(request) || grant.version !== 1 || request.version !== 1) return JSON.stringify(grantScope) === JSON.stringify(requestScope)
+    const dangerous = (value: Record<string, unknown>) =>
+      value.conflictPolicy === 'overwrite'
+      || ['trash', 'delete', 'desktop_open_app', 'browser_download', 'external_navigation', 'send', 'publish', 'submit'].some((kind) => String(value.operationKind).split(',').includes(kind))
+    if (dangerous(grant) || dangerous(request)) return false
+    return fields.every((field) => grant[field] === request[field])
+      && Number.isSafeInteger(grant.maxItemCount)
+      && Number.isSafeInteger(request.maxItemCount)
+      && Number(request.maxItemCount) <= Number(grant.maxItemCount)
+  } catch {
+    return JSON.stringify(grantScope) === JSON.stringify(requestScope)
+  }
 }
 
 function clearRunApprovalGrants(runId: string) {
   for (const key of runApprovalGrants.keys()) {
     if (key.startsWith(`${runId}:`)) runApprovalGrants.delete(key)
   }
+}
+
+function abortError() {
+  return new DOMException('Run cancelled', 'AbortError')
+}
+
+function throwIfRunCancelled(runId: string, signal?: AbortSignal) {
+  if (signal?.aborted || cancelledRuns.has(runId)) throw abortError()
+}
+
+function markRunCancelled(runId: string) {
+  if (!cancelledRuns.has(runId) && cancelledRuns.size >= MAX_CANCELLED_RUNS) {
+    const oldest = cancelledRuns.values().next().value
+    if (typeof oldest === 'string') cancelledRuns.delete(oldest)
+  }
+  cancelledRuns.add(runId)
+}
+
+async function cancelRunScopedState(runId: string) {
+  markRunCancelled(runId)
+  clearRunApprovalGrants(runId)
+  // Browser approval tokens live in a separate native state map. Keep this
+  // cleanup independent from the workspace cancellation command so a browser
+  // token cannot survive a cancelled run even when no file tool was involved.
+  await Promise.resolve().then(() => cancelBrowserBridgeRun(runId)).catch(() => undefined)
+  await Promise.resolve().then(() => cancelWorkAssistantRun(runId)).catch(() => undefined)
 }
 
 export function resolveAssistantApproval(id: string, choice: AssistantApprovalChoice) {
@@ -189,10 +271,19 @@ async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal):
   }
 }
 
-async function executeBrowserBridgeTool(call: AssistantToolCall): Promise<unknown> {
+async function executeBrowserBridgeTool(call: AssistantToolCall, signal?: AbortSignal): Promise<unknown> {
+  throwIfRunCancelled(call.runId, signal)
   const args = call.arguments
   switch (call.name) {
-    case 'browser_snapshot': return browserSnapshot(typeof args.pageRevision === 'string' ? args.pageRevision : undefined, typeof args.snapshotId === 'string' ? args.snapshotId : undefined)
+    case 'browser_snapshot': {
+      const result = await browserSnapshot(
+        typeof args.pageRevision === 'string' ? args.pageRevision : undefined,
+        typeof args.snapshotId === 'string' ? args.snapshotId : undefined,
+        signal,
+      )
+      throwIfRunCancelled(call.runId, signal)
+      return result
+    }
     default: throw new Error(`Unsupported browser bridge tool: ${call.name}`)
   }
 }
@@ -208,11 +299,12 @@ function browserActionKind(name: AssistantToolCall['name']) {
   return actions[name as keyof typeof actions]
 }
 
-async function previewBrowserBridgeAction(call: AssistantToolCall): Promise<BrowserActionPreview> {
+async function previewBrowserBridgeAction(call: AssistantToolCall, signal?: AbortSignal): Promise<BrowserActionPreview> {
+  throwIfRunCancelled(call.runId, signal)
   const args = call.arguments
   const action = browserActionKind(call.name)
   if (!action) throw new Error(`Unsupported browser bridge preview: ${call.name}`)
-  return startBrowserActionPreview({
+  const preview = await startBrowserActionPreview({
     action,
     runId: call.runId,
     toolCallId: call.id,
@@ -222,7 +314,9 @@ async function previewBrowserBridgeAction(call: AssistantToolCall): Promise<Brow
     snapshotId: typeof args.snapshotId === 'string' ? args.snapshotId : undefined,
     url: typeof args.url === 'string' ? args.url : undefined,
     directoryRootId: typeof args.directoryRootId === 'string' ? args.directoryRootId : undefined,
-  })
+  }, signal)
+  throwIfRunCancelled(call.runId, signal)
+  return preview
 }
 
 function resolveWebArchiveInput(call: AssistantToolCall): { result: WebExtractResult; resourceName?: string } {
@@ -286,7 +380,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
 
   let activeApprovalKey: string | undefined
   try {
-    if (input.signal?.aborted) throw new DOMException('Run cancelled', 'AbortError')
+    throwIfRunCancelled(input.runId, input.signal)
     let preview: AssistantToolPreview | undefined
 
     if (call.name === 'file_plan_batch') {
@@ -297,6 +391,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         toolName: call.name,
         arguments: call.arguments,
       })
+      throwIfRunCancelled(input.runId, input.signal)
       previewCache.set(preview.id, preview)
       const result = { ok: true, summary: '文件操作预览已生成。', data: { previewId: preview.id, preview } }
       emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
@@ -317,7 +412,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       preview = archivePreview
       webArchivePreviewCache.set(archivePreview.id, { result: archiveInput.result, preview: archivePreview })
     } else if (manifest.executor === 'browser_bridge' && manifest.defaultRisk !== 'read') {
-      preview = await previewBrowserBridgeAction(call)
+      preview = await previewBrowserBridgeAction(call, input.signal)
     } else if (manifest.defaultRisk !== 'read') {
       preview = syntheticPreview(call, manifest.defaultRisk)
     }
@@ -330,15 +425,19 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
           : undefined
       activeApprovalKey = approvalKey
       const cachedGrant = approvalKey ? runApprovalGrants.get(approvalKey) : undefined
-      const grantIsFresh = cachedGrant && (cachedGrant.expires > 10_000_000_000
-        ? cachedGrant.expires > now()
-        : cachedGrant.expires * 1000 > now())
-      if (cachedGrant && !grantIsFresh && approvalKey) {
+      const scopeMatches = cachedGrant ? runScopeAllows(cachedGrant.scope, preview.scope ?? []) : false
+      const grantIsFresh = cachedGrant && scopeMatches && (cachedGrant.grant.expires > 10_000_000_000
+        ? cachedGrant.grant.expires > now()
+        : cachedGrant.grant.expires * 1000 > now())
+      if (cachedGrant && !grantIsFresh && approvalKey && !scopeMatches) {
+        // Keep a wider grant available for a later narrower request, but never reuse it for a
+        // changed target, policy, operation kind, or larger item bound.
+      } else if (cachedGrant && !grantIsFresh && approvalKey) {
         runApprovalGrants.delete(approvalKey)
       }
 
       let choice: AssistantApprovalChoice = 'run'
-      let nativeGrant: ApprovalGrant | undefined = grantIsFresh ? cachedGrant : undefined
+      let nativeGrant: ApprovalGrant | undefined = grantIsFresh ? cachedGrant.grant : undefined
       if (!nativeGrant) {
         const request: AssistantApprovalRequest = {
           ...preview,
@@ -359,13 +458,16 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         return denied
       }
 
+      throwIfRunCancelled(input.runId, input.signal)
       emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '审批通过，正在执行', at: now() })
       if (call.name === 'file_apply_batch') {
         nativeGrant ??= await approveWorkAssistantAction(preview.id, input.runId, choice)
+        throwIfRunCancelled(input.runId, input.signal)
         if (choice === 'run' && approvalKey) {
-          runApprovalGrants.set(approvalKey, nativeGrant)
+          runApprovalGrants.set(approvalKey, { grant: nativeGrant, scope: preview.scope ?? [] })
         }
         const data = await executeWorkAssistantAction(preview.id, nativeGrant.token)
+        throwIfRunCancelled(input.runId, input.signal)
         const failed = data.failed.length > 0
         const result = {
           ok: !failed && !data.cancelled,
@@ -389,12 +491,13 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         return result
       }
       if (manifest.executor === 'browser_bridge') {
-        const grant = await approveBrowserAction(preview.id, input.runId)
+        const grant = await approveBrowserAction(preview.id, input.runId, input.signal)
+        throwIfRunCancelled(input.runId, input.signal)
         const data = await executeApprovedBrowserAction({
           previewId: grant.previewId,
           approvalToken: grant.token,
           actionHash: grant.actionHash,
-        })
+        }, input.signal)
         const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
         const result = actionPayload?.ok === false
           ? {
@@ -411,7 +514,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     }
 
     const data = manifest.executor === 'browser_bridge'
-      ? await executeBrowserBridgeTool(call)
+      ? await executeBrowserBridgeTool(call, input.signal)
       : await executeNativeTool(call, input.signal)
     const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
     const actionFailure = actionPayload?.ok === false
@@ -430,8 +533,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
   } catch (error) {
     if (activeApprovalKey) runApprovalGrants.delete(activeApprovalKey)
     if (error instanceof DOMException && error.name === 'AbortError') {
-      clearRunApprovalGrants(input.runId)
-      await cancelWorkAssistantRun(input.runId).catch(() => undefined)
+      await cancelRunScopedState(input.runId)
       const cancelled = { ok: false, summary: '运行已取消。', errorCode: 'cancelled', recoverable: true }
       emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: cancelled, at: now() })
       return cancelled
@@ -490,8 +592,14 @@ export function dispatchOrderedWorkAssistantEvent(event: WorkAssistantEvent) {
   if (event.type === 'message.delta') queueWorkAssistantDelta(event)
   else {
     flushRunDeltas(event.runId)
-    if (event.type === 'run.cancelled' || event.type === 'run.completed' || event.type === 'run.failed') {
+    if (event.type === 'run.cancelled') {
+      markRunCancelled(event.runId)
       clearRunApprovalGrants(event.runId)
+    }
+    if (event.type === 'run.completed' || event.type === 'run.failed') {
+      clearRunApprovalGrants(event.runId)
+      // Keep a cancelled run marked until bounded eviction; a late terminal
+      // event must not reopen its browser capability window.
     }
     dispatch(event)
   }
@@ -505,6 +613,7 @@ export function resetWorkAssistantRuntimeForTests() {
   webExtractCache.clear()
   webArchivePreviewCache.clear()
   failureCounts.clear()
+  cancelledRuns.clear()
   useWorkAssistantStore.getState().resetAllRuns()
   useWorkAssistantStore.setState({ capabilityStatus: [] })
 }

@@ -238,6 +238,95 @@ mod tests {
     }
 
     #[test]
+    fn run_scope_is_deterministic_and_binds_all_file_operation_fields() {
+        let base = BatchPreviewRequest {
+            run_id: "run-scope-fields".into(),
+            root_id: "root".into(),
+            operations: vec![FileOperationRequest {
+                kind: FileOperationKind::Copy,
+                source: Some("inbox/source.txt".into()),
+                destination: Some("archive/first.txt".into()),
+            }],
+            conflict_policy: ConflictPolicy::Rename,
+        };
+
+        let scope = approval_scope(&base).unwrap();
+        assert_eq!(scope, approval_scope(&base).unwrap());
+        assert_eq!(scope.len(), 1);
+        let encoded: serde_json::Value = serde_json::from_str(&scope[0]).unwrap();
+        assert_eq!(encoded["toolName"], "file_apply_batch");
+        assert_eq!(encoded["rootId"], "root");
+        assert_eq!(encoded["conflictPolicy"], "rename");
+        assert_eq!(encoded["operationKind"], "copy");
+        assert_eq!(encoded["maxItemCount"], 1);
+        assert!(encoded["targetParent"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+
+        let mut changed_target = base.clone();
+        changed_target.operations[0].destination = Some("other/first.txt".into());
+        assert!(!scope_allows(
+            &scope,
+            &approval_scope(&changed_target).unwrap()
+        ));
+
+        let mut changed_conflict = base.clone();
+        changed_conflict.conflict_policy = ConflictPolicy::Skip;
+        assert!(!scope_allows(
+            &scope,
+            &approval_scope(&changed_conflict).unwrap()
+        ));
+
+        let mut changed_operation = base.clone();
+        changed_operation.operations[0].kind = FileOperationKind::Move;
+        assert!(!scope_allows(
+            &scope,
+            &approval_scope(&changed_operation).unwrap()
+        ));
+    }
+
+    #[test]
+    fn run_scope_allows_a_narrower_batch_but_rejects_a_larger_batch() {
+        let grant_request = BatchPreviewRequest {
+            run_id: "run-scope-count".into(),
+            root_id: "root".into(),
+            operations: vec![
+                FileOperationRequest {
+                    kind: FileOperationKind::Copy,
+                    source: Some("source.txt".into()),
+                    destination: Some("archive/first.txt".into()),
+                },
+                FileOperationRequest {
+                    kind: FileOperationKind::Copy,
+                    source: Some("second.txt".into()),
+                    destination: Some("archive/second.txt".into()),
+                },
+            ],
+            conflict_policy: ConflictPolicy::Skip,
+        };
+        let grant_scope = approval_scope(&grant_request).unwrap();
+
+        let mut narrower = grant_request.clone();
+        narrower.operations.pop();
+        assert!(scope_allows(
+            &grant_scope,
+            &approval_scope(&narrower).unwrap()
+        ));
+
+        let mut larger = grant_request.clone();
+        larger.operations.push(FileOperationRequest {
+            kind: FileOperationKind::Copy,
+            source: Some("third.txt".into()),
+            destination: Some("archive/third.txt".into()),
+        });
+        assert!(!scope_allows(
+            &grant_scope,
+            &approval_scope(&larger).unwrap()
+        ));
+    }
+
+    #[test]
     fn preview_rejects_directory_move_before_it_can_prepare_an_overwrite() {
         let directory = test_dir();
         fs::create_dir_all(directory.join("source-directory")).unwrap();
@@ -304,9 +393,11 @@ use crate::work_assistant::{
     FileOperationKind, FileOperationRequest, NativePreviewRequest, PathPolicy, StoredApproval,
     StoredPreview, WorkAssistantError, WorkAssistantState,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -317,11 +408,167 @@ const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const PREVIEW_LIFETIME_SECONDS: u64 = 5 * 60;
 const APPROVAL_LIFETIME_SECONDS: u64 = 5 * 60;
 const MAX_RUN_APPROVAL_ITEMS: u32 = 10_000;
+const APPROVAL_SCOPE_VERSION: u8 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalScope {
+    version: u8,
+    tool_name: String,
+    root_id: String,
+    target_parent: String,
+    conflict_policy: String,
+    operation_kind: String,
+    max_item_count: u32,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct CalculatedPreview {
     pub revision: u64,
     pub risk: String,
+}
+
+/// The scope is deliberately one opaque, canonical JSON value.  It is exposed to the frontend
+/// only as a cache key and never contains a filesystem path; the target-parent component is a
+/// digest of normalized relative parents.  Keeping the fields in a typed value makes the native
+/// comparison fail closed when an older or malformed scope reaches the approval boundary.
+pub(crate) fn approval_scope(
+    request: &BatchPreviewRequest,
+) -> Result<Vec<String>, WorkAssistantError> {
+    let max_item_count = u32::try_from(request.operations.len())
+        .map_err(|_| WorkAssistantError::blocked("preview has too many operations"))?;
+    let scope = ApprovalScope {
+        version: APPROVAL_SCOPE_VERSION,
+        tool_name: "file_apply_batch".into(),
+        root_id: request.root_id.clone(),
+        target_parent: scope_target_parent(request),
+        conflict_policy: conflict_policy_label(&request.conflict_policy).into(),
+        operation_kind: scope_operation_kind(request),
+        max_item_count,
+    };
+    serde_json::to_string(&scope)
+        .map(|value| vec![value])
+        .map_err(|_| WorkAssistantError::protocol("could not serialize approval scope"))
+}
+
+/// A run grant may cover a narrower batch than the one the user approved, but never a broader
+/// batch or a different target/policy/kind.  Unknown scope encodings are rejected rather than
+/// falling back to the historical root-only representation.
+pub(crate) fn scope_allows(grant: &[String], request: &[String]) -> bool {
+    let Some(grant) = parse_approval_scope(grant) else {
+        return false;
+    };
+    let Some(request) = parse_approval_scope(request) else {
+        return false;
+    };
+    !run_scope_dangerous(&grant)
+        && !run_scope_dangerous(&request)
+        && grant.tool_name == request.tool_name
+        && grant.root_id == request.root_id
+        && grant.target_parent == request.target_parent
+        && grant.conflict_policy == request.conflict_policy
+        && grant.operation_kind == request.operation_kind
+        && request.max_item_count <= grant.max_item_count
+}
+
+fn run_scope_dangerous(scope: &ApprovalScope) -> bool {
+    matches!(
+        scope.conflict_policy.as_str(),
+        "overwrite" | "delete" | "external_navigation" | "send" | "publish" | "submit"
+    ) || scope.operation_kind.split(',').any(|kind| {
+        matches!(
+            kind,
+            "trash"
+                | "delete"
+                | "desktop_open_app"
+                | "browser_download"
+                | "external_navigation"
+                | "send"
+                | "publish"
+                | "submit"
+        )
+    })
+}
+
+pub(crate) fn scope_root_id(scope: &[String]) -> Option<String> {
+    parse_approval_scope(scope).map(|scope| scope.root_id)
+}
+
+fn parse_approval_scope(scope: &[String]) -> Option<ApprovalScope> {
+    if scope.len() != 1 {
+        return None;
+    }
+    let parsed = serde_json::from_str::<ApprovalScope>(&scope[0]).ok()?;
+    if parsed.version != APPROVAL_SCOPE_VERSION
+        || parsed.tool_name.is_empty()
+        || parsed.root_id.is_empty()
+        || parsed.target_parent.is_empty()
+        || parsed.conflict_policy.is_empty()
+        || parsed.operation_kind.is_empty()
+        || parsed.max_item_count == 0
+    {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn scope_target_parent(request: &BatchPreviewRequest) -> String {
+    let mut parents = BTreeSet::new();
+    for operation in &request.operations {
+        let candidate = operation
+            .destination
+            .as_deref()
+            .or(operation.source.as_deref())
+            .unwrap_or_default();
+        parents.insert(scope_relative_parent(candidate));
+    }
+    let canonical = parents.into_iter().collect::<Vec<_>>().join("\n");
+    let digest = Sha256::digest(canonical.as_bytes());
+    let encoded = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{encoded}")
+}
+
+fn scope_relative_parent(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut components = normalized
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !components.is_empty() {
+        components.pop();
+    }
+    components.join("/")
+}
+
+fn scope_operation_kind(request: &BatchPreviewRequest) -> String {
+    let kinds = request
+        .operations
+        .iter()
+        .map(|operation| operation_kind_label(&operation.kind))
+        .collect::<BTreeSet<_>>();
+    kinds.into_iter().collect::<Vec<_>>().join(",")
+}
+
+fn operation_kind_label(kind: &FileOperationKind) -> &'static str {
+    match kind {
+        FileOperationKind::Copy => "copy",
+        FileOperationKind::Move => "move",
+        FileOperationKind::Rename => "rename",
+        FileOperationKind::CreateDirectory => "create_directory",
+        FileOperationKind::Trash => "trash",
+    }
+}
+
+fn conflict_policy_label(policy: &ConflictPolicy) -> &'static str {
+    match policy {
+        ConflictPolicy::Skip => "skip",
+        ConflictPolicy::Rename => "rename",
+        ConflictPolicy::Overwrite => "overwrite",
+    }
 }
 
 /// Converts the public frontend envelope into the existing private batch request. The model may
@@ -371,6 +618,7 @@ pub fn create_native_file_preview(
     request: NativePreviewRequest,
 ) -> Result<AssistantToolPreview, WorkAssistantError> {
     let batch = batch_preview_request_from_native(&request)?;
+    let scope = approval_scope(&batch)?;
     let preview = create_batch_preview_with_tool_call(state, batch, request.tool_call_id)
         .map_err(sanitize_native_preview_error)?;
     let risk = assistant_risk(&preview.risk)?;
@@ -385,7 +633,7 @@ pub fn create_native_file_preview(
         impact_summary: format!("{} 项文件操作", preview.operation_count),
         reversible,
         expires_at: preview.expires,
-        scope: vec![preview.root_id],
+        scope,
     })
 }
 
@@ -446,6 +694,7 @@ fn create_batch_preview_with_tool_call(
     let payload = serde_json::to_value(&request).map_err(|error| {
         WorkAssistantError::protocol(format!("could not serialize preview request: {error}"))
     })?;
+    let scope = approval_scope(&request)?;
     state
         .previews
         .lock()
@@ -458,7 +707,7 @@ fn create_batch_preview_with_tool_call(
                 tool_call_id,
                 revision: preview.revision,
                 risk: preview.risk.clone(),
-                scope: vec![preview.root_id.clone()],
+                scope,
                 payload,
                 expires: preview.expires,
             },
@@ -493,6 +742,9 @@ pub fn approve_batch_preview(
             "high-risk file operations only allow one-time approval",
         ));
     }
+    let requested_count =
+        u32::try_from(request_from_payload(&preview.payload)?.operations.len())
+            .map_err(|_| WorkAssistantError::blocked("preview has too many operations"))?;
     if choice == ApprovalChoice::Run {
         let existing = state
             .approvals
@@ -502,9 +754,12 @@ pub fn approve_batch_preview(
             .find(|approval| {
                 approval.run_scoped
                     && approval.run == preview.run
-                    && approval.scope == preview.scope
+                    && scope_allows(&approval.scope, &preview.scope)
                     && approval.expires > unix_seconds()
-                    && approval.used_count < approval.max_count
+                    && approval
+                        .used_count
+                        .checked_add(requested_count)
+                        .is_some_and(|count| count <= approval.max_count)
             })
             .cloned();
         if let Some(existing) = existing {
@@ -525,7 +780,7 @@ pub fn approve_batch_preview(
     let max_count = if choice == ApprovalChoice::Run {
         MAX_RUN_APPROVAL_ITEMS
     } else {
-        request_from_payload(&preview.payload)?.operations.len() as u32
+        requested_count
     };
 
     let choice_label = match choice {
@@ -546,7 +801,7 @@ pub fn approve_batch_preview(
             .lock()
             .map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?
             .retain(|_, approval| {
-                !(approval.run == preview.run && approval.scope == preview.scope)
+                !(approval.run == preview.run && scope_allows(&approval.scope, &preview.scope))
             });
         return Err(WorkAssistantError::blocked(
             "file operation approval was denied",

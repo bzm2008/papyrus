@@ -278,6 +278,7 @@ fn invalidate_previews_for_root(
         .map_err(|_| WorkAssistantError::protocol("workspace previews lock is unavailable"))?;
     previews.retain(|_, preview| {
         !preview.scope.iter().any(|scope| scope == root_id)
+            && crate::work_assistant::scope_root_id(&preview.scope).as_deref() != Some(root_id)
             && preview
                 .payload
                 .get("rootId")

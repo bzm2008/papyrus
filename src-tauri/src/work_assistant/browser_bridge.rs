@@ -39,6 +39,7 @@ const HEARTBEAT_TIMEOUT_SECONDS: u64 = 45;
 const BROWSER_PREVIEW_LIFETIME_SECONDS: u64 = 5 * 60;
 const MAX_BROWSER_PREVIEWS: usize = 256;
 const MAX_BROWSER_APPROVALS: usize = 256;
+const MAX_BROWSER_CANCELLED_RUNS: usize = 256;
 const RESTRICTED_SNAPSHOT_TEXT: &str =
     "当前页面包含敏感内容，已隐藏页面正文；仅保留安全状态和受限原因。";
 
@@ -267,12 +268,17 @@ enum BrowserSemanticRisk {
 
 struct BrowserBridgeInner {
     session: Mutex<Option<SessionData>>,
+    /// Serializes cancellation/disconnect with an approved browser action. A
+    /// cancellation that acquires this gate first cannot be overtaken between
+    /// the cancellation check and the outbound browser request.
+    action_gate: Mutex<()>,
     wake: Condvar,
     listener: Mutex<Option<thread::JoinHandle<()>>>,
     listener_port: Mutex<Option<u16>>,
     stop: Mutex<bool>,
     browser_previews: Mutex<HashMap<String, StoredBrowserPreview>>,
     browser_approvals: Mutex<HashMap<String, StoredBrowserApproval>>,
+    cancelled_runs: Mutex<HashSet<String>>,
 }
 
 pub struct BrowserBridgeState {
@@ -297,12 +303,14 @@ pub fn init_browser_bridge_state() -> BrowserBridgeState {
     BrowserBridgeState {
         inner: Arc::new(BrowserBridgeInner {
             session: Mutex::new(None),
+            action_gate: Mutex::new(()),
             wake: Condvar::new(),
             listener: Mutex::new(None),
             listener_port: Mutex::new(None),
             stop: Mutex::new(false),
             browser_previews: Mutex::new(HashMap::new()),
             browser_approvals: Mutex::new(HashMap::new()),
+            cancelled_runs: Mutex::new(HashSet::new()),
         }),
     }
 }
@@ -420,6 +428,19 @@ pub fn work_assistant_browser_reject_action(
     run_id: String,
 ) -> Result<(), String> {
     reject_browser_action(&state.inner, &preview_id, &run_id)
+}
+
+/// Invalidate every browser preview and one-time approval issued for a run.
+///
+/// This is intentionally a separate command from workspace cancellation. The
+/// browser bridge owns its own short-lived token maps, and a cancelled run must
+/// also reject previews that finish creating after the frontend aborts.
+#[tauri::command]
+pub fn work_assistant_browser_cancel_run(
+    state: State<'_, BrowserBridgeState>,
+    run: String,
+) -> Result<(), String> {
+    cancel_browser_run(&state.inner, &run)
 }
 
 #[tauri::command]
@@ -659,6 +680,10 @@ fn pair_bridge(
 }
 
 fn disconnect_bridge(inner: &Arc<BrowserBridgeInner>) -> Result<(), WorkAssistantError> {
+    let action_gate = inner
+        .action_gate
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("browser action gate is unavailable"))?;
     let mut session = inner
         .session
         .lock()
@@ -667,12 +692,16 @@ fn disconnect_bridge(inner: &Arc<BrowserBridgeInner>) -> Result<(), WorkAssistan
         current.outbound = None;
     }
     *session = None;
+    // Cancellation markers belong to the run, not the browser session. Keep
+    // them across disconnect/re-pair so a late call from an old run cannot
+    // become valid merely because the user connected a new tab.
     if let Ok(mut previews) = inner.browser_previews.lock() {
         previews.clear();
     }
     if let Ok(mut approvals) = inner.browser_approvals.lock() {
         approvals.clear();
     }
+    drop(action_gate);
     if let Ok(mut stop) = inner.stop.lock() {
         *stop = true;
     }
@@ -684,6 +713,55 @@ fn disconnect_bridge(inner: &Arc<BrowserBridgeInner>) -> Result<(), WorkAssistan
         }
     }
     Ok(())
+}
+
+fn cancel_browser_run(inner: &Arc<BrowserBridgeInner>, run_id: &str) -> Result<(), String> {
+    let _action_gate = inner
+        .action_gate
+        .lock()
+        .map_err(|_| "浏览器动作闸门不可用".to_string())?;
+    let run_id = run_id.trim();
+    if run_id.is_empty() {
+        return Err("运行标识不能为空".into());
+    }
+    if run_id.chars().count() > 128 {
+        return Err("运行标识超过 128 个字符".into());
+    }
+
+    let mut cancelled_runs = inner
+        .cancelled_runs
+        .lock()
+        .map_err(|_| "浏览器取消状态不可用".to_string())?;
+    if !cancelled_runs.contains(run_id) && cancelled_runs.len() >= MAX_BROWSER_CANCELLED_RUNS {
+        if let Some(oldest) = cancelled_runs.iter().next().cloned() {
+            cancelled_runs.remove(&oldest);
+        }
+    }
+    cancelled_runs.insert(run_id.to_owned());
+
+    // Keep the cancellation marker locked while removing the token state. A
+    // late preview/approval creation cannot pass the marker check and then
+    // repopulate either map after this cleanup.
+    inner
+        .browser_previews
+        .lock()
+        .map_err(|_| "浏览器预览状态不可用".to_string())?
+        .retain(|_, preview| preview.run_id != run_id);
+    inner
+        .browser_approvals
+        .lock()
+        .map_err(|_| "浏览器审批状态不可用".to_string())?
+        .retain(|_, approval| approval.run_id != run_id);
+    inner.wake.notify_all();
+    Ok(())
+}
+
+fn browser_run_is_cancelled(inner: &Arc<BrowserBridgeInner>, run_id: &str) -> Result<bool, String> {
+    inner
+        .cancelled_runs
+        .lock()
+        .map(|runs| runs.contains(run_id))
+        .map_err(|_| "浏览器取消状态不可用".to_string())
 }
 
 fn status_for(inner: &Arc<BrowserBridgeInner>) -> BrowserBridgeStatus {
@@ -754,6 +832,9 @@ fn create_browser_action_preview(
     cleanup_browser_action_state(inner);
     if run_id.trim().is_empty() || tool_call_id.trim().is_empty() {
         return Err("浏览器动作预览缺少运行标识".into());
+    }
+    if browser_run_is_cancelled(inner, &run_id)? {
+        return Err("运行已取消".into());
     }
     if !matches!(
         action.as_str(),
@@ -905,6 +986,13 @@ fn create_browser_action_preview(
         page_title,
         element_name,
     };
+    let cancelled_runs = inner
+        .cancelled_runs
+        .lock()
+        .map_err(|_| "浏览器取消状态不可用".to_string())?;
+    if cancelled_runs.contains(&run_id) {
+        return Err("运行已取消".into());
+    }
     inner
         .browser_previews
         .lock()
@@ -966,6 +1054,9 @@ fn approve_browser_action(
     choice: &str,
 ) -> Result<BrowserApprovalGrant, String> {
     cleanup_browser_action_state(inner);
+    if browser_run_is_cancelled(inner, run_id)? {
+        return Err("运行已取消".into());
+    }
     let preview = inner
         .browser_previews
         .lock()
@@ -981,6 +1072,13 @@ fn approve_browser_action(
     }
     let token = high_entropy_token(preview_id, run_id);
     let expires = unix_seconds().saturating_add(BROWSER_PREVIEW_LIFETIME_SECONDS);
+    let cancelled_runs = inner
+        .cancelled_runs
+        .lock()
+        .map_err(|_| "浏览器取消状态不可用".to_string())?;
+    if cancelled_runs.contains(run_id) {
+        return Err("运行已取消".into());
+    }
     inner
         .browser_approvals
         .lock()
@@ -1019,6 +1117,11 @@ fn reject_browser_action(
     {
         previews.remove(preview_id);
     }
+    drop(previews);
+    if let Ok(mut approvals) = inner.browser_approvals.lock() {
+        approvals
+            .retain(|_, approval| approval.preview_id != preview_id || approval.run_id != run_id);
+    }
     Ok(())
 }
 
@@ -1038,6 +1141,10 @@ fn execute_approved_browser_action_with_audit(
     approval_token: &str,
     action_hash: &str,
 ) -> Result<BrowserActionResponse, String> {
+    let action_gate = inner
+        .action_gate
+        .lock()
+        .map_err(|_| "浏览器动作闸门不可用".to_string())?;
     cleanup_browser_action_state(inner);
     let approval = inner
         .browser_approvals
@@ -1045,6 +1152,9 @@ fn execute_approved_browser_action_with_audit(
         .map_err(|_| "浏览器审批状态不可用".to_string())?
         .remove(approval_token)
         .ok_or_else(|| "浏览器一次性审批令牌无效或已使用".to_string())?;
+    if browser_run_is_cancelled(inner, &approval.run_id)? {
+        return Err("运行已取消".into());
+    }
     if approval.token != approval_token
         || approval.preview_id != preview_id
         || approval.action_hash != action_hash
@@ -1126,11 +1236,25 @@ fn execute_approved_browser_action_with_audit(
         }
         validate_browser_element_target(&action, element).map_err(|error| error.message)?;
     }
-    let result = request_bridge(
+    let pending_request = start_request_bridge(
         inner,
         &action,
         serde_json::to_value(stored.request).unwrap_or_else(|_| json!({})),
     );
+    // The gate only covers the validated state transition and outbound send.
+    // Waiting for a browser response must not block cancellation or disconnect.
+    let result = match pending_request {
+        Ok(pending) => {
+            drop(action_gate);
+            wait_request_bridge(inner, pending, Some(&approval.run_id)).and_then(|value| {
+                serde_json::from_value(value).map_err(|_| "浏览器响应协议无效".into())
+            })
+        }
+        Err(error) => {
+            drop(action_gate);
+            Err(error)
+        }
+    };
     if let Some(audit_state) = audit_state {
         let response = result.as_ref().map_err(|error| error.as_str());
         append_browser_action_audit(audit_state, &preview, &action, response);
@@ -1281,22 +1405,28 @@ fn hash_browser_action(action: &str, request: &BrowserActionRequest) -> String {
     hex_encode(&digest.finalize())
 }
 
-fn request_bridge(
-    inner: &Arc<BrowserBridgeInner>,
-    action: &str,
-    payload: Value,
-) -> Result<BrowserActionResponse, String> {
-    let value = request_bridge_value(inner, action, payload)?;
-    serde_json::from_value(value).map_err(|_| "浏览器响应协议无效".into())
-}
-
 fn request_bridge_value(
     inner: &Arc<BrowserBridgeInner>,
     action: &str,
     payload: Value,
 ) -> Result<Value, String> {
+    let pending = start_request_bridge(inner, action, payload)?;
+    wait_request_bridge(inner, pending, None)
+}
+
+struct PendingBrowserRequest {
+    request_id: String,
+    session_id: String,
+    deadline: std::time::Instant,
+}
+
+fn start_request_bridge(
+    inner: &Arc<BrowserBridgeInner>,
+    action: &str,
+    payload: Value,
+) -> Result<PendingBrowserRequest, String> {
     let request_id = Uuid::new_v4().to_string();
-    let (sender, session_id, expires_at) = {
+    let (sender, session_id) = {
         let mut session = inner
             .session
             .lock()
@@ -1311,11 +1441,7 @@ fn request_bridge_value(
             return Err("浏览器请求队列已满".into());
         }
         current.pending_requests.insert(request_id.clone());
-        (
-            sender,
-            current.pairing.session_id.clone(),
-            InstantDeadline::new(RESPONSE_WAIT),
-        )
+        (sender, current.pairing.session_id.clone())
     };
     let message = json!({
         "type": "request",
@@ -1336,8 +1462,37 @@ fn request_bridge_value(
         return Err("浏览器连接已断开".into());
     }
 
-    let deadline = expires_at.0;
+    Ok(PendingBrowserRequest {
+        request_id,
+        session_id,
+        deadline: std::time::Instant::now() + RESPONSE_WAIT,
+    })
+}
+
+fn wait_request_bridge(
+    inner: &Arc<BrowserBridgeInner>,
+    pending: PendingBrowserRequest,
+    run_id: Option<&str>,
+) -> Result<Value, String> {
+    let PendingBrowserRequest {
+        request_id,
+        session_id,
+        deadline,
+    } = pending;
     loop {
+        if let Some(run_id) = run_id {
+            if browser_run_is_cancelled(inner, run_id)? {
+                if let Ok(mut session) = inner.session.lock() {
+                    if let Some(current) = session.as_mut() {
+                        if current.pairing.session_id == session_id {
+                            current.pending_requests.remove(&request_id);
+                            current.responses.remove(&request_id);
+                        }
+                    }
+                }
+                return Err("运行已取消".into());
+            }
+        }
         let mut session = inner
             .session
             .lock()
@@ -1368,13 +1523,6 @@ fn request_bridge_value(
             .wait_timeout(session, wait)
             .map_err(|_| "浏览器桥接状态不可用".to_string())?;
         drop(guard);
-    }
-}
-
-struct InstantDeadline(std::time::Instant);
-impl InstantDeadline {
-    fn new(duration: Duration) -> Self {
-        Self(std::time::Instant::now() + duration)
     }
 }
 
@@ -2726,6 +2874,94 @@ mod tests {
         )
         .expect_err("an approval token must be one-shot");
         assert!(replay.contains("令牌无效"));
+    }
+
+    #[test]
+    fn cancelling_browser_run_invalidates_preview_and_approval_state() {
+        let state = init_browser_bridge_state();
+        let inner = Arc::clone(&state.inner);
+        if let Ok(mut session) = inner.session.lock() {
+            *session = Some(test_session("cancel-run"));
+        }
+
+        let preview = create_browser_action_preview(
+            &inner,
+            "navigate".into(),
+            "run-cancelled".into(),
+            "tool-cancelled".into(),
+            BrowserActionRequest {
+                element_token: None,
+                value: None,
+                page_revision: String::new(),
+                snapshot_id: None,
+                url: Some("https://example.com/next".into()),
+                directory_root_id: None,
+                target_href: None,
+                href_fingerprint: None,
+            },
+        )
+        .expect("preview should be generated before cancellation");
+        let grant = approve_browser_action(&inner, &preview.id, "run-cancelled", "once")
+            .expect("approval should be generated before cancellation");
+
+        cancel_browser_run(&inner, "run-cancelled")
+            .expect("cancellation should clear browser state");
+        assert!(inner.browser_previews.lock().unwrap().is_empty());
+        assert!(inner.browser_approvals.lock().unwrap().is_empty());
+
+        let late_preview = create_browser_action_preview(
+            &inner,
+            "navigate".into(),
+            "run-cancelled".into(),
+            "tool-late".into(),
+            BrowserActionRequest {
+                element_token: None,
+                value: None,
+                page_revision: String::new(),
+                snapshot_id: None,
+                url: Some("https://example.com/late".into()),
+                directory_root_id: None,
+                target_href: None,
+                href_fingerprint: None,
+            },
+        )
+        .expect_err("cancelled runs must not create late previews");
+        assert!(late_preview.contains("运行已取消"));
+
+        let late_execute = execute_approved_browser_action(
+            &inner,
+            &grant.preview_id,
+            &grant.token,
+            &grant.action_hash,
+        )
+        .expect_err("cancelled approvals must not execute");
+        assert!(late_execute.contains("令牌无效") || late_execute.contains("运行已取消"));
+    }
+
+    #[test]
+    fn cancelling_a_pending_browser_request_wakes_without_waiting_for_timeout() {
+        let state = init_browser_bridge_state();
+        let inner = Arc::clone(&state.inner);
+        let (sender, receiver) = mpsc::channel::<String>();
+        if let Ok(mut session) = inner.session.lock() {
+            let mut current = test_session("pending-cancel");
+            current.outbound = Some(sender);
+            *session = Some(current);
+        }
+
+        let pending = start_request_bridge(&inner, "submit", json!({})).expect("request starts");
+        let request_id = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("request should be sent");
+        assert!(request_id.contains("\"type\":\"request\""));
+
+        let waiter_inner = Arc::clone(&inner);
+        let waiter = thread::spawn(move || {
+            wait_request_bridge(&waiter_inner, pending, Some("run-pending-cancel"))
+        });
+        cancel_browser_run(&inner, "run-pending-cancel").expect("cancellation should be recorded");
+        let result = waiter.join().expect("waiter should finish");
+        assert!(result.is_err_and(|error| error.contains("运行已取消")));
     }
 
     fn follow_redirect_fixture<R, F>(

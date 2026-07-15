@@ -348,8 +348,9 @@ fn validate_approval(
         .cloned()
         .ok_or_else(|| WorkAssistantError::blocked("a valid native approval token is required"))?;
     let preview_matches = approval.preview == execution.preview_id;
-    let run_scope_matches =
-        approval.run_scoped && approval.run == preview.run && approval.scope == preview.scope;
+    let run_scope_matches = approval.run_scoped
+        && approval.run == preview.run
+        && crate::work_assistant::scope_allows(&approval.scope, &preview.scope);
     if approval.token != execution.token
         || (!preview_matches && !run_scope_matches)
         || (!approval.run_scoped && approval.revision != execution.revision)
@@ -381,12 +382,13 @@ fn consume_approval(
         .get_mut(&execution.token)
         .ok_or_else(|| WorkAssistantError::blocked("approval token is no longer valid"))?;
     let preview_matches = approval.preview == preview.id;
-    let run_scope_matches =
-        approval.run_scoped && approval.run == preview.run && approval.scope == preview.scope;
+    let run_scope_matches = approval.run_scoped
+        && approval.run == preview.run
+        && crate::work_assistant::scope_allows(&approval.scope, &preview.scope);
     if (!preview_matches && !run_scope_matches)
         || (!approval.run_scoped && approval.revision != preview.revision)
         || approval.run != preview.run
-        || approval.scope != preview.scope
+        || (!approval.run_scoped && approval.scope != preview.scope)
         || approval.expires <= unix_seconds()
         || approval.used_count != expected.used_count
         || approval

@@ -87,7 +87,7 @@ describe('work assistant runtime', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'work_assistant_approve')).toHaveLength(1)
   })
 
-  it('clears a run approval after cancellation so the next scope needs confirmation', async () => {
+  it('blocks later work after cancellation and clears the run approval', async () => {
     let previewNumber = 0
     const invoke = vi.fn(async (command: string) => {
       if (command === 'work_assistant_preview') {
@@ -111,8 +111,70 @@ describe('work assistant runtime', () => {
     await executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_plan_batch', args, 'cancel-plan-2') })
     const secondApply = executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_apply_batch', { previewId: 'cancel-preview-2' }, 'cancel-apply-2') })
     await Promise.resolve()
-    expect(resolveAssistantApproval('cancel-preview-2', 'deny')).toBe(true)
+    expect(resolveAssistantApproval('cancel-preview-2', 'deny')).toBe(false)
     await expect(secondApply).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
+  })
+
+  it('does not start a native preview after the run is already cancelled', async () => {
+    const invoke = vi.fn(async () => ({ id: 'late-preview', revision: '1', risk: 'reversible', title: '整理文件', targetSummary: 'Downloads', impactSummary: '移动文件', reversible: true, expiresAt: Date.now() + 60_000 }))
+    setWorkAssistantInvokerForTests(invoke)
+    dispatchOrderedWorkAssistantEvent({ type: 'run.cancelled', runId: 'run-pre-cancelled', at: Date.now() })
+
+    const result = await executeAssistantToolCall({
+      runId: 'run-pre-cancelled',
+      toolCall: call('file_plan_batch', {
+        rootId: 'downloads',
+        conflictPolicy: 'rename',
+        operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'PDF/a.pdf' }],
+      }),
+    })
+
+    expect(result).toMatchObject({ ok: false, errorCode: 'cancelled' })
+    expect(invoke).not.toHaveBeenCalledWith('work_assistant_preview', expect.anything())
+  })
+
+  it('reuses a structured run grant only for a narrower item bound', async () => {
+    let previewNumber = 0
+    const scope = (maxItemCount: number) => JSON.stringify({
+      version: 1,
+      toolName: 'file_apply_batch',
+      rootId: 'downloads',
+      targetParent: 'sha256:archive',
+      conflictPolicy: 'rename',
+      operationKind: 'move',
+      maxItemCount,
+    })
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_preview') {
+        previewNumber += 1
+        const maxItemCount = previewNumber === 1 ? 2 : previewNumber === 2 ? 1 : 3
+        return { id: `bounded-preview-${previewNumber}`, revision: '1', risk: 'reversible', title: '整理文件', targetSummary: 'Downloads', impactSummary: '移动文件', reversible: true, scope: [scope(maxItemCount)], expiresAt: Date.now() + 60_000 }
+      }
+      if (command === 'work_assistant_approve') return { token: `bounded-token-${previewNumber}`, previewId: `bounded-preview-${previewNumber}`, expires: Date.now() + 60_000 }
+      if (command === 'work_assistant_execute') return { completed: [{ index: 0 }], skipped: [], failed: [], remaining: [], cancelled: false }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const args = { rootId: 'downloads', conflictPolicy: 'rename', operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'archive/a.pdf' }] }
+
+    await executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_plan_batch', args, 'bounded-plan-1') })
+    const firstApply = executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_apply_batch', { previewId: 'bounded-preview-1' }, 'bounded-apply-1') })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('bounded-preview-1', 'run')).toBe(true)
+    await expect(firstApply).resolves.toMatchObject({ ok: true })
+
+    await executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_plan_batch', args, 'bounded-plan-2') })
+    const narrowerApply = executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_apply_batch', { previewId: 'bounded-preview-2' }, 'bounded-apply-2') })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('bounded-preview-2', 'deny')).toBe(false)
+    await expect(narrowerApply).resolves.toMatchObject({ ok: true })
+
+    await executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_plan_batch', args, 'bounded-plan-3') })
+    const largerApply = executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_apply_batch', { previewId: 'bounded-preview-3' }, 'bounded-apply-3') })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('bounded-preview-3', 'once')).toBe(true)
+    await expect(largerApply).resolves.toMatchObject({ ok: true })
+    expect(invoke.mock.calls.filter(([command]) => command === 'work_assistant_approve')).toHaveLength(2)
   })
 
   it('denies an approval without invoking the action', async () => {

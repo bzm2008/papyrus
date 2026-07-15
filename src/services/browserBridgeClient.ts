@@ -99,6 +99,58 @@ let invokeFn: BrowserBridgeInvoker = (command, args) => invoke(command, args)
 
 const call = <T>(command: string, args?: Record<string, unknown>) => invokeFn(command, args) as Promise<T>
 
+function abortError() {
+  return new DOMException('Run cancelled', 'AbortError')
+}
+
+/**
+ * Tauri invoke does not accept an AbortSignal. Race the native request with the
+ * run signal while still observing the native promise so an aborted request
+ * cannot become an unhandled rejection when the bridge responds later.
+ */
+function callWithAbort<T>(command: string, args: Record<string, unknown> | undefined, signal?: AbortSignal) {
+  if (signal?.aborted) return Promise.reject<T>(abortError())
+
+  let pending: Promise<T>
+  try {
+    pending = call<T>(command, args)
+  } catch (error) {
+    return Promise.reject<T>(error)
+  }
+  if (!signal) return pending
+  if (signal.aborted) {
+    void pending.catch(() => undefined)
+    return Promise.reject<T>(abortError())
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(abortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    pending.then(
+      (value) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        if (signal.aborted) reject(abortError())
+        else resolve(value)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      },
+    )
+  })
+}
+
 export const invokeBrowserBridge = <T = unknown>(command: string, args?: Record<string, unknown>) =>
   call<T>(command, args)
 
@@ -118,18 +170,20 @@ export async function getBrowserBridgeStatus() {
 export const disconnectBrowserBridge = () => call<void>('browser_bridge_disconnect')
 export const pairBrowserBridge = (token: string, nonce: string, extensionId: string, tabId: number, origin: string) =>
   call<BrowserBridgeStatus>('browser_bridge_pair', { token, nonce, extensionId, tabId, origin })
-export const startBrowserActionPreview = (input: BrowserActionPreviewInput) =>
-  call<BrowserActionPreview>('work_assistant_browser_preview_action', input as unknown as Record<string, unknown>)
-export const approveBrowserAction = (previewId: string, runId: string) =>
-  call<BrowserApprovalGrant>('work_assistant_browser_approve_action', { previewId, runId, choice: 'once' })
+export const startBrowserActionPreview = (input: BrowserActionPreviewInput, signal?: AbortSignal) =>
+  callWithAbort<BrowserActionPreview>('work_assistant_browser_preview_action', input as unknown as Record<string, unknown>, signal)
+export const approveBrowserAction = (previewId: string, runId: string, signal?: AbortSignal) =>
+  callWithAbort<BrowserApprovalGrant>('work_assistant_browser_approve_action', { previewId, runId, choice: 'once' }, signal)
 export const rejectBrowserAction = (previewId: string, runId: string) =>
   call<void>('work_assistant_browser_reject_action', { previewId, runId })
-export const executeApprovedBrowserAction = (grant: BrowserApprovalContext) =>
-  call<BrowserActionResponse>('work_assistant_browser_execute_action', {
+export const cancelBrowserBridgeRun = (runId: string) =>
+  call<void>('work_assistant_browser_cancel_run', { run: runId })
+export const executeApprovedBrowserAction = (grant: BrowserApprovalContext, signal?: AbortSignal) =>
+  callWithAbort<BrowserActionResponse>('work_assistant_browser_execute_action', {
     previewId: grant.previewId,
     approvalToken: grant.approvalToken,
     actionHash: grant.actionHash,
-  })
+  }, signal)
 function approvedBrowserAction(
   command: string,
   approval: BrowserApprovalContext | undefined,
@@ -141,8 +195,8 @@ function approvedBrowserAction(
 
 export const openBrowserBridgeTab = (url: string | undefined, approval?: BrowserApprovalContext) =>
   approvedBrowserAction('browser_open', approval, { url })
-export const browserSnapshot = (pageRevision?: string, snapshotId?: string) =>
-  call<BrowserSnapshot>('browser_snapshot', pageRevision || snapshotId ? { pageRevision, snapshotId } : undefined)
+export const browserSnapshot = (pageRevision?: string, snapshotId?: string, signal?: AbortSignal) =>
+  callWithAbort<BrowserSnapshot>('browser_snapshot', pageRevision || snapshotId ? { pageRevision, snapshotId } : undefined, signal)
 export const browserFillDraft = (elementToken: string, value: string, pageRevision: string, approval?: BrowserApprovalContext) =>
   approvedBrowserAction('browser_fill_draft', approval, { elementToken, value, pageRevision })
 export const browserClick = (elementToken: string, pageRevision: string, approval?: BrowserApprovalContext) =>
