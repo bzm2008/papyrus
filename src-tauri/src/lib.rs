@@ -8,6 +8,7 @@ use std::{
 };
 use tauri::Manager;
 
+pub mod secretary_ledger;
 mod work_assistant;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -41,6 +42,27 @@ pub fn run() {
             test_model_connection,
             llm_chat,
             open_external_url,
+            secretary_ledger::secretary_ledger_bootstrap,
+            secretary_ledger::secretary_ledger_health,
+            secretary_ledger::secretary_ledger_create_project,
+            secretary_ledger::secretary_ledger_list_projects,
+            secretary_ledger::secretary_ledger_create_memory,
+            secretary_ledger::secretary_ledger_get_memory,
+            secretary_ledger::secretary_ledger_list_memories,
+            secretary_ledger::secretary_ledger_update_memory,
+            secretary_ledger::secretary_ledger_rollback_memory,
+            secretary_ledger::secretary_ledger_delete_memory,
+            secretary_ledger::secretary_ledger_search,
+            secretary_ledger::secretary_ledger_create_task,
+            secretary_ledger::secretary_ledger_get_task,
+            secretary_ledger::secretary_ledger_list_tasks,
+            secretary_ledger::secretary_ledger_update_task,
+            secretary_ledger::secretary_ledger_delete_task,
+            secretary_ledger::secretary_ledger_record_event,
+            secretary_ledger::secretary_ledger_list_events,
+            secretary_ledger::secretary_ledger_save_checkpoint,
+            secretary_ledger::secretary_ledger_load_latest_checkpoint,
+            secretary_ledger::secretary_ledger_import_legacy_batch,
             work_assistant::work_assistant_capabilities,
             work_assistant::work_assistant_list_roots,
             work_assistant::work_assistant_add_root,
@@ -194,29 +216,28 @@ fn health_check_backend() -> MaintenanceStatus {
 
 #[tauri::command]
 fn check_sqlite_status(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> {
-    let data_dir = app_data_dir(&app)?;
-    fs::create_dir_all(&data_dir).map_err(|error| format!("创建应用数据目录失败：{}", error))?;
-
-    let probe_path = data_dir.join(".papyrus-write-probe");
-    fs::write(&probe_path, "ok").map_err(|error| format!("应用数据目录不可写：{}", error))?;
-    let _ = fs::remove_file(probe_path);
+    let health = secretary_ledger::SecretaryLedger::open_for_app(&app)
+        .and_then(|ledger| ledger.health())
+        .map_err(|error| error.safe_message().to_string())?;
 
     Ok(MaintenanceStatus {
         status: "ok".into(),
-        message: "应用数据目录可写，SQLite 预留库可用".into(),
+        message: "秘书账本 SQLite 与 FTS5 可用".into(),
         latency_ms: None,
-        bytes: None,
+        bytes: Some(health.bytes),
     })
 }
 
 #[tauri::command]
 fn get_memory_usage(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> {
     let memory_dir = memory_dir(&app)?;
-    let bytes = directory_size(&memory_dir);
+    let ledger_bytes = secretary_ledger::ledger_size_for_app(&app)
+        .map_err(|error| error.safe_message().to_string())?;
+    let bytes = directory_size(&memory_dir).saturating_add(ledger_bytes);
 
     Ok(MaintenanceStatus {
         status: "ok".into(),
-        message: "记忆目录统计完成".into(),
+        message: "记忆目录与秘书账本统计完成".into(),
         latency_ms: None,
         bytes: Some(bytes),
     })
@@ -593,6 +614,27 @@ mod security_tests {
                 "test_model_connection",
                 "llm_chat",
                 "open_external_url",
+                "secretary_ledger::secretary_ledger_bootstrap",
+                "secretary_ledger::secretary_ledger_health",
+                "secretary_ledger::secretary_ledger_create_project",
+                "secretary_ledger::secretary_ledger_list_projects",
+                "secretary_ledger::secretary_ledger_create_memory",
+                "secretary_ledger::secretary_ledger_get_memory",
+                "secretary_ledger::secretary_ledger_list_memories",
+                "secretary_ledger::secretary_ledger_update_memory",
+                "secretary_ledger::secretary_ledger_rollback_memory",
+                "secretary_ledger::secretary_ledger_delete_memory",
+                "secretary_ledger::secretary_ledger_search",
+                "secretary_ledger::secretary_ledger_create_task",
+                "secretary_ledger::secretary_ledger_get_task",
+                "secretary_ledger::secretary_ledger_list_tasks",
+                "secretary_ledger::secretary_ledger_update_task",
+                "secretary_ledger::secretary_ledger_delete_task",
+                "secretary_ledger::secretary_ledger_record_event",
+                "secretary_ledger::secretary_ledger_list_events",
+                "secretary_ledger::secretary_ledger_save_checkpoint",
+                "secretary_ledger::secretary_ledger_load_latest_checkpoint",
+                "secretary_ledger::secretary_ledger_import_legacy_batch",
                 "work_assistant::work_assistant_capabilities",
                 "work_assistant::work_assistant_list_roots",
                 "work_assistant::work_assistant_add_root",
@@ -641,6 +683,44 @@ mod security_tests {
                 "work_assistant::work_assistant_web_extract",
             ]
         );
+    }
+
+    #[test]
+    fn invoke_handler_registers_the_bounded_secretary_ledger_surface() {
+        let source = include_str!("lib.rs");
+        let handler_start = source
+            .find(".invoke_handler(")
+            .expect("invoke handler must be declared");
+        let macro_start = handler_start
+            + source[handler_start..]
+                .find("generate_handler!")
+                .expect("invoke handler must use generate_handler!");
+        let commands_start = macro_start
+            + source[macro_start..]
+                .find('[')
+                .expect("generate_handler! must open a command list")
+            + 1;
+        let commands_end = commands_start
+            + source[commands_start..]
+                .find(']')
+                .expect("generate_handler! must close its command list");
+        let handler = &source[commands_start..commands_end];
+
+        for command in [
+            "secretary_ledger::secretary_ledger_bootstrap",
+            "secretary_ledger::secretary_ledger_create_project",
+            "secretary_ledger::secretary_ledger_create_memory",
+            "secretary_ledger::secretary_ledger_search",
+            "secretary_ledger::secretary_ledger_create_task",
+            "secretary_ledger::secretary_ledger_record_event",
+            "secretary_ledger::secretary_ledger_save_checkpoint",
+            "secretary_ledger::secretary_ledger_import_legacy_batch",
+        ] {
+            assert!(
+                handler.contains(command),
+                "missing bounded command: {command}"
+            );
+        }
     }
 }
 
