@@ -321,26 +321,21 @@ pub fn browser_bridge_start_pairing(
 
 #[tauri::command]
 pub fn browser_bridge_pair(
-    state: State<'_, BrowserBridgeState>,
-    token: String,
-    nonce: Option<String>,
-    extension_id: String,
-    tab_id: i64,
-    origin: String,
+    _state: State<'_, BrowserBridgeState>,
+    _token: String,
+    _nonce: Option<String>,
+    _extension_id: String,
+    _tab_id: i64,
+    _origin: String,
 ) -> Result<BrowserBridgeStatus, String> {
-    let handshake_origin = format!("chrome-extension://{}", extension_id.trim());
-    pair_bridge(
-        &state.inner,
-        PairRequest {
-            token,
-            nonce: nonce.unwrap_or_default(),
-            extension_id,
-            tab_id,
-            origin,
-        },
-        &handshake_origin,
-    )
-    .map_err(|error| error.message)
+    // Kept as a compatibility command for older desktop builds. Pairing must
+    // be completed by the loopback WebSocket handshake so the native side can
+    // authenticate the actual extension origin and connection.
+    Err(legacy_pairing_error())
+}
+
+fn legacy_pairing_error() -> String {
+    "浏览器桥接必须通过 WebSocket 配对，请重新启动配对流程".into()
 }
 
 #[tauri::command]
@@ -2356,6 +2351,11 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_tauri_pairing_is_fail_closed() {
+        assert!(legacy_pairing_error().contains("WebSocket"));
+    }
 
     fn test_session(session_id: &str) -> SessionData {
         SessionData {

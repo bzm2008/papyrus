@@ -14,6 +14,7 @@ import {
   scanWorkAssistantRoot,
   searchWorkAssistantFiles,
 } from './workAssistantClient'
+import type { ApprovalGrant } from './workAssistantClient'
 import {
   approveBrowserAction,
   browserSnapshot,
@@ -51,6 +52,7 @@ type ExecuteToolInput = {
 
 const pendingApprovals = new Map<string, PendingApproval>()
 const previewCache = new Map<string, AssistantToolPreview>()
+const runApprovalGrants = new Map<string, ApprovalGrant>()
 const webExtractCache = new Map<string, { result: WebExtractResult; expiresAt: number }>()
 const webArchivePreviewCache = new Map<string, { result: WebExtractResult; preview: WebArchivePreview }>()
 const failureCounts = new Map<string, number>()
@@ -61,6 +63,17 @@ let deltaFrame: number | undefined
 
 const now = () => Date.now()
 const dispatch = (event: WorkAssistantEvent) => useWorkAssistantStore.getState().dispatch(event)
+
+function runApprovalKey(runId: string, preview: AssistantToolPreview) {
+  const scope = Array.isArray(preview.scope) ? preview.scope.filter(Boolean).sort().join('|') : ''
+  return `${runId}:${scope}`
+}
+
+function clearRunApprovalGrants(runId: string) {
+  for (const key of runApprovalGrants.keys()) {
+    if (key.startsWith(`${runId}:`)) runApprovalGrants.delete(key)
+  }
+}
 
 export function resolveAssistantApproval(id: string, choice: AssistantApprovalChoice) {
   const pending = pendingApprovals.get(id)
@@ -271,6 +284,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     return guarded
   }
 
+  let activeApprovalKey: string | undefined
   try {
     if (input.signal?.aborted) throw new DOMException('Run cancelled', 'AbortError')
     let preview: AssistantToolPreview | undefined
@@ -310,15 +324,32 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
 
     if (preview) {
       const risk = effectiveRisk(manifest.defaultRisk, preview.risk)
-      const request: AssistantApprovalRequest = {
-        ...preview,
-        runId: input.runId,
-        toolCallId: call.id,
-        reason: preview.impactSummary,
-        allowedChoices: approvalChoices(risk),
+      const approvalKey =
+        call.name === 'file_apply_batch' && Array.isArray(preview.scope) && preview.scope.length
+          ? runApprovalKey(input.runId, preview)
+          : undefined
+      activeApprovalKey = approvalKey
+      const cachedGrant = approvalKey ? runApprovalGrants.get(approvalKey) : undefined
+      const grantIsFresh = cachedGrant && (cachedGrant.expires > 10_000_000_000
+        ? cachedGrant.expires > now()
+        : cachedGrant.expires * 1000 > now())
+      if (cachedGrant && !grantIsFresh && approvalKey) {
+        runApprovalGrants.delete(approvalKey)
       }
-      emit({ type: 'approval.required', runId: input.runId, request, at: now() })
-      const choice = await waitForApproval(request, input.signal)
+
+      let choice: AssistantApprovalChoice = 'run'
+      let nativeGrant: ApprovalGrant | undefined = grantIsFresh ? cachedGrant : undefined
+      if (!nativeGrant) {
+        const request: AssistantApprovalRequest = {
+          ...preview,
+          runId: input.runId,
+          toolCallId: call.id,
+          reason: preview.impactSummary,
+          allowedChoices: approvalChoices(risk),
+        }
+        emit({ type: 'approval.required', runId: input.runId, request, at: now() })
+        choice = await waitForApproval(request, input.signal)
+      }
       if (choice === 'deny') {
         if (manifest.executor === 'browser_bridge') {
           await rejectBrowserAction(preview.id, input.runId).catch(() => undefined)
@@ -330,8 +361,11 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
 
       emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '审批通过，正在执行', at: now() })
       if (call.name === 'file_apply_batch') {
-        const grant = await approveWorkAssistantAction(preview.id, input.runId, choice)
-        const data = await executeWorkAssistantAction(preview.id, grant.token)
+        nativeGrant ??= await approveWorkAssistantAction(preview.id, input.runId, choice)
+        if (choice === 'run' && approvalKey) {
+          runApprovalGrants.set(approvalKey, nativeGrant)
+        }
+        const data = await executeWorkAssistantAction(preview.id, nativeGrant.token)
         const failed = data.failed.length > 0
         const result = {
           ok: !failed && !data.cancelled,
@@ -339,6 +373,9 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
           data: data as unknown as Record<string, unknown>,
           errorCode: failed ? 'partial_transaction' : data.cancelled ? 'cancelled' : undefined,
           recoverable: failed || data.cancelled,
+        }
+        if (!result.ok && approvalKey && (result.errorCode === 'stale_preview' || result.errorCode === 'blocked')) {
+          runApprovalGrants.delete(approvalKey)
         }
         emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
@@ -391,7 +428,9 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
     return result
   } catch (error) {
+    if (activeApprovalKey) runApprovalGrants.delete(activeApprovalKey)
     if (error instanceof DOMException && error.name === 'AbortError') {
+      clearRunApprovalGrants(input.runId)
       await cancelWorkAssistantRun(input.runId).catch(() => undefined)
       const cancelled = { ok: false, summary: '运行已取消。', errorCode: 'cancelled', recoverable: true }
       emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: cancelled, at: now() })
@@ -451,6 +490,9 @@ export function dispatchOrderedWorkAssistantEvent(event: WorkAssistantEvent) {
   if (event.type === 'message.delta') queueWorkAssistantDelta(event)
   else {
     flushRunDeltas(event.runId)
+    if (event.type === 'run.cancelled' || event.type === 'run.completed' || event.type === 'run.failed') {
+      clearRunApprovalGrants(event.runId)
+    }
     dispatch(event)
   }
 }
@@ -459,6 +501,7 @@ export function resetWorkAssistantRuntimeForTests() {
   flushAllWorkAssistantDeltas()
   pendingApprovals.clear()
   previewCache.clear()
+  runApprovalGrants.clear()
   webExtractCache.clear()
   webArchivePreviewCache.clear()
   failureCounts.clear()

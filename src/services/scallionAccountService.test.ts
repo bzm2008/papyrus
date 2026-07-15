@@ -247,6 +247,7 @@ describe('refreshScallionModels', () => {
 
     const models = await refreshScallionModels()
 
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toContain('/models?include_unavailable=1')
     expect(models).toHaveLength(2)
     expect(models[0]).toEqual(expect.objectContaining({ id: 'agnes-2.0-flash', available: true }))
     expect(models[1]).toEqual(

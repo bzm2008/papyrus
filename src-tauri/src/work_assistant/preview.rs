@@ -316,6 +316,7 @@ const MAX_OPERATIONS: usize = 200;
 const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const PREVIEW_LIFETIME_SECONDS: u64 = 5 * 60;
 const APPROVAL_LIFETIME_SECONDS: u64 = 5 * 60;
+const MAX_RUN_APPROVAL_ITEMS: u32 = 10_000;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CalculatedPreview {
@@ -384,6 +385,7 @@ pub fn create_native_file_preview(
         impact_summary: format!("{} 项文件操作", preview.operation_count),
         reversible,
         expires_at: preview.expires,
+        scope: vec![preview.root_id],
     })
 }
 
@@ -491,7 +493,40 @@ pub fn approve_batch_preview(
             "high-risk file operations only allow one-time approval",
         ));
     }
-    let max_count = request_from_payload(&preview.payload)?.operations.len() as u32;
+    if choice == ApprovalChoice::Run {
+        let existing = state
+            .approvals
+            .lock()
+            .map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?
+            .values()
+            .find(|approval| {
+                approval.run_scoped
+                    && approval.run == preview.run
+                    && approval.scope == preview.scope
+                    && approval.expires > unix_seconds()
+                    && approval.used_count < approval.max_count
+            })
+            .cloned();
+        if let Some(existing) = existing {
+            append_audit_entry(
+                state,
+                &AuditEntry::new(
+                    "file_operation_approval_reused",
+                    format!("preview={};scope={:?}", preview.id, preview.scope),
+                ),
+            )?;
+            return Ok(ApprovalGrant {
+                token: existing.token,
+                preview_id: preview.id.clone(),
+                expires: existing.expires,
+            });
+        }
+    }
+    let max_count = if choice == ApprovalChoice::Run {
+        MAX_RUN_APPROVAL_ITEMS
+    } else {
+        request_from_payload(&preview.payload)?.operations.len() as u32
+    };
 
     let choice_label = match choice {
         ApprovalChoice::Once => "once",
@@ -510,7 +545,9 @@ pub fn approve_batch_preview(
             .approvals
             .lock()
             .map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?
-            .retain(|_, approval| approval.preview != preview.id);
+            .retain(|_, approval| {
+                !(approval.run == preview.run && approval.scope == preview.scope)
+            });
         return Err(WorkAssistantError::blocked(
             "file operation approval was denied",
         ));
@@ -535,6 +572,7 @@ pub fn approve_batch_preview(
                 run: preview.run,
                 scope: preview.scope,
                 once: choice == ApprovalChoice::Once,
+                run_scoped: choice == ApprovalChoice::Run,
                 expires: grant.expires,
                 max_count,
                 used_count: 0,

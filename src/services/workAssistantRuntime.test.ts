@@ -58,6 +58,63 @@ describe('work assistant runtime', () => {
     expect(invoke.mock.calls.map(([command]) => command)).toContain('work_assistant_execute')
   })
 
+  it('reuses a reversible run approval for the same file scope without prompting again', async () => {
+    let previewNumber = 0
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_preview') {
+        previewNumber += 1
+        return { id: `preview-${previewNumber}`, revision: '1', risk: 'reversible', title: '整理文件', targetSummary: 'Downloads', impactSummary: '移动文件', reversible: true, scope: ['downloads'], expiresAt: Date.now() + 60_000 }
+      }
+      if (command === 'work_assistant_approve') return { token: `token-${previewNumber}`, previewId: `preview-${previewNumber}`, expires: Date.now() + 60_000 }
+      if (command === 'work_assistant_execute') return { completed: [{ index: 0 }], skipped: [], failed: [], remaining: [], cancelled: false }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const args = { rootId: 'downloads', conflictPolicy: 'rename', operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'PDF/a.pdf' }] }
+
+    await executeAssistantToolCall({ runId: 'run-scope', toolCall: call('file_plan_batch', args, 'plan-1') })
+    const firstApply = executeAssistantToolCall({ runId: 'run-scope', toolCall: call('file_apply_batch', { previewId: 'preview-1' }, 'apply-1') })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('preview-1', 'run')).toBe(true)
+    await expect(firstApply).resolves.toMatchObject({ ok: true })
+
+    await executeAssistantToolCall({ runId: 'run-scope', toolCall: call('file_plan_batch', args, 'plan-2') })
+    const secondApply = executeAssistantToolCall({ runId: 'run-scope', toolCall: call('file_apply_batch', { previewId: 'preview-2' }, 'apply-2') })
+    await Promise.resolve()
+
+    expect(resolveAssistantApproval('preview-2', 'deny')).toBe(false)
+    await expect(secondApply).resolves.toMatchObject({ ok: true })
+    expect(invoke.mock.calls.filter(([command]) => command === 'work_assistant_approve')).toHaveLength(1)
+  })
+
+  it('clears a run approval after cancellation so the next scope needs confirmation', async () => {
+    let previewNumber = 0
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_preview') {
+        previewNumber += 1
+        return { id: `cancel-preview-${previewNumber}`, revision: '1', risk: 'reversible', title: '整理文件', targetSummary: 'Downloads', impactSummary: '移动文件', reversible: true, scope: ['downloads'], expiresAt: Date.now() + 60_000 }
+      }
+      if (command === 'work_assistant_approve') return { token: `cancel-token-${previewNumber}`, previewId: `cancel-preview-${previewNumber}`, expires: Date.now() + 60_000 }
+      if (command === 'work_assistant_execute') return { completed: [{ index: 0 }], skipped: [], failed: [], remaining: [], cancelled: false }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const args = { rootId: 'downloads', conflictPolicy: 'rename', operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'PDF/a.pdf' }] }
+
+    await executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_plan_batch', args, 'cancel-plan-1') })
+    const firstApply = executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_apply_batch', { previewId: 'cancel-preview-1' }, 'cancel-apply-1') })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('cancel-preview-1', 'run')).toBe(true)
+    await expect(firstApply).resolves.toMatchObject({ ok: true })
+
+    dispatchOrderedWorkAssistantEvent({ type: 'run.cancelled', runId: 'run-cancel-scope', at: Date.now() })
+    await executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_plan_batch', args, 'cancel-plan-2') })
+    const secondApply = executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_apply_batch', { previewId: 'cancel-preview-2' }, 'cancel-apply-2') })
+    await Promise.resolve()
+    expect(resolveAssistantApproval('cancel-preview-2', 'deny')).toBe(true)
+    await expect(secondApply).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
+  })
+
   it('denies an approval without invoking the action', async () => {
     const invoke = vi.fn(async () => undefined)
     setWorkAssistantInvokerForTests(invoke)

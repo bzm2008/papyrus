@@ -282,10 +282,19 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
 
                 {scallionModels.length ? (
                   <section>
-                    <div className="mb-1 flex items-center justify-between px-1 text-[11px] font-medium uppercase text-[#9d988a]">
-                      <span>主站模型目录</span>
-                      <span>{scallionModels.length} 个</span>
-                    </div>
+                    {(() => {
+                      const restrictedCount = scallionModels.filter((model) => !getScallionModelAccess(model).usable).length
+                      const availableCount = scallionModels.length - restrictedCount
+
+                      return (
+                        <div className="mb-1 flex items-center justify-between px-1 text-[11px] font-medium uppercase text-[#9d988a]">
+                          <span>主站模型目录</span>
+                          <span>
+                            可用 {availableCount} · 受限 {restrictedCount}
+                          </span>
+                        </div>
+                      )
+                    })()}
                     <div className="space-y-1">
                       {scallionModels.map((model) => {
                         const active =

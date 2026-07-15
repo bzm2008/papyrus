@@ -70,6 +70,8 @@ pub struct AssistantToolPreview {
     pub impact_summary: String,
     pub reversible: bool,
     pub expires_at: u64,
+    #[serde(default)]
+    pub scope: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -425,6 +427,7 @@ mod tests {
             impact_summary: "1 项文件操作".into(),
             reversible: true,
             expires_at: 1,
+            scope: vec!["root-1".into()],
         };
 
         let request_value = serde_json::to_value(request).unwrap();

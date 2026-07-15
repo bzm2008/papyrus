@@ -86,7 +86,7 @@ pub fn execute_batch_file_operations(
         validate_preview_fresh(state, &execution.preview_id, execution.revision)?;
     let required_count = u32::try_from(request.operations.len())
         .map_err(|_| WorkAssistantError::blocked("preview has too many operations"))?;
-    let approval = validate_approval(state, &execution, required_count)?;
+    let approval = validate_approval(state, &execution, &preview, required_count)?;
     if is_run_cancelled(state, &request.run_id)? {
         append_cancellation_audit_once(state, &request.run_id, &preview.id)?;
         return Ok(cancelled_result(&request.operations, 0));
@@ -337,6 +337,7 @@ fn safe_command_error(error: WorkAssistantError) -> AssistantErrorPayload {
 fn validate_approval(
     state: &WorkAssistantState,
     execution: &BatchExecutionRequest,
+    preview: &StoredPreview,
     required_count: u32,
 ) -> Result<StoredApproval, WorkAssistantError> {
     let approval = state
@@ -346,9 +347,12 @@ fn validate_approval(
         .get(&execution.token)
         .cloned()
         .ok_or_else(|| WorkAssistantError::blocked("a valid native approval token is required"))?;
+    let preview_matches = approval.preview == execution.preview_id;
+    let run_scope_matches =
+        approval.run_scoped && approval.run == preview.run && approval.scope == preview.scope;
     if approval.token != execution.token
-        || approval.preview != execution.preview_id
-        || approval.revision != execution.revision
+        || (!preview_matches && !run_scope_matches)
+        || (!approval.run_scoped && approval.revision != execution.revision)
         || approval.expires <= unix_seconds()
         || approval
             .used_count
@@ -376,8 +380,11 @@ fn consume_approval(
     let approval = approvals
         .get_mut(&execution.token)
         .ok_or_else(|| WorkAssistantError::blocked("approval token is no longer valid"))?;
-    if approval.preview != preview.id
-        || approval.revision != preview.revision
+    let preview_matches = approval.preview == preview.id;
+    let run_scope_matches =
+        approval.run_scoped && approval.run == preview.run && approval.scope == preview.scope;
+    if (!preview_matches && !run_scope_matches)
+        || (!approval.run_scoped && approval.revision != preview.revision)
         || approval.run != preview.run
         || approval.scope != preview.scope
         || approval.expires <= unix_seconds()
@@ -634,6 +641,73 @@ mod tests {
         // The opaque preview is consumed with the first execution, so the replay fails
         // closed at the freshness boundary before any second mutation can be prepared.
         assert_eq!(second.code, "stale_preview");
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn run_approval_reuses_one_scope_token_across_previews() {
+        let path = directory();
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("source.txt"), "source").unwrap();
+        let state = state(&path);
+        let first = create_batch_preview(
+            &state,
+            BatchPreviewRequest {
+                run_id: "run-scope".into(),
+                root_id: "root".into(),
+                operations: vec![operation(
+                    FileOperationKind::Copy,
+                    Some("source.txt"),
+                    Some("first.txt"),
+                )],
+                conflict_policy: ConflictPolicy::Skip,
+            },
+        )
+        .unwrap();
+        let grant =
+            approve_batch_preview(&state, &first.preview_id, "run-scope", ApprovalChoice::Run)
+                .unwrap();
+        let first_result = execute_batch_file_operations(
+            &state,
+            BatchExecutionRequest {
+                preview_id: first.preview_id,
+                revision: first.revision,
+                token: grant.token.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(first_result.completed.len(), 1);
+
+        let second = create_batch_preview(
+            &state,
+            BatchPreviewRequest {
+                run_id: "run-scope".into(),
+                root_id: "root".into(),
+                operations: vec![operation(
+                    FileOperationKind::Copy,
+                    Some("source.txt"),
+                    Some("second.txt"),
+                )],
+                conflict_policy: ConflictPolicy::Skip,
+            },
+        )
+        .unwrap();
+        let reused =
+            approve_batch_preview(&state, &second.preview_id, "run-scope", ApprovalChoice::Run)
+                .unwrap();
+        assert_eq!(reused.token, grant.token);
+        let second_result = execute_batch_file_operations(
+            &state,
+            BatchExecutionRequest {
+                preview_id: second.preview_id,
+                revision: second.revision,
+                token: reused.token,
+            },
+        )
+        .unwrap();
+        assert_eq!(second_result.completed.len(), 1);
+        assert!(path.join("first.txt").exists());
+        assert!(path.join("second.txt").exists());
         fs::remove_dir_all(path).unwrap();
     }
 

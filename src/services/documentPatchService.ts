@@ -16,6 +16,12 @@ type CreatePatchInput = {
 const writeIntentPattern =
   /(写|写一|写个|写成|写出|写下|创作|生成|起草|成稿|草稿|初稿|正文|文稿|文章|小说|中篇|长篇|章节|续写|补写|扩写|改写|重写|插入|写入|放进|放到|加入文稿|更新文稿|替换|完整章节|完整结果|append|insert|replace|draft|rewrite|continue|write|novel|chapter)/i
 
+const reviewOnlyPattern =
+  /(?:审阅|审查|检查|评审|评估|点评|批评|找问题|问题清单|review|critique|proofread|check|evaluate|assess)/i
+
+const explicitRewritePattern =
+  /(?:重写|改写|润色|修订|改成|替换|插入|写入|生成|起草|补写|续写|扩写|rewrite|revise|polish|replace|insert|draft|write)/i
+
 export function queueDocumentPatch(input: CreatePatchInput) {
   const content = input.content.trim()
 
@@ -61,7 +67,28 @@ export function rejectDocumentPatch() {
 }
 
 export function shouldCreateDocumentPatch(prompt: string) {
+  if (isReviewOnlyRequest(prompt)) {
+    return false
+  }
+
   return writeIntentPattern.test(prompt)
+}
+
+/**
+ * Resolve a model-proposed write intent against the local safety boundary. A review-only request
+ * is never allowed to become a document patch merely because the model or a broad article noun
+ * requested one.
+ */
+export function resolveDocumentWriteIntent(prompt: string, requested = false) {
+  if (isReviewOnlyRequest(prompt)) {
+    return false
+  }
+
+  return requested || shouldCreateDocumentPatch(prompt)
+}
+
+export function isReviewOnlyRequest(prompt: string) {
+  return reviewOnlyPattern.test(prompt) && !explicitRewritePattern.test(prompt)
 }
 
 export function shouldCreateArticleFromPrompt(prompt: string) {

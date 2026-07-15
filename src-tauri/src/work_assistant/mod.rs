@@ -57,6 +57,8 @@ pub struct StoredApproval {
     pub run: String,
     pub scope: Vec<String>,
     pub once: bool,
+    #[serde(default)]
+    pub run_scoped: bool,
     pub expires: u64,
     pub max_count: u32,
     pub used_count: u32,

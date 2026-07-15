@@ -8,14 +8,14 @@
 
 **Tech Stack:** GitHub Actions, Node.js 22, Rust 1.95.0 (package MSRV 1.88.0), Tauri 2, Vitest 4, Playwright Chromium, NSIS, DMG/App bundle, AppImage/DEB, cross-platform Node release scripts.
 
-## Completion Audit (2026-07-14)
+## Completion Audit (2026-07-15)
 
 `[x]` means the files, local evidence, or locally completed commit were verified. The consolidated
-local implementation commit is `14226ef`. Remote CI, downloaded smoke artifacts,
-and every real-device record remain unchecked by design. The aggregate `ci:desktop` rehearsal,
-WPS production build, Browser Bridge Chromium E2E, full Rust suite, doctor probes, and Windows
-portable check were rerun after concurrent edits stopped and passed. The release report keeps
-remote and device items `pending` until an authorized push and physical-device runs exist.
+local implementation commit is the local `feat/plan-completion` worktree pending commit. The
+aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E, full TypeScript
+suite, 129-test portable Rust gate, doctor probes, and Windows portable check pass locally. Remote
+package smoke must still be rerun after the Linux artifact exclusion reaches the default branch;
+real-device records and production signing remain `pending`/`blocked`.
 
 ---
 
@@ -498,7 +498,7 @@ The feature branch was pushed and Desktop CI run [29351096131](https://github.co
 
 - [ ] **Step 3: Trigger package smoke builds**
 
-Run `desktop-packages.yml` through `workflow_dispatch`. Download every artifact and verify it contains the expected platform package plus the Browser Bridge ZIP. Current blocker: the workflow exists only on the feature branch and is not registered on the default branch, so GitHub Actions returns 404 for dispatch; do not mark this step complete without artifacts.
+Run `desktop-packages.yml` through `workflow_dispatch`. Download every artifact and verify it contains the expected platform package plus the Browser Bridge ZIP. The prior run `29385738173` exposed a Linux AppDir case collision; the local workflow now excludes the duplicate lowercase icon and requires a fresh remote run before this step can be marked complete.
 
 - [ ] **Step 4: Complete real-device records**
 

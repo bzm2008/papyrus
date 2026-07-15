@@ -16,6 +16,7 @@ import {
   extractDraftText,
   inferPatchOperation,
   queueDocumentPatch,
+  resolveDocumentWriteIntent,
   shouldCreateArticleFromPrompt,
   shouldCreateDocumentPatch,
 } from './documentPatchService'
@@ -1676,7 +1677,10 @@ function sanitizePlan(
   const toolCalls = normalizeToolCalls(input.toolCalls ?? [])
   const needsWebSearch = Boolean(input.needsWebSearch || toolCalls.some((call) => call.name === 'web_search'))
   const localWriteIntent = shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt)
-  const writeIntent = Boolean(input.writeIntent ?? fallback.writeIntent) || localWriteIntent
+  const writeIntent = resolveDocumentWriteIntent(
+    prompt,
+    Boolean(input.writeIntent ?? fallback.writeIntent) || localWriteIntent,
+  )
 
   if (needsWebSearch && !toolCalls.some((call) => call.name === 'web_search')) {
     toolCalls.unshift({
@@ -1814,7 +1818,7 @@ function createFallbackPlan(
   ])
   const toolCalls: AgentRunPlan['toolCalls'] = []
   const needsWebSearch = hasRealtimeOrExternalIntent(prompt)
-  const writeIntent = shouldCreateDocumentPatch(prompt) || hasLongformIntent(prompt)
+  const writeIntent = resolveDocumentWriteIntent(prompt, hasLongformIntent(prompt))
   const complexLongform = hasLongformIntent(prompt)
   const longformAgents = selectLongformAgents(prompt, thinkingEffort)
 

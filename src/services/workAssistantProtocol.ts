@@ -6,7 +6,7 @@ export type AssistantApprovalChoice = 'once' | 'run' | 'deny'
 export type AssistantCapabilityStatus = { name: string; toolset: 'workspace' | 'desktop' | 'browser' | 'project'; available: boolean; reason?: string; platform: DesktopPlatform }
 export type NativePreviewRequest = { runId: string; toolCallId: string; toolName: string; arguments: Record<string, unknown> }
 export type AssistantToolCall = { id: string; runId: string; name: string; intent: string; arguments: Record<string, unknown>; status: AssistantToolStatus; startedAt: number; endedAt?: number; preview?: AssistantToolPreview; progress?: { message: string; completed?: number; total?: number }; result?: AssistantToolResult }
-export type AssistantToolPreview = { id: string; revision: string; risk: AssistantRiskLevel; title: string; targetSummary: string; impactSummary: string; reversible: boolean; expiresAt: number }
+export type AssistantToolPreview = { id: string; revision: string; risk: AssistantRiskLevel; title: string; targetSummary: string; impactSummary: string; reversible: boolean; expiresAt: number; scope?: string[] }
 export type AssistantApprovalRequest = AssistantToolPreview & {
   runId: string
   toolCallId: string

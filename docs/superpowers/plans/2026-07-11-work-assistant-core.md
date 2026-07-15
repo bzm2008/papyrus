@@ -8,13 +8,14 @@
 
 **Tech Stack:** Tauri 2, Rust 2021, React 19, TypeScript 6, Zustand 5, Vitest 4, Testing Library, `trash`, `sysinfo`, `sha2`, `uuid`, `dunce`, `open`.
 
-## Implementation Audit (2026-07-14)
+## Implementation Audit (2026-07-15)
 
 `[x]` marks implementation, test, or locally completed commit steps. The consolidated local
-commit is `14226ef`. The current local evidence is 35 desktop unit-test
-files/166 tests, 116 Rust tests, and a passing Windows portable check; it also includes the
-structured `/goal` cancellation regression. A real-user-file smoke transaction and cross-platform
-device evidence are not substitutes for the release gate and remain pending in the release report.
+commit is the local `feat/plan-completion` worktree pending commit. The current local evidence is
+36 desktop unit-test files/179 tests and 129 Rust tests through the portable MSVC gate. This audit
+also includes review-only patch suppression and run-scoped approval reuse bound to `runId + scope`,
+with cancellation invalidating all matching approvals. A real-user-file smoke transaction and
+cross-platform device evidence remain pending in the release report.
 
 ---
 

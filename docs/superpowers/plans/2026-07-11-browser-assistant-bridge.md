@@ -8,15 +8,16 @@
 
 **Tech Stack:** Tauri 2, Rust 2021, React 19, TypeScript 6, Chromium Manifest V3, Vite 8, Vitest 4, `tokio`, bounded `tungstenite`, direct URL/DNS policy helpers, existing `reqwest` and `scraper`, and a deterministic JavaScript extension builder.
 
-## Implementation Audit (2026-07-14)
+## Implementation Audit (2026-07-15)
 
 `[x]` below means the implementation, test, or locally completed commit step is backed by current
-evidence. The consolidated local implementation commit is `14226ef`.
+evidence. The consolidated local implementation commit is the local `feat/plan-completion`
+worktree pending commit.
 The complete canonical href is now bound to the native preview through an opaque fingerprint, and
 execution re-checks the current element target plus public-URL/DNS policy. Chromium regression
 coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is 33
 tests, including an injected resolver/fetcher redirect fixture, token replay, wrong-tab,
-cross-origin, and oversized-message cases. Native browser action completion/failure records append
+cross-origin, oversized-message, credential-link, and executable-download cases. Native browser action completion/failure records append
 a redacted entry to the existing audit JSONL; browser or extension restart still requires explicit
 re-pairing because the one-time token is consumed by design.
 
@@ -26,7 +27,8 @@ the security contract is covered by the same origin, pairing, heartbeat, and 1 M
 extension is a plain MV3 JavaScript bundle copied by the deterministic builder, so CRXJS and
 `@types/chrome` are not runtime dependencies. Chromium owns final DNS resolution for a clicked
 link; native preview and execution perform public-URL checks twice, but cannot pin the browser's
-socket without broad browser permissions or an unsafe proxy.
+socket without broad browser permissions or an unsafe proxy. The legacy direct Tauri pairing
+command now fails closed; only the loopback WebSocket handshake can establish a browser session.
 
 ---
 

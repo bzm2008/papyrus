@@ -112,7 +112,10 @@ async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<Scalli
   let models: Awaited<ReturnType<typeof fetchScallionProxyModels>>
 
   try {
-    models = await fetchScallionProxyModels(provider)
+    // The selector must be able to explain plan restrictions, so always ask
+    // the gateway for its complete public catalog. The gateway still remains
+    // the authority for which entries are callable.
+    models = await fetchScallionProxyModels(provider, { includeUnavailable: true })
   } catch (error) {
     if (isUnauthorizedError(error) && useAppStore.getState().scallionToken === tokenAtRequest) {
       useAppStore.getState().expireScallionSession()

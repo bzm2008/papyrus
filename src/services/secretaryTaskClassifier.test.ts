@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { classifySecretaryTask } from './secretaryTaskClassifier'
+import { shouldCreateDocumentPatch } from './documentPatchService'
 
 describe('classifySecretaryTask domain routing', () => {
   it('routes local file and desktop requests to the controlled work assistant', () => {
@@ -20,5 +21,11 @@ describe('classifySecretaryTask domain routing', () => {
 
   it('preserves ordinary writing classification', () => {
     expect(classifySecretaryTask('续写这个小说章节', { writeIntent: true }).domain).toBe('writing')
+  })
+
+  it('keeps review-only article requests conversational without a patch', () => {
+    const prompt = '审阅这篇文章，检查正文结构并列出问题'
+    expect(classifySecretaryTask(prompt).domain).toBe('writing')
+    expect(shouldCreateDocumentPatch(prompt)).toBe(false)
   })
 })

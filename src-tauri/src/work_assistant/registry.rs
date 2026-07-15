@@ -334,17 +334,24 @@ fn record_cancelled_run(state: &WorkAssistantState, run: String) -> Result<(), W
         .cancelled_runs
         .lock()
         .map_err(|_| WorkAssistantError::protocol("cancelled runs lock is unavailable"))?;
-    if runs.contains(&run) {
-        return Ok(());
-    }
-    if runs.len() >= MAX_CANCELLED_RUNS {
+    if !runs.contains(&run) && runs.len() >= MAX_CANCELLED_RUNS {
         return Err(WorkAssistantError {
             code: "blocked".into(),
             message: "cancelled run capacity has been reached".into(),
             recoverable: true,
         });
     }
-    runs.insert(run);
+    runs.insert(run.clone());
+    drop(runs);
+
+    // A run-scoped approval is valid only for the live run. Cancellation must
+    // invalidate it even when the native executor has not observed the cancel
+    // flag yet.
+    state
+        .approvals
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?
+        .retain(|_, approval| approval.run != run);
 
     Ok(())
 }
@@ -359,6 +366,7 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::work_assistant::StoredApproval;
     use std::{
         collections::{HashMap, HashSet},
         path::PathBuf,
@@ -471,6 +479,30 @@ mod tests {
 
         let oversized = record_cancelled_run(&state, "a".repeat(129)).unwrap_err();
         assert_eq!(oversized.code, "blocked");
+    }
+
+    #[test]
+    fn cancellation_invalidates_run_scoped_approvals() {
+        let state = test_state();
+        state.approvals.lock().unwrap().insert(
+            "token-run".into(),
+            StoredApproval {
+                token: "token-run".into(),
+                preview: "preview".into(),
+                revision: 1,
+                run: "cancel-me".into(),
+                scope: vec!["root".into()],
+                once: false,
+                run_scoped: true,
+                expires: u64::MAX,
+                max_count: 100,
+                used_count: 0,
+            },
+        );
+
+        record_cancelled_run(&state, "cancel-me".into()).unwrap();
+
+        assert!(state.approvals.lock().unwrap().is_empty());
     }
 
     #[test]

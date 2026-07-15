@@ -70,6 +70,7 @@ async function fixture() {
         retention-days: 7
         path: |
           src-tauri/target/release/bundle
+          !src-tauri/target/release/bundle/appimage/Papyrus.AppDir/papyrus.png
           artifacts/browser-bridge/*.zip
     # Production signing runs only in a protected release workflow with credentials.
     # Unsigned smoke artifacts are never presented as production releases.
@@ -92,6 +93,22 @@ test('release checks pass for a complete fixture in both phases', async () => {
   try {
     assert.deepEqual((await runReleaseChecks({ rootDir, phase: 'local' })).failures, [])
     assert.deepEqual((await runReleaseChecks({ rootDir, phase: 'release' })).failures, [])
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release checks require the Linux AppDir case-collision exclusion', async () => {
+  const rootDir = await fixture()
+  try {
+    const workflowPath = path.join(rootDir, '.github', 'workflows', 'desktop-packages.yml')
+    const workflow = await fs.readFile(workflowPath, 'utf8')
+    await fs.writeFile(
+      workflowPath,
+      workflow.replace('          !src-tauri/target/release/bundle/appimage/Papyrus.AppDir/papyrus.png\n', ''),
+    )
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('case-colliding Linux AppDir icon')))
   } finally {
     await cleanup(rootDir)
   }
