@@ -14,6 +14,20 @@ afterEach(() => {
 })
 
 describe('normalizeQuota', () => {
+  it('falls back to the Free plan when legacy account data has no plan fields', () => {
+    const quota = normalizeQuota({ balance: 12 })
+
+    expect(quota.planKey).toBe('free')
+    expect(quota.planName).toBe('Free')
+    expect(quota.pointsBalance).toBe(12)
+  })
+
+  it('normalizes the legacy none entitlement to the Free display name', () => {
+    expect(
+      quotaFromUser({ id: 1, username: 'demo', points: 4, member_type: 'none' }),
+    ).toEqual(expect.objectContaining({ planKey: 'free', planName: 'Free' }))
+  })
+
   it('preserves member type and expiry as a plan fallback', () => {
     expect(
       quotaFromUser({
