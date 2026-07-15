@@ -73,6 +73,7 @@ export function MaintenanceConsole() {
   const [testingProviderId, setTestingProviderId] = useState<ProviderId | null>(null)
   const [confirmAction, setConfirmAction] = useState<'clear' | 'rebuild' | null>(null)
   const [memoryClearNotice, setMemoryClearNotice] = useState<MemoryClearNotice | null>(null)
+  const [memoryUsageNotice, setMemoryUsageNotice] = useState<MemoryClearNotice | null>(null)
   const maintenanceTab = useAppStore((state) => state.maintenanceTab)
   const setMaintenanceTab = useAppStore((state) => state.setMaintenanceTab)
   const maintenanceChecks = useAppStore((state) => state.maintenanceChecks)
@@ -141,7 +142,12 @@ export function MaintenanceConsole() {
       runSingleCheck('sqlite', checkSqliteStatus()),
       runSingleCheck('llm', checkDefaultModelLatency(activeProvider)),
       getMemoryUsage().then((result) => {
-        setMemoryUsageBytes(result.bytes ?? 0)
+        if (result.status === 'ok' && typeof result.bytes === 'number') {
+          setMemoryUsageBytes(result.bytes)
+          setMemoryUsageNotice(null)
+        } else if (result.status !== 'ok') {
+          setMemoryUsageNotice(toMemoryUsageNotice(result))
+        }
       }),
     ])
 
@@ -364,6 +370,7 @@ export function MaintenanceConsole() {
                 agentMemoryRecords={agentMemoryRecords}
                 agentRuns={agentRuns}
                 memoryClearNotice={memoryClearNotice}
+                memoryUsageNotice={memoryUsageNotice}
                 onClear={() => {
                   setMemoryClearNotice(null)
                   setConfirmAction('clear')
@@ -590,6 +597,7 @@ function MemoryPanel({
   agentMemoryRecords,
   agentRuns,
   memoryClearNotice,
+  memoryUsageNotice,
   onClear,
   onRebuild,
 }: {
@@ -597,12 +605,14 @@ function MemoryPanel({
   agentMemoryRecords: ReturnType<typeof useAppStore.getState>['agentMemoryRecords']
   agentRuns: ReturnType<typeof useAppStore.getState>['agentRuns']
   memoryClearNotice: MemoryClearNotice | null
+  memoryUsageNotice: MemoryClearNotice | null
   onClear: () => void
   onRebuild: () => void
 }) {
   const activeMemories = agentMemoryRecords.filter((memory) => memory.status !== 'archived')
   const recentMemories = activeMemories.slice(0, 5)
   const recentRuns = agentRuns.slice(0, 5)
+  const visibleNotice = memoryClearNotice ?? memoryUsageNotice
 
   return (
     <section className="mx-auto max-w-4xl">
@@ -612,7 +622,7 @@ function MemoryPanel({
         description="查看本地向量库占用，并管理长期记忆和项目索引。"
       />
 
-      {memoryClearNotice ? <MemoryClearStatus notice={memoryClearNotice} /> : null}
+      {visibleNotice ? <MemoryClearStatus notice={visibleNotice} /> : null}
 
       <div className="mt-5 rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-5 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">
         <div className="flex items-center justify-between gap-4">
@@ -1214,10 +1224,25 @@ function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice 
   }
 }
 
+function toMemoryUsageNotice(result: MaintenanceProbeResult): MemoryClearNotice {
+  const status = result.status === 'error' ? 'error' : 'warning'
+  const fallback =
+    status === 'error'
+      ? '未能读取本地记忆占用，已保留当前显示。'
+      : '当前环境未执行本地记忆统计。'
+
+  return {
+    status,
+    title: status === 'error' ? '存储统计失败' : '存储统计未执行',
+    message: safeMemoryClearMessage(result.message, fallback),
+  }
+}
+
 function safeMemoryClearMessage(message: string, fallback: string) {
   const normalized = message.replace(/\s+/g, ' ').trim()
   const unsafeDetail = [
-    /[a-z]:[\\/]/i,
+    /(?:^|[^a-z])[a-z]:[\\/]/i,
+    /:[\\/][\w.-]+(?:\/[\w.-]+)*/,
     /(?:^|[\s"'(])\/[\w.-]+(?:\/[\w.-]+)*/,
     /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
     /\bfile:(?:\/\/|\\\\)/i,

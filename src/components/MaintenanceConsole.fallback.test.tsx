@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { clearGlobalMemory } from '../services/maintenance'
+import { clearGlobalMemory, getMemoryUsage } from '../services/maintenance'
 import type { AgentMemoryRecord, AgentRunRecord } from '../stores/useAppStore'
 import { useAppStore } from '../stores/useAppStore'
 import { MaintenanceConsole } from './MaintenanceConsole'
@@ -17,7 +17,6 @@ vi.mock('../services/maintenance', async (importOriginal) => {
     checkBackendCommunication: vi.fn(async () => ({ status: 'ok', message: '桌面后端正常。' })),
     checkDefaultModelLatency: vi.fn(async () => ({ status: 'ok', message: '模型正常。' })),
     checkSqliteStatus: vi.fn(async () => ({ status: 'ok', message: '数据库正常。' })),
-    getMemoryUsage: vi.fn(() => new Promise<never>(() => undefined)),
   }
 })
 
@@ -82,6 +81,23 @@ afterEach(() => {
 })
 
 describe('MaintenanceConsole browser clear fallback', () => {
+  it('returns a non-executed memory usage warning without a byte count', async () => {
+    const result = await getMemoryUsage()
+
+    expect(invoke).toHaveBeenCalledWith('get_memory_usage')
+    expect(result).toMatchObject({ status: 'warning', message: '当前环境未执行本地记忆统计。' })
+    expect(result.bytes).toBeUndefined()
+  })
+
+  it('keeps persisted usage and renders a safe warning when browser memory usage cannot be read', async () => {
+    render(<MaintenanceConsole />)
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_memory_usage'))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('当前环境未执行本地记忆统计。')
+    expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
+  })
+
   it('returns a non-executed warning without a usage byte count', async () => {
     const result = await clearGlobalMemory()
 

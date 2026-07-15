@@ -92,9 +92,8 @@ export async function testModelConnection(provider: LlmProviderConfig) {
 
 export async function getMemoryUsage() {
   return invokeMaintenance('get_memory_usage', undefined, {
-    status: 'ok',
-    message: '浏览器预览模式：记忆目录将在桌面端统计。',
-    bytes: 0,
+    status: 'warning',
+    message: '当前环境未执行本地记忆统计。',
   })
 }
 
