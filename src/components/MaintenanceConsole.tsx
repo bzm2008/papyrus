@@ -27,6 +27,7 @@ import {
   getMemoryUsage,
   rebuildProjectIndex,
   testModelConnection,
+  type MaintenanceProbeResult,
 } from '../services/maintenance'
 import { getMaintenanceReadiness } from '../services/maintenanceReadiness'
 import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
@@ -61,10 +62,17 @@ const tabs: Array<{
   { id: 'memory', label: '存储与记忆', caption: '索引、缓存、RAG' },
 ]
 
+type MemoryClearNotice = {
+  status: MaintenanceProbeResult['status']
+  title: string
+  message: string
+}
+
 export function MaintenanceConsole() {
   const [checkingAll, setCheckingAll] = useState(false)
   const [testingProviderId, setTestingProviderId] = useState<ProviderId | null>(null)
   const [confirmAction, setConfirmAction] = useState<'clear' | 'rebuild' | null>(null)
+  const [memoryClearNotice, setMemoryClearNotice] = useState<MemoryClearNotice | null>(null)
   const maintenanceTab = useAppStore((state) => state.maintenanceTab)
   const setMaintenanceTab = useAppStore((state) => state.setMaintenanceTab)
   const maintenanceChecks = useAppStore((state) => state.maintenanceChecks)
@@ -195,11 +203,32 @@ export function MaintenanceConsole() {
       return
     }
 
-    const result = confirmAction === 'clear' ? await clearGlobalMemory() : await rebuildProjectIndex()
-
     if (confirmAction === 'clear') {
-      clearAgentMemory()
+      try {
+        const result = await clearGlobalMemory()
+
+        if (typeof result.bytes === 'number') {
+          setMemoryUsageBytes(result.bytes)
+        }
+
+        const notice = toMemoryClearNotice(result)
+        if (notice.status === 'ok') {
+          clearAgentMemory()
+        }
+        setMemoryClearNotice(notice)
+      } catch {
+        setMemoryClearNotice({
+          status: 'error',
+          title: '清理失败',
+          message: '清理未完成，当前本地记忆和运行记录已保留。',
+        })
+      }
+
+      setConfirmAction(null)
+      return
     }
+
+    const result = await rebuildProjectIndex()
 
     if (typeof result.bytes === 'number') {
       setMemoryUsageBytes(result.bytes)
@@ -336,7 +365,11 @@ export function MaintenanceConsole() {
                 memoryUsageBytes={memoryUsageBytes}
                 agentMemoryRecords={agentMemoryRecords}
                 agentRuns={agentRuns}
-                onClear={() => setConfirmAction('clear')}
+                memoryClearNotice={memoryClearNotice}
+                onClear={() => {
+                  setMemoryClearNotice(null)
+                  setConfirmAction('clear')
+                }}
                 onRebuild={() => setConfirmAction('rebuild')}
               />
             ) : null}
@@ -558,12 +591,14 @@ function MemoryPanel({
   memoryUsageBytes,
   agentMemoryRecords,
   agentRuns,
+  memoryClearNotice,
   onClear,
   onRebuild,
 }: {
   memoryUsageBytes: number
   agentMemoryRecords: ReturnType<typeof useAppStore.getState>['agentMemoryRecords']
   agentRuns: ReturnType<typeof useAppStore.getState>['agentRuns']
+  memoryClearNotice: MemoryClearNotice | null
   onClear: () => void
   onRebuild: () => void
 }) {
@@ -578,6 +613,8 @@ function MemoryPanel({
         title="存储与记忆"
         description="查看本地向量库占用，并管理长期记忆和项目索引。"
       />
+
+      {memoryClearNotice ? <MemoryClearStatus notice={memoryClearNotice} /> : null}
 
       <div className="mt-5 rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-5 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">
         <div className="flex items-center justify-between gap-4">
@@ -644,6 +681,30 @@ function MemoryPanel({
         />
       </div>
     </section>
+  )
+}
+
+function MemoryClearStatus({ notice }: { notice: MemoryClearNotice }) {
+  const theme =
+    notice.status === 'ok'
+      ? { icon: Check, className: 'border-[#b9d5bb] bg-[#edf5e9] text-[#315d37]' }
+      : notice.status === 'warning'
+        ? { icon: TriangleAlert, className: 'border-[#ead39b] bg-[#fff7e3] text-[#755813]' }
+        : { icon: ShieldAlert, className: 'border-[#e7b6a9] bg-[#fff0eb] text-[#923d2c]' }
+  const Icon = theme.icon
+
+  return (
+    <div
+      role="alert"
+      aria-live={notice.status === 'error' ? 'assertive' : 'polite'}
+      className={`mt-5 flex items-start gap-3 rounded-xl border p-4 ${theme.className}`}
+    >
+      <Icon size={18} className="mt-0.5 shrink-0" />
+      <div className="min-w-0">
+        <div className="text-sm font-semibold">{notice.title}</div>
+        <p className="mt-1 text-xs leading-5 opacity-90">{notice.message}</p>
+      </div>
+    </div>
   )
 }
 
@@ -1130,6 +1191,37 @@ function formatMaintenanceExpiry(value: string) {
 function formatMaintenanceSyncTime(value: number) {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleTimeString('zh-CN')
+}
+
+function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice {
+  switch (result.status) {
+    case 'ok':
+      return {
+        status: 'ok',
+        title: '记忆已清空',
+        message: safeMemoryClearMessage(result.message, '全局记忆已清空。'),
+      }
+    case 'warning':
+      return {
+        status: 'warning',
+        title: '清理未完成',
+        message: safeMemoryClearMessage(result.message, '清理未完整完成，当前本地记忆和运行记录已保留。'),
+      }
+    case 'error':
+      return {
+        status: 'error',
+        title: '清理失败',
+        message: safeMemoryClearMessage(result.message, '清理未完成，当前本地记忆和运行记录已保留。'),
+      }
+  }
+}
+
+function safeMemoryClearMessage(message: string, fallback: string) {
+  const normalized = message.replace(/\s+/g, ' ').trim()
+  const unsafeDetail =
+    /(?:[a-z]:[\\/]|(?:^|[\s"'(])[\\/](?:users|home|var|tmp|etc|private|mnt|opt|appdata|programdata)(?:[\\/]|$)|\b(?:stack trace|backtrace|panic|exception|permission denied|access denied|os error)\b|\b(?:error|exception)\s*:)/i
+
+  return normalized && normalized.length <= 240 && !unsafeDetail.test(normalized) ? normalized : fallback
 }
 
 function formatBytes(bytes: number) {
