@@ -232,13 +232,22 @@ fn check_sqlite_status(app: tauri::AppHandle) -> Result<MaintenanceStatus, Strin
 #[tauri::command]
 fn get_memory_usage(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> {
     let memory_dir = memory_dir(&app)?;
+    let storage = memory_storage_usage(&memory_dir)?;
     let ledger_bytes = secretary_ledger::ledger_size_for_app(&app)
         .map_err(|error| error.safe_message().to_string())?;
-    let bytes = directory_size(&memory_dir).saturating_add(ledger_bytes);
+    let bytes = storage.bytes.saturating_add(ledger_bytes);
 
     Ok(MaintenanceStatus {
-        status: "ok".into(),
-        message: "记忆目录与秘书账本统计完成".into(),
+        status: if storage.legacy_cleanup_pending {
+            "warning".into()
+        } else {
+            "ok".into()
+        },
+        message: if storage.legacy_cleanup_pending {
+            "记忆目录与秘书账本统计完成，旧记忆仍待清理".into()
+        } else {
+            "记忆目录与秘书账本统计完成".into()
+        },
         latency_ms: None,
         bytes: Some(bytes),
     })
@@ -551,17 +560,35 @@ struct MemoryStorageClearResult {
     legacy_cleanup_pending: bool,
 }
 
+struct MemoryStorageUsage {
+    bytes: u64,
+    legacy_cleanup_pending: bool,
+}
+
+const MEMORY_CLEAR_STAGING_PREFIX: &str = ".memory-clear-";
+
 fn clear_memory_storage(
     memory_dir: &Path,
     clear_ledger: impl FnOnce() -> Result<u64, secretary_ledger::LedgerError>,
+) -> Result<MemoryStorageClearResult, String> {
+    clear_memory_storage_with_staged_cleanup(memory_dir, clear_ledger, |staged| {
+        fs::remove_dir_all(staged)
+    })
+}
+
+fn clear_memory_storage_with_staged_cleanup(
+    memory_dir: &Path,
+    clear_ledger: impl FnOnce() -> Result<u64, secretary_ledger::LedgerError>,
+    remove_staged: impl Fn(&Path) -> std::io::Result<()>,
 ) -> Result<MemoryStorageClearResult, String> {
     let parent = memory_dir
         .parent()
         .ok_or_else(|| "清空本地记忆失败".to_string())?;
     fs::create_dir_all(parent).map_err(|_| "清空本地记忆失败".to_string())?;
+    retry_stale_memory_staging_cleanup(parent, &remove_staged)?;
 
     let staged_memory_dir = if memory_dir.exists() {
-        let staged = parent.join(format!(".memory-clear-{}", Uuid::new_v4()));
+        let staged = parent.join(format!("{MEMORY_CLEAR_STAGING_PREFIX}{}", Uuid::new_v4()));
         fs::rename(memory_dir, &staged).map_err(|_| "隔离旧记忆失败".to_string())?;
         Some(staged)
     } else {
@@ -597,11 +624,87 @@ fn clear_memory_storage(
 
     let legacy_cleanup_pending = staged_memory_dir
         .as_deref()
-        .is_some_and(|staged| fs::remove_dir_all(staged).is_err());
+        .is_some_and(|staged| remove_staged(staged).is_err());
+    let staged_bytes = if legacy_cleanup_pending {
+        staged_memory_dir
+            .as_deref()
+            .map(storage_entry_size)
+            .unwrap_or(0)
+    } else {
+        0
+    };
     Ok(MemoryStorageClearResult {
-        bytes: directory_size(memory_dir).saturating_add(ledger_bytes),
+        bytes: directory_size(memory_dir)
+            .saturating_add(staged_bytes)
+            .saturating_add(ledger_bytes),
         legacy_cleanup_pending,
     })
+}
+
+fn memory_storage_usage(memory_dir: &Path) -> Result<MemoryStorageUsage, String> {
+    let parent = memory_dir
+        .parent()
+        .ok_or_else(|| "检查本地记忆状态失败".to_string())?;
+    let staged_dirs = staged_memory_directories(parent)?;
+    let staged_bytes = staged_dirs
+        .iter()
+        .map(|path| storage_entry_size(path))
+        .sum();
+    Ok(MemoryStorageUsage {
+        bytes: directory_size(memory_dir).saturating_add(staged_bytes),
+        legacy_cleanup_pending: !staged_dirs.is_empty(),
+    })
+}
+
+fn retry_stale_memory_staging_cleanup(
+    parent: &Path,
+    remove_staged: &impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let staged_dirs = staged_memory_directories(parent)?;
+    let mut cleanup_failed = false;
+    for staged in staged_dirs {
+        if remove_staged(&staged).is_err() {
+            cleanup_failed = true;
+        }
+    }
+    if cleanup_failed {
+        Err("旧记忆仍待清理，请稍后重试".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn staged_memory_directories(parent: &Path) -> Result<Vec<PathBuf>, String> {
+    if !parent.exists() {
+        return Ok(Vec::new());
+    }
+    let entries = fs::read_dir(parent).map_err(|_| "检查本地记忆状态失败".to_string())?;
+    let mut staged_dirs = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "检查本地记忆状态失败".to_string())?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(MEMORY_CLEAR_STAGING_PREFIX)
+        {
+            staged_dirs.push(entry.path());
+        }
+    }
+    staged_dirs.sort();
+    Ok(staged_dirs)
+}
+
+fn storage_entry_size(path: &Path) -> u64 {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_dir() {
+        directory_size(path)
+    } else if metadata.is_file() {
+        metadata.len()
+    } else {
+        0
+    }
 }
 
 fn restore_staged_memory_directory(memory_dir: &Path, staged_memory_dir: Option<&Path>) -> bool {
@@ -692,6 +795,126 @@ mod security_tests {
 
         assert_eq!(error, "清空秘书账本失败");
         assert!(!memory_dir.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_stale_memory_staging_blocks_a_new_clear_without_hiding_old_data() {
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-stale-memory-clear-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let memory_dir = root.join("memory");
+        let stale_dir = root.join(".memory-clear-stale");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::create_dir_all(&stale_dir).unwrap();
+        fs::write(memory_dir.join("current-memory.json"), "current memory").unwrap();
+        fs::write(stale_dir.join("legacy-memory.json"), "old staged memory").unwrap();
+        let ledger_clears = std::cell::Cell::new(0);
+
+        let usage = memory_storage_usage(&memory_dir).unwrap();
+        assert!(usage.legacy_cleanup_pending);
+        assert_eq!(
+            usage.bytes,
+            ("current memory".len() + "old staged memory".len()) as u64
+        );
+
+        let error = match clear_memory_storage_with_staged_cleanup(
+            &memory_dir,
+            || {
+                ledger_clears.set(ledger_clears.get() + 1);
+                Ok(0)
+            },
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a stale staged memory directory must block a new clear"),
+        };
+
+        assert_eq!(error, "旧记忆仍待清理，请稍后重试");
+        assert!(!error.contains(root.to_string_lossy().as_ref()));
+        assert_eq!(ledger_clears.get(), 0);
+        assert_eq!(
+            fs::read_to_string(memory_dir.join("current-memory.json")).unwrap(),
+            "current memory"
+        );
+        assert_eq!(
+            fs::read_to_string(stale_dir.join("legacy-memory.json")).unwrap(),
+            "old staged memory"
+        );
+
+        let retry = clear_memory_storage(&memory_dir, || {
+            ledger_clears.set(ledger_clears.get() + 1);
+            Ok(0)
+        })
+        .unwrap();
+        assert!(!retry.legacy_cleanup_pending);
+        assert_eq!(ledger_clears.get(), 1);
+        assert!(staged_memory_directories(&root).unwrap().is_empty());
+        assert!(!memory_dir.join("current-memory.json").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn post_commit_staging_cleanup_failure_remains_reported_until_a_successful_retry() {
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-post-commit-memory-clear-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let memory_dir = root.join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("legacy-memory.json"), "old staged memory").unwrap();
+        let staged_bytes = "old staged memory".len() as u64;
+        let first_ledger_clear = std::cell::Cell::new(0);
+
+        let first = clear_memory_storage_with_staged_cleanup(
+            &memory_dir,
+            || {
+                first_ledger_clear.set(first_ledger_clear.get() + 1);
+                Ok(17)
+            },
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        )
+        .unwrap();
+        assert_eq!(first_ledger_clear.get(), 1);
+        assert!(first.legacy_cleanup_pending);
+        assert_eq!(first.bytes, staged_bytes + 17);
+
+        let usage = memory_storage_usage(&memory_dir).unwrap();
+        assert!(usage.legacy_cleanup_pending);
+        assert_eq!(usage.bytes, staged_bytes);
+
+        let blocked_ledger_clear = std::cell::Cell::new(0);
+        let error = match clear_memory_storage_with_staged_cleanup(
+            &memory_dir,
+            || {
+                blocked_ledger_clear.set(blocked_ledger_clear.get() + 1);
+                Ok(0)
+            },
+            |_| Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("a pending staged directory must block a later clear"),
+        };
+        assert_eq!(error, "旧记忆仍待清理，请稍后重试");
+        assert!(!error.contains(root.to_string_lossy().as_ref()));
+        assert_eq!(blocked_ledger_clear.get(), 0);
+
+        let retried_ledger_clear = std::cell::Cell::new(0);
+        let retry = clear_memory_storage(&memory_dir, || {
+            retried_ledger_clear.set(retried_ledger_clear.get() + 1);
+            Ok(0)
+        })
+        .unwrap();
+        assert_eq!(retried_ledger_clear.get(), 1);
+        assert!(!retry.legacy_cleanup_pending);
+        assert_eq!(retry.bytes, 0);
+        let usage = memory_storage_usage(&memory_dir).unwrap();
+        assert!(!usage.legacy_cleanup_pending);
+        assert_eq!(usage.bytes, 0);
+        assert!(staged_memory_directories(&root).unwrap().is_empty());
 
         fs::remove_dir_all(root).unwrap();
     }

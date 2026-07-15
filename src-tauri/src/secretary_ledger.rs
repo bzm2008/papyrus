@@ -2497,10 +2497,20 @@ fn has_high_entropy_access_token(value: &str) -> bool {
     value
         .split(|character: char| !is_access_token_character(character))
         .any(|candidate| {
-            candidate.len() >= 32
-                && candidate.bytes().all(|byte| byte.is_ascii_alphanumeric())
-                && candidate.bytes().any(|byte| byte.is_ascii_alphabetic())
-                && candidate.bytes().any(|byte| byte.is_ascii_digit())
+            if candidate.len() < 32 {
+                return false;
+            }
+
+            let mut has_letter = false;
+            let mut has_digit = false;
+            for byte in candidate
+                .bytes()
+                .filter(|byte| byte.is_ascii_alphanumeric())
+            {
+                has_letter |= byte.is_ascii_alphabetic();
+                has_digit |= byte.is_ascii_digit();
+            }
+            has_letter && has_digit
         })
 }
 
@@ -3857,6 +3867,182 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM secretary_fts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(fts_rows, 1, "only the safe task may be indexed");
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_separator_obscured_compact_tokens_before_any_persistence_or_fts_write() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let dash_token = "AbcDefGhIjKlMnOpQrStUvWxYz-1A2B3C4D";
+        let underscore_token = "AbcDefGhIjKlMnOpQrStUvWxYz_1A2B3C4D";
+        let ordinary_app_id = "papyrus-agent-1";
+
+        assert!(!contains_sensitive_input(ordinary_app_id));
+        ledger
+            .create_memory(
+                &project_a,
+                memory_input(MemoryScope::Project, Some("project-a"), ordinary_app_id),
+            )
+            .unwrap();
+        let safe_task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+
+        for token in [dash_token, underscore_token] {
+            assert!(matches!(
+                ledger.create_memory(
+                    &project_a,
+                    memory_input(MemoryScope::Project, Some("project-a"), token),
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+            assert!(matches!(
+                ledger.create_task(
+                    &project_a,
+                    CreateTaskInput {
+                        request: token.into(),
+                        ..task_input("project-a")
+                    },
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+            assert!(matches!(
+                ledger.record_event(
+                    &project_a,
+                    &safe_task.id,
+                    RecordEventInput {
+                        event_type: "receipt".into(),
+                        payload: serde_json::json!({ "summary": token }),
+                    },
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+            assert!(matches!(
+                ledger.save_checkpoint(
+                    &project_a,
+                    &safe_task.id,
+                    SaveCheckpointInput {
+                        context_snapshot: serde_json::json!({ "summary": token }),
+                        next_step: "等待确认".into(),
+                    },
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+        }
+
+        let connection = Connection::open(&path).unwrap();
+        for table in [
+            "secretary_memories",
+            "secretary_tasks",
+            "secretary_task_events",
+            "secretary_task_checkpoints",
+            "secretary_fts",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(
+                rows,
+                match table {
+                    "secretary_memories" | "secretary_tasks" => 1,
+                    "secretary_fts" => 2,
+                    _ => 0,
+                },
+                "{table} must not retain a separator-obscured compact token"
+            );
+        }
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rollback_rejects_seeded_separator_obscured_token_revision_without_changing_memory_or_fts() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let memory = ledger
+            .create_memory(
+                &project_a,
+                memory_input(MemoryScope::Project, Some("project-a"), "初始安全内容"),
+            )
+            .unwrap();
+        let current = ledger
+            .update_memory(
+                &project_a,
+                &memory.id,
+                UpdateMemoryInput {
+                    kind: None,
+                    content: Some("当前安全内容".into()),
+                    source: None,
+                    confidence: None,
+                    status: None,
+                },
+            )
+            .unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE secretary_memory_revisions SET content = ?3 WHERE memory_id = ?1 AND revision = ?2",
+                params![
+                    memory.id,
+                    1,
+                    "AbcDefGhIjKlMnOpQrStUvWxYz_1A2B3C4D"
+                ],
+            )
+            .unwrap();
+        let revisions_before: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM secretary_memory_revisions WHERE memory_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fts_before: String = connection
+            .query_row(
+                "SELECT content FROM secretary_fts WHERE entity_type = 'memory' AND record_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            ledger.rollback_memory(&project_a, &memory.id, 1),
+            Err(LedgerError::InvalidInput)
+        ));
+        let after = ledger.get_memory(&project_a, &memory.id).unwrap().unwrap();
+        assert_eq!(after.content, current.content);
+        assert_eq!(after.revision, current.revision);
+
+        let connection = Connection::open(&path).unwrap();
+        let revisions_after: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM secretary_memory_revisions WHERE memory_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fts_after: String = connection
+            .query_row(
+                "SELECT content FROM secretary_fts WHERE entity_type = 'memory' AND record_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revisions_after, revisions_before);
+        assert_eq!(fts_after, fts_before);
         drop(connection);
 
         fs::remove_dir_all(directory).unwrap();
