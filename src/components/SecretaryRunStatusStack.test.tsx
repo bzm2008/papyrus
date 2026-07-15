@@ -22,4 +22,10 @@ describe('SecretaryRunStatusStack', () => {
     expect(screen.queryByText('暂未收到新进展')).not.toBeInTheDocument()
     vi.useRealTimers()
   })
+
+  it('shows native cancellation confirmation failures while keeping the run cancelled', () => {
+    render(<SecretaryRunStatusStack run={{ ...createEmptyWorkAssistantRun('r1'), status: 'cancelled', error: '取消未能确认所有本地操作已停止' }} todos={[]} queuedCount={0} />)
+
+    expect(screen.getByText('取消未能确认所有本地操作已停止')).toBeInTheDocument()
+  })
 })

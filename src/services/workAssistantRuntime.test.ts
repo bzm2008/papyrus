@@ -201,6 +201,31 @@ describe('work assistant runtime', () => {
     await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
   })
 
+  it('surfaces a native cancellation confirmation failure after a run is cancelled', async () => {
+    const invoke = vi.fn((command: string) => {
+      if (command === 'work_assistant_preview') {
+        return Promise.resolve({ id: 'cancel-failure-preview', revision: '1', risk: 'reversible', title: '整理文件', targetSummary: 'Downloads', impactSummary: '移动文件', reversible: true, expiresAt: Date.now() + 60_000 })
+      }
+      if (command === 'work_assistant_cancel_run') {
+        return Promise.reject(new Error('native cancellation unavailable'))
+      }
+      return Promise.resolve(undefined)
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const args = { rootId: 'downloads', conflictPolicy: 'rename', operations: [{ kind: 'move', source: 'inbox/a.pdf', destination: 'PDF/a.pdf' }] }
+
+    dispatchOrderedWorkAssistantEvent({ type: 'run.started', runId: 'run-cancel-failure', at: Date.now() })
+    await executeAssistantToolCall({ runId: 'run-cancel-failure', toolCall: call('file_plan_batch', args, 'cancel-failure-plan') })
+    dispatchOrderedWorkAssistantEvent({ type: 'run.cancelled', runId: 'run-cancel-failure', at: Date.now() })
+
+    await vi.waitFor(() => {
+      expect(useWorkAssistantStore.getState().runs['run-cancel-failure']).toMatchObject({
+        status: 'cancelled',
+        error: '取消未能确认所有本地操作已停止，请检查工作助手状态。',
+      })
+    })
+  })
+
   it('does not start a native tool after a terminal run event', async () => {
     const invoke = vi.fn(async () => undefined)
     setWorkAssistantInvokerForTests(invoke)

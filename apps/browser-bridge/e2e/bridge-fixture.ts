@@ -16,6 +16,8 @@ export type ProductionSnapshot = {
     hasValue: boolean
     href?: string
     hrefFingerprint?: string
+    formAction?: string
+    formActionFingerprint?: string
     disabled?: boolean
     bounds?: { x: number; y: number; width: number; height: number }
   }>

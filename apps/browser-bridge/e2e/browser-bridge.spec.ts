@@ -144,6 +144,43 @@ test.describe('Browser Bridge production content script', () => {
     await expect(page.locator('#submitted')).toHaveText('submitted')
   })
 
+  test('rejects a form action changed to a private target after the snapshot', async ({ page }) => {
+    await installProductionBridge(page)
+    const current = await snapshot(page)
+    const submit = elementByName(current, 'Save draft')
+    await page.locator('#ordinary-form').evaluate((form) => {
+      form.setAttribute('action', 'http://127.0.0.1:8080/admin')
+    })
+
+    const result = await request<ProductionActionResult>(page, 'submit', {
+      elementToken: submit.token,
+      pageRevision: current.pageRevision,
+      snapshotId: current.snapshotId,
+    })
+    expect(staleResult(result)).toBe(true)
+    expect(await page.locator('#submitted').textContent()).toBe('')
+  })
+
+  test('rejects a submitter formaction changed to a private target after the snapshot', async ({ page }) => {
+    await installProductionBridge(page)
+    await page.locator('#ordinary-form').evaluate((form) => {
+      form.setAttribute('action', '/ordinary-submit')
+    })
+    const current = await snapshot(page)
+    const submit = elementByName(current, 'Save draft')
+    await page.locator('#save-draft').evaluate((button) => {
+      button.setAttribute('formaction', 'http://127.0.0.1:8080/admin')
+    })
+
+    const result = await request<ProductionActionResult>(page, 'submit', {
+      elementToken: submit.token,
+      pageRevision: current.pageRevision,
+      snapshotId: current.snapshotId,
+    })
+    expect(staleResult(result)).toBe(true)
+    expect(await page.locator('#submitted').textContent()).toBe('')
+  })
+
   test('fails closed for credential links and executable download filenames', async ({ page }) => {
     await installProductionBridge(page)
     await page.evaluate(() => {

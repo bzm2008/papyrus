@@ -317,6 +317,22 @@ describe('reduceWorkAssistantEvent', () => {
     expect(afterLateCompletion.toolCalls['tool-1'].result).toBeUndefined()
   })
 
+  it('surfaces native cancellation failure without reviving the run', () => {
+    const cancelled = reduceWorkAssistantEvent(createEmptyWorkAssistantRun('run-1'), {
+      type: 'run.cancelled', runId: 'run-1', at: 11,
+    })
+    const warned = reduceWorkAssistantEvent(cancelled, {
+      type: 'run.failed', runId: 'run-1', code: 'cancel_failed',
+      message: '取消未能确认所有本地操作已停止，请检查工作助手状态。', recoverable: true, at: 12,
+    })
+
+    expect(warned).toMatchObject({
+      status: 'cancelled',
+      error: '取消未能确认所有本地操作已停止，请检查工作助手状态。',
+      lastActivityAt: 12,
+    })
+  })
+
   it('retains terminal tool receipts when a run is cancelled', () => {
     const cancelledTool = { ...toolCall('cancelled-tool'), status: 'cancelled' as const, endedAt: 7 }
     const running = {

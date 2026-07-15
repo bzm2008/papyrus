@@ -52,7 +52,21 @@ function createHarness() {
   const removedStorage: string[][] = []
   const sentToTab: Array<{ tabId: number; message: unknown }> = []
   const intervalCallbacks: Array<() => void> = []
+  const timeoutCallbacks: Array<{ callback: () => void; delay: number }> = []
   let failInjection = false
+  let tabMessageHandler: (tabId: number, message: unknown) => Promise<unknown> = async () => ({
+    ok: true,
+    summary: '快照已返回',
+    snapshot: {
+      snapshotId: 'snapshot-1',
+      pageRevision: 'revision-1',
+      url: 'https://example.com',
+      origin: 'https://example.com',
+      title: 'Example',
+      text: 'Public',
+      elements: [],
+    },
+  })
 
   const chrome = {
     runtime: {
@@ -69,19 +83,7 @@ function createHarness() {
     tabs: {
       sendMessage: async (tabId: number, message: unknown) => {
         sentToTab.push({ tabId, message })
-        return {
-          ok: true,
-          summary: '快照已返回',
-          snapshot: {
-            snapshotId: 'snapshot-1',
-            pageRevision: 'revision-1',
-            url: 'https://example.com',
-            origin: 'https://example.com',
-            title: 'Example',
-            text: 'Public',
-            elements: [],
-          },
-        }
+        return tabMessageHandler(tabId, message)
       },
       onRemoved: { addListener: (listener: Listener) => removedListeners.push(listener) },
       onActivated: { addListener: (listener: Listener) => activatedListeners.push(listener) },
@@ -94,8 +96,15 @@ function createHarness() {
     chrome,
     WebSocket: MockWebSocket,
     URL,
-    setTimeout,
-    clearTimeout,
+    setTimeout: (callback: () => void, delay: number) => {
+      const timer = { callback, delay }
+      timeoutCallbacks.push(timer)
+      return timer
+    },
+    clearTimeout: (timer: { callback: () => void; delay: number }) => {
+      const index = timeoutCallbacks.indexOf(timer)
+      if (index >= 0) timeoutCallbacks.splice(index, 1)
+    },
     setInterval: (callback: () => void) => {
       intervalCallbacks.push(callback)
       return callback
@@ -119,7 +128,15 @@ function createHarness() {
     removedStorage,
     sentToTab,
     intervalCallbacks,
+    runTimeout: (delay: number) => {
+      const index = timeoutCallbacks.findIndex((timer) => timer.delay === delay)
+      if (index < 0) return false
+      const [timer] = timeoutCallbacks.splice(index, 1)
+      timer.callback()
+      return true
+    },
     setFailInjection: (value: boolean) => { failInjection = value },
+    setTabMessageHandler: (handler: (tabId: number, message: unknown) => Promise<unknown>) => { tabMessageHandler = handler },
   }
 }
 
@@ -304,6 +321,105 @@ describe('Browser Bridge extension protocol', () => {
     harness.removedListeners[0](23)
     expect(socket?.readyState).toBe(MockWebSocket.CLOSED)
     expect(harness.intervalCallbacks).toHaveLength(0)
+  })
+
+  it('clears the active tab and heartbeat when the socket closes remotely', async () => {
+    const harness = createHarness()
+    const listener = findListener(harness)
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-remote-close', nonce: 'nonce-remote-close' }, tabId: 25, origin: 'https://example.com' }, {}, () => undefined)
+    await flushAsync()
+    const socket = MockWebSocket.latest
+    socket?.onopen?.()
+    socket?.emitMessage({ type: 'paired' })
+    await flushAsync()
+    expect(harness.intervalCallbacks).toHaveLength(1)
+
+    socket?.close()
+    expect(harness.intervalCallbacks).toHaveLength(0)
+    const statusResponses: unknown[] = []
+    listener({ type: 'status' }, {}, (value: unknown) => statusResponses.push(value))
+    expect(statusResponses).toEqual([{ ok: false, tabId: undefined }])
+  })
+
+  it('drops a tab response that resolves after the connection generation changes', async () => {
+    const harness = createHarness()
+    let releaseResponse: ((value: unknown) => void) | undefined
+    harness.setTabMessageHandler(() => new Promise((resolve) => { releaseResponse = resolve }))
+    const listener = findListener(harness)
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-stale-1', nonce: 'nonce-stale-1' }, tabId: 26, origin: 'https://example.com' }, {}, () => undefined)
+    await flushAsync()
+    const firstSocket = MockWebSocket.latest
+    firstSocket?.onopen?.()
+    firstSocket?.emitMessage({ type: 'paired' })
+    await flushAsync()
+
+    firstSocket?.emitMessage({ type: 'request', requestId: 'stale-request', action: 'snapshot', payload: {} })
+    await flushAsync()
+    expect(harness.sentToTab).toHaveLength(1)
+
+    harness.activatedListeners[0]({ tabId: 99 })
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-stale-2', nonce: 'nonce-stale-2' }, tabId: 99, origin: 'https://example.com' }, {}, () => undefined)
+    await flushAsync()
+    const secondSocket = MockWebSocket.latest
+    secondSocket?.onopen?.()
+    secondSocket?.emitMessage({ type: 'paired' })
+    await flushAsync()
+    const sentBeforeRelease = [...secondSocket?.sent ?? []]
+
+    releaseResponse?.({ ok: true, summary: '来自旧标签页', snapshot: { snapshotId: 'old', pageRevision: 'old', url: 'https://example.com', origin: 'https://example.com', title: 'Old', text: 'Old', elements: [] } })
+    await flushAsync()
+
+    expect(secondSocket?.sent).toEqual(sentBeforeRelease)
+    expect(secondSocket?.sent).not.toContainEqual(expect.objectContaining({ type: 'response', requestId: 'stale-request' }))
+  })
+
+  it('drops an in-flight tab response after navigation starts', async () => {
+    const harness = createHarness()
+    let releaseResponse: ((value: unknown) => void) | undefined
+    harness.setTabMessageHandler(() => new Promise((resolve) => { releaseResponse = resolve }))
+    const listener = findListener(harness)
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-navigation', nonce: 'nonce-navigation' }, tabId: 28, origin: 'https://example.com' }, {}, () => undefined)
+    await flushAsync()
+    const socket = MockWebSocket.latest
+    socket?.onopen?.()
+    socket?.emitMessage({ type: 'paired' })
+    await flushAsync()
+
+    socket?.emitMessage({ type: 'request', requestId: 'navigation-request', action: 'snapshot', payload: {} })
+    await flushAsync()
+    harness.updatedListeners[0](28, { status: 'loading', url: 'https://example.com/next' })
+    const sentBeforeRelease = [...socket?.sent ?? []]
+    releaseResponse?.({ ok: true, summary: '来自导航前页面', snapshot: { snapshotId: 'old', pageRevision: 'old', url: 'https://example.com', origin: 'https://example.com', title: 'Old', text: 'Old', elements: [] } })
+    await flushAsync()
+
+    expect(socket?.sent).toEqual(sentBeforeRelease)
+    expect(socket?.sent).not.toContainEqual(expect.objectContaining({ type: 'response', requestId: 'navigation-request' }))
+  })
+
+  it('closes a handshake that times out and ignores a late paired frame', async () => {
+    const harness = createHarness()
+    const listener = findListener(harness)
+    const responses: unknown[] = []
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-timeout', nonce: 'nonce-timeout' }, tabId: 27, origin: 'https://example.com' }, {}, (value: unknown) => responses.push(value))
+    await flushAsync()
+    const socket = MockWebSocket.latest
+    expect(socket).toBeDefined()
+    expect(socket?.url).toBe('ws://127.0.0.1:43121/bridge')
+
+    expect(harness.runTimeout(5000)).toBe(true)
+    await flushAsync()
+    expect(responses).toEqual([{ ok: false, message: '连接超时。' }])
+    expect(socket?.readyState).toBe(MockWebSocket.CLOSED)
+    expect(harness.intervalCallbacks).toHaveLength(0)
+
+    socket?.emitMessage({ type: 'paired' })
+    await Promise.resolve()
+    expect(harness.intervalCallbacks).toHaveLength(0)
+    expect(harness.removedStorage).toHaveLength(0)
+
+    const statusResponses: unknown[] = []
+    listener({ type: 'status' }, {}, (value: unknown) => statusResponses.push(value))
+    expect(statusResponses).toEqual([{ ok: false, tabId: undefined }])
   })
 
   it('rejects non-loopback bridge endpoints and non-web page origins before injection', async () => {

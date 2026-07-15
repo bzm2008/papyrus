@@ -12,12 +12,14 @@
 
 `[x]` marks implementation, test, or locally completed commit steps. The consolidated local
 commit is `e115a43` (`fix: harden assistant bridge and entitlement display`), following the earlier
-desktop/runtime implementation commits. The current local evidence is 36 desktop unit-test
-files/194 tests and 135 Rust tests through the portable MSVC gate. File run-scoped approvals now
+desktop/runtime implementation commits. The current local evidence is 37 desktop unit-test
+files/205 tests and 138 Rust tests through the portable MSVC gate. File run-scoped approvals now
 use a canonical scope containing tool, root, target-parent digest, conflict policy, operation kind,
 and an item-count bound; browser and workspace cancellation invalidate matching state and late
-tool calls. A real-user-file smoke transaction and cross-platform device evidence remain pending
-in the release report.
+tool calls. The reducer preserves a cancelled run while surfacing native cleanup confirmation
+failures, and approved browser side effects report an uncertain result when cancellation races
+with execution. A real-user-file smoke transaction and cross-platform device evidence remain
+pending in the release report.
 
 ---
 

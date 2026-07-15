@@ -10,6 +10,8 @@ export type BrowserElementSnapshot = {
   inputType?: string
   hasValue: boolean
   href?: string
+  formAction?: string
+  formActionFingerprint?: string
   disabled?: boolean
   bounds?: { x: number; y: number; width: number; height: number }
 }
@@ -64,6 +66,8 @@ export function limitBrowserSnapshot(snapshot: BrowserSnapshot): BrowserSnapshot
       ...(element.inputType ? { inputType: safeText(element.inputType, 64) } : {}),
       hasValue: element.hasValue === true,
       ...(element.href ? { href: safeText(element.href, 512) } : {}),
+      ...(element.formAction ? { formAction: safeText(element.formAction, 512) } : {}),
+      ...(element.formActionFingerprint ? { formActionFingerprint: safeText(element.formActionFingerprint, 128) } : {}),
       ...(typeof element.disabled === 'boolean' ? { disabled: element.disabled } : {}),
       ...(element.bounds ? { bounds: element.bounds } : {}),
     }))

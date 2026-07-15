@@ -195,8 +195,10 @@ function approvedBrowserAction(
 
 export const openBrowserBridgeTab = (url: string | undefined, approval?: BrowserApprovalContext) =>
   approvedBrowserAction('browser_open', approval, { url })
-export const browserSnapshot = (pageRevision?: string, snapshotId?: string, signal?: AbortSignal) =>
-  callWithAbort<BrowserSnapshot>('browser_snapshot', pageRevision || snapshotId ? { pageRevision, snapshotId } : undefined, signal)
+export const browserSnapshot = (pageRevision?: string, snapshotId?: string, signal?: AbortSignal, runId?: string) => {
+  const args = pageRevision || snapshotId || runId ? { pageRevision, snapshotId, ...(runId ? { runId } : {}) } : undefined
+  return callWithAbort<BrowserSnapshot>('browser_snapshot', args, signal)
+}
 export const browserFillDraft = (elementToken: string, value: string, pageRevision: string, approval?: BrowserApprovalContext) =>
   approvedBrowserAction('browser_fill_draft', approval, { elementToken, value, pageRevision })
 export const browserClick = (elementToken: string, pageRevision: string, approval?: BrowserApprovalContext) =>
