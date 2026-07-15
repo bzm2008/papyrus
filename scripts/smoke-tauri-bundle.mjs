@@ -50,7 +50,7 @@ export async function assertNoSymlinkAncestors(targetPath, protectedPaths = []) 
         const pointsAtProtectedPath = protectedResolved.some(
           (protectedPath) => isPathWithin(protectedPath, expandedTarget),
         )
-        if (protectedResolved.length === 0 || pointsAtProtectedPath) {
+        if (pointsAtProtectedPath) {
           throw new Error(`smoke output path cannot contain a symlink or junction to a protected path: ${current}`)
         }
       }

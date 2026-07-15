@@ -104,7 +104,7 @@ test('bundle smoke rejects destructive output directory targets', async () => {
   }
 })
 
-test('bundle smoke rejects symlinked output ancestors when the host permits links', async () => {
+test('bundle smoke permits system-style symlink ancestors but rejects protected targets when the host permits links', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-smoke-symlink-'))
   const real = path.join(root, 'real')
   const link = path.join(root, 'link')
@@ -118,7 +118,7 @@ test('bundle smoke rejects symlinked output ancestors when the host permits link
     } catch {
       return
     }
-    await assert.rejects(assertNoSymlinkAncestors(path.join(link, 'output')), /symlink or junction/)
+    await assert.doesNotReject(assertNoSymlinkAncestors(path.join(link, 'output')))
     await assert.doesNotReject(assertNoSymlinkAncestors(path.join(link, 'output'), [path.join(root, 'protected')]))
     try {
       await fs.symlink(protectedTarget, protectedLink, process.platform === 'win32' ? 'junction' : 'dir')
