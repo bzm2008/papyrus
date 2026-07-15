@@ -97,4 +97,5 @@ jobs:
           if-no-files-found: error
           path: |
             src-tauri/target/release/bundle
+            !src-tauri/target/release/bundle/appimage/Papyrus.AppDir/papyrus.png
             artifacts/browser-bridge/*.zip

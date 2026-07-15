@@ -93,6 +93,7 @@ const WORKFLOW_SEMANTIC_MARKERS = {
     ['upload smoke artifacts', 'uses: actions/upload-artifact@v4'],
     ['retain smoke artifacts for seven days', 'retention-days: 7'],
     ['upload the Tauri bundle directory', 'src-tauri/target/release/bundle'],
+    ['exclude the case-colliding Linux AppDir icon', '!src-tauri/target/release/bundle/appimage/Papyrus.AppDir/papyrus.png'],
     ['upload the Browser Bridge ZIP', 'artifacts/browser-bridge/*.zip'],
     ['use the checked-out commit SHA in artifact names', 'name: ${{ matrix.artifact }}-${{ steps.packaged.outputs.sha }}'],
     ['document the protected signing boundary', 'protected release workflow with credentials'],
