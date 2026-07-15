@@ -2203,10 +2203,32 @@ fn normalize_identifier(value: String) -> Result<String, LedgerError> {
         || !value.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         })
+        || (contains_sensitive_input(&value) && !is_canonical_uuid_identifier(&value))
     {
         return Err(LedgerError::InvalidInput);
     }
     Ok(value)
+}
+
+fn is_canonical_uuid_identifier(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36
+        || !bytes.iter().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+    {
+        return false;
+    }
+    let Ok(uuid) = Uuid::parse_str(value) else {
+        return false;
+    };
+    value.eq_ignore_ascii_case(&uuid.hyphenated().to_string())
+        && uuid.get_variant() == uuid::Variant::RFC4122
+        && uuid.get_version().is_some()
 }
 
 fn normalize_text(value: String, maximum_chars: usize) -> Result<String, LedgerError> {
@@ -2471,7 +2493,7 @@ fn has_high_entropy_access_token(value: &str) -> bool {
                 distinct[byte as usize] = true;
             }
             let distinct_count = distinct.iter().filter(|seen| **seen).count();
-            classes.iter().filter(|present| **present).count() >= 3 && distinct_count >= 12
+            classes.iter().filter(|present| **present).count() >= 2 && distinct_count >= 12
         })
 }
 
@@ -3754,6 +3776,7 @@ mod tests {
             "sk-proj-M5Zt8q2Ln9Rvx4Hy7CwDa1Kb6Pf3Qs",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWxvbmc",
             "Qm7pK9xR2vL8nS4dF1hJ6wC3aT5yU0bE",
+            "4a1f9c2e7b0d8f3c6e5a1b9d0f2c7e4a8b6d3f1c9e0a5b7d2f8c4e6a1b0d9f3c",
             "123456",
         ];
 
@@ -3826,6 +3849,103 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM secretary_fts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(fts_rows, 1, "only the safe task may be indexed");
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_sensitive_client_identifiers_before_database_or_fts_write() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        let canonical_uuid = Uuid::new_v4().to_string();
+        assert_eq!(
+            normalize_identifier(canonical_uuid.clone()).unwrap(),
+            canonical_uuid
+        );
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let api_key_id = "sk-5rU7mX9qL2vN8cR4yH1dF6pK3sT0wB";
+        let project_api_key_id = "sk-proj-M5Zt8q2Ln9Rvx4Hy7CwDa1Kb6Pf3Qs";
+        let jwt_id = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWxvbmc";
+        let hex_id = "4a1f9c2e7b0d8f3c6e5a1b9d0f2c7e4a8b6d3f1c9e0a5b7d2f8c4e6a1b0d9f3c";
+        let uuid_shaped_token = "4a1f9c2e-7b0d-8f3c-6e5a-1b9d0f2c7e4a";
+        let otp_id = "123456";
+
+        for identifier in [
+            api_key_id,
+            project_api_key_id,
+            jwt_id,
+            hex_id,
+            uuid_shaped_token,
+            otp_id,
+        ] {
+            assert!(matches!(
+                normalize_identifier(identifier.into()),
+                Err(LedgerError::InvalidInput)
+            ));
+        }
+        assert!(matches!(
+            ledger.create_memory(
+                &project_a,
+                CreateMemoryInput {
+                    id: Some(api_key_id.into()),
+                    ..memory_input(MemoryScope::Project, Some("project-a"), "不应写入的记忆")
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.create_task(
+                &project_a,
+                CreateTaskInput {
+                    id: Some(jwt_id.into()),
+                    ..task_input("project-a")
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.create_project(CreateProjectInput {
+                id: Some(hex_id.into()),
+                title: "不应写入的项目".into(),
+                kind: "writing".into(),
+                story_project_id: None,
+                chat_id: None,
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.import_legacy_batch(LegacyImportBatch {
+                migration_key: "sensitive-import-id".into(),
+                projects: vec![legacy_project(otp_id, "不应导入的项目")],
+                memories: Vec::new(),
+                tasks: Vec::new(),
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+
+        let connection = Connection::open(&path).unwrap();
+        let projects: i64 = connection
+            .query_row("SELECT COUNT(*) FROM secretary_projects", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(projects, 1);
+        for table in [
+            "secretary_memories",
+            "secretary_tasks",
+            "secretary_fts",
+            "secretary_legacy_imports",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} must not retain a sensitive identifier");
+        }
         drop(connection);
 
         fs::remove_dir_all(directory).unwrap();
