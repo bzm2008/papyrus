@@ -6,7 +6,7 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `c5daa79`（取消竞态、canonical approval scope、Browser Bridge 版本同步与 Linux 产物修复） |
+| Papyrus commit | `d73b0d0`（套餐/积分实时同步、全量模型权限展示、取消竞态与 Browser Bridge 生命周期加固） |
 | Desktop CI run | [29385279029](https://github.com/bzm2008/papyrus/actions/runs/29385279029) |
 | Package smoke run | [29385738173](https://github.com/bzm2008/papyrus/actions/runs/29385738173)；旧 Linux artifact `8331412342` 因 `Papyrus.png`/`papyrus.png` 冲突无法在 Windows 解压 |
 | 报告更新时间 | `2026-07-15（本地取消/审批 hardening 后）` |
@@ -58,11 +58,11 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run lint`：通过。
 - `npm run test:wps`：2 个文件、17 项通过；包含流式 401/403 结构化错误、模型/额度部分成功、stale 保留和套餐权限文案回归。
 - `npx tsc -p tsconfig.app.json --noEmit`：通过。
-- `npm run test:unit`：36 个文件、182 项通过；包含 review-only 不生成补丁、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
+- `npm run test:unit`：36 个文件、193 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
 - `npm run check:browser`：扩展语法/构建、前端桥接测试和 Rust Browser Bridge/Web Extract 定向测试通过；Rust Browser Bridge 定向为 33 项，包含注入式私网重定向 fixture。
 - `npm run test:browser:e2e`：真实 Chromium 9 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、字段变更 stale、链接 query 变化 stale、凭据链接/可执行文件名阻断和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
-- `npm run test:desktop`：36 个 TypeScript 文件、182 项通过；portable MSVC Rust 门禁 133 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
+- `npm run test:desktop`：36 个 TypeScript 文件、193 项通过；portable MSVC Rust 门禁 133 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - `npm run tauri:check:portable`：Windows MSVC portable check 通过。
 - `npm run browser:package`：生成 5 个运行时文件的 `Papyrus-Browser-Bridge_0.1.2.zip`。

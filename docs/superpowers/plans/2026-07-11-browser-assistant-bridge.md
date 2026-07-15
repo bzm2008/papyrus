@@ -11,7 +11,7 @@
 ## Implementation Audit (2026-07-15)
 
 `[x]` below means the implementation, test, or locally completed commit step is backed by current
-evidence. The latest hardening commit is `c5daa79` (`fix: harden browser cancellation and approval scope`).
+evidence. The latest hardening commit is `d73b0d0` (`fix: harden entitlement sync and assistant cancellation`).
 The complete canonical href is now bound to the native preview through an opaque fingerprint, and
 execution re-checks the current element target plus public-URL/DNS policy. Chromium regression
 coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is now

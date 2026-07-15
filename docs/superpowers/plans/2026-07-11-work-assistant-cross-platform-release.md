@@ -11,9 +11,9 @@
 ## Completion Audit (2026-07-15)
 
 `[x]` means the files, local evidence, or locally completed commit were verified. The consolidated
-latest local hardening commit is `c5daa79` (`fix: harden browser cancellation and approval scope`).
+latest local hardening commit is `d73b0d0` (`fix: harden entitlement sync and assistant cancellation`).
 The aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E (9 tests),
-full TypeScript suite (182 tests), 133-test portable Rust gate, doctor probes, and Windows portable
+full TypeScript suite (193 tests), 133-test portable Rust gate, doctor probes, and Windows portable
 check pass locally. Remote package smoke must still be rerun after the Linux artifact exclusion
 reaches the default branch; real-device records and production signing remain `pending`/`blocked`.
 
