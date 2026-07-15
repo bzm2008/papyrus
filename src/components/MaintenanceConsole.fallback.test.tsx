@@ -101,7 +101,7 @@ describe('MaintenanceConsole browser clear fallback', () => {
 
     render(<MaintenanceConsole />)
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('当前环境未执行本地记忆统计。')
+    expect(await screen.findByRole('alert')).toHaveTextContent('本地记忆统计未完成，已保留当前显示。')
     expect(invoke).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: '进入 Papyrus' })).toBeDisabled()
 
@@ -126,7 +126,7 @@ describe('MaintenanceConsole browser clear fallback', () => {
     render(<MaintenanceConsole />)
 
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('当前环境未执行本地记忆统计。')
+    expect(alert).toHaveTextContent('本地记忆统计未完成，已保留当前显示。')
     expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
   })
 

@@ -1467,11 +1467,11 @@ function toMemoryUsageNotice(result: MaintenanceProbeResult): MemoryClearNotice 
   const fallback =
     status === 'error'
       ? '未能读取本地记忆占用，已保留当前显示。'
-      : '当前环境未执行本地记忆统计。'
+      : '本地记忆统计未完成，已保留当前显示。'
 
   return {
     status,
-    title: status === 'error' ? '存储统计失败' : '存储统计未执行',
+    title: status === 'error' ? '存储统计失败' : '存储统计未完成',
     message: fallback,
   }
 }

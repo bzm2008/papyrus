@@ -184,6 +184,15 @@ function normalizeNativePayload(payload: unknown, command: NativeMaintenanceComm
     return maintenanceFailureResult(command)
   }
 
+  if (command === 'get_memory_usage' && validated.status === 'ok' && typeof validated.bytes !== 'number') {
+    return {
+      status: 'warning',
+      message: maintenanceFailureMessage(command),
+      latencyMs: validated.latencyMs,
+      bytes: undefined,
+    }
+  }
+
   return {
     status: validated.status,
     message: maintenanceResultMessage(command, validated.status),

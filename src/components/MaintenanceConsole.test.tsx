@@ -168,6 +168,45 @@ describe('MaintenanceConsole global memory clearing', () => {
     expect(useAppStore.getState().agentRuns).toEqual([run])
   })
 
+  it.each(['clear', 'rebuild'] as const)('does not commit a stale %s completion after unmount', async (action) => {
+    const pendingOperation = createDeferred<{
+      status: 'ok'
+      message: string
+      bytes: number
+    }>()
+    vi.mocked(maintenance.getMemoryUsage).mockImplementation(() => new Promise<never>(() => undefined))
+    if (action === 'clear') {
+      vi.mocked(maintenance.clearGlobalMemory).mockReturnValue(pendingOperation.promise)
+    } else {
+      vi.mocked(maintenance.rebuildProjectIndex).mockReturnValue(pendingOperation.promise)
+    }
+    prepareMemoryState()
+    const clearAgentMemory = vi.spyOn(useAppStore.getState(), 'clearAgentMemory')
+    const focusSpy = vi.spyOn(HTMLElement.prototype, 'focus')
+
+    const view = render(<MaintenanceConsole />)
+    if (action === 'clear') {
+      await confirmMemoryClear()
+    } else {
+      await confirmIndexRebuild()
+    }
+
+    focusSpy.mockClear()
+    view.unmount()
+
+    await act(async () => {
+      pendingOperation.resolve({ status: 'ok', message: '操作完成。', bytes: 0 })
+      await pendingOperation.promise
+      await new Promise((resolve) => window.setTimeout(resolve, 0))
+    })
+
+    expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
+    expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
+    expect(useAppStore.getState().agentRuns).toEqual([run])
+    expect(clearAgentMemory).not.toHaveBeenCalled()
+    expect(focusSpy).not.toHaveBeenCalled()
+  })
+
   it('traps confirmation focus and restores it to the trigger after closing', async () => {
     prepareMemoryState()
     render(<MaintenanceConsole />)
@@ -299,7 +338,7 @@ describe('MaintenanceConsole global memory clearing', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新检测' }))
     await waitFor(() => expect(maintenance.getMemoryUsage).toHaveBeenCalledTimes(2))
 
-    expect(screen.getByRole('alert')).toHaveTextContent('当前环境未执行本地记忆统计。')
+    expect(screen.getByRole('alert')).toHaveTextContent('本地记忆统计未完成，已保留当前显示。')
     expect(screen.queryByText('全局记忆已清空。')).not.toBeInTheDocument()
   })
 

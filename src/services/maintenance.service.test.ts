@@ -125,6 +125,27 @@ describe('maintenance service safety', () => {
     })
   })
 
+  it.each([
+    ['no bytes field', {}],
+    ['a null bytes field', { bytes: null }],
+  ] as const)('treats a successful native memory usage result with %s as incomplete', async (_caseName, payload) => {
+    setTauriRuntime({})
+    vi.mocked(invoke).mockResolvedValue({
+      status: 'ok',
+      message: '记忆目录与秘书账本统计完成',
+      ...payload,
+    })
+
+    const result = await getMemoryUsage()
+
+    expect(result).toEqual({
+      status: 'warning',
+      message: '本地记忆统计未完成。',
+      latencyMs: undefined,
+      bytes: undefined,
+    })
+  })
+
   it('rejects a native payload with an unbounded numeric field', async () => {
     setTauriRuntime({})
     vi.mocked(invoke).mockResolvedValue({

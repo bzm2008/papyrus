@@ -58,6 +58,32 @@ describe('MaintenanceConsole native maintenance integration', () => {
     expect(screen.getByText('4.0 KB')).toBeInTheDocument()
   })
 
+  it.each([
+    ['a missing byte count', {}],
+    ['a null byte count', { bytes: null }],
+  ] as const)('keeps the prior memory usage and shows a safe incomplete notice for %s', async (_caseName, memoryPayload) => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      switch (command) {
+        case 'health_check_backend':
+          return { status: 'ok', message: '桌面后端检测通过。', latency_ms: 3 }
+        case 'check_sqlite_status':
+          return { status: 'ok', message: '本地存储检测通过。' }
+        case 'get_memory_usage':
+          return { status: 'ok', message: '记忆占用统计完成。', ...memoryPayload }
+        case 'test_model_connection':
+          return { status: 'warning', message: '模型未配置。' }
+        default:
+          throw new Error(`unexpected command: ${command}`)
+      }
+    })
+
+    render(<MaintenanceConsole />)
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_memory_usage'))
+    expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
+    expect(await screen.findByRole('alert')).toHaveTextContent('本地记忆统计未完成')
+  })
+
   it('does not render a raw string rejected by the native bridge', async () => {
     useAppStore.setState({ maintenanceTab: 'connections' })
     vi.mocked(invoke).mockImplementation(async (command) => {
