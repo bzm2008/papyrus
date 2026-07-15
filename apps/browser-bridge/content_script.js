@@ -134,6 +134,37 @@ function hrefFingerprint(node) {
   const canonical = canonicalHref(node)
   return canonical ? stableHash(canonical) : undefined
 }
+function canonicalFormAction(node) {
+  const form = node?.form || node?.closest?.('form')
+  if (!form) return undefined
+  // A submitter may override the form destination with `formaction`; the
+  // browser will honor that value when requestSubmit(node) is used.
+  const raw = node?.getAttribute?.('formaction') || form.getAttribute('action') || location.href
+  try {
+    const parsed = new URL(raw, location.href)
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return undefined
+    const value = parsed.toString()
+    return value.length <= 2048 ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+function safeFormAction(node) {
+  const canonical = canonicalFormAction(node)
+  if (!canonical) return undefined
+  try {
+    const parsed = new URL(canonical)
+    parsed.search = ''
+    parsed.hash = ''
+    return `${parsed.origin}${parsed.pathname}`.slice(0, 512)
+  } catch {
+    return undefined
+  }
+}
+function formActionFingerprint(node) {
+  const canonical = canonicalFormAction(node)
+  return canonical ? stableHash(canonical) : undefined
+}
 function safeElement(node, index) {
   if (!isVisible(node)) return null
   const tagName = (node.tagName || '').toLowerCase()
@@ -155,6 +186,9 @@ function safeElement(node, index) {
     href: safeHref(node),
     hrefFingerprint: hrefFingerprint(node),
     targetHref: canonicalHref(node),
+    formAction: safeFormAction(node),
+    formActionFingerprint: formActionFingerprint(node),
+    targetFormAction: canonicalFormAction(node),
     disabled: Boolean(node.disabled),
     bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
   }
@@ -200,6 +234,7 @@ function fingerprint(node, element) {
     node.getAttribute('disabled') || '',
     node.getAttribute('readonly') || '',
     hrefFingerprint(node) || '',
+    formActionFingerprint(node) || '',
     node.getAttribute('role') || '',
     node.getAttribute('aria-disabled') || '',
     node.getAttribute('aria-readonly') || '',

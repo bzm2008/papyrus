@@ -21,7 +21,17 @@ export function reduceWorkAssistantEvent(
   state: WorkAssistantRun,
   event: WorkAssistantEvent,
 ): WorkAssistantRun {
-  if (event.runId !== state.id || isTerminalRun(state)) {
+  if (event.runId !== state.id) {
+    return state
+  }
+
+  // Cancellation is terminal for the run, but native cleanup can report a
+  // recoverable confirmation failure asynchronously. Preserve the cancelled
+  // status while surfacing that warning instead of dropping the event.
+  if (isTerminalRun(state)) {
+    if (state.status === 'cancelled' && event.type === 'run.failed' && event.code === 'cancel_failed') {
+      return { ...state, error: event.message, lastActivityAt: event.at }
+    }
     return state
   }
 

@@ -35,6 +35,7 @@ describe('browser assistant integration', () => {
 
     const snapshot = await executeAssistantToolCall({ runId: 'browser-run', toolCall: call('browser_snapshot', {}) })
     expect(snapshot.ok).toBe(true)
+    expect(invoke).toHaveBeenCalledWith('browser_snapshot', { runId: 'browser-run' })
     const events: WorkAssistantEvent[] = []
     const pending = executeAssistantToolCall({
       runId: 'browser-run',
@@ -105,6 +106,41 @@ describe('browser assistant integration', () => {
     await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
     expect(invoke).not.toHaveBeenCalledWith('work_assistant_browser_execute_action', expect.anything())
     expect(invoke).toHaveBeenCalledWith('work_assistant_browser_cancel_run', { run: 'browser-cancel-run' })
+  })
+
+  it('marks an approved browser action as uncertain when cancellation races with execution', async () => {
+    const controller = new AbortController()
+    let releaseExecution: ((value: unknown) => void) | undefined
+    const invoke = vi.fn((command: string) => {
+      if (command === 'work_assistant_browser_preview_action') {
+        return Promise.resolve({ id: 'preview-race', revision: 'r1', action: 'submit', actionHash: 'hash-race', risk: 'high', title: '提交表单', targetSummary: 'Example', impactSummary: '提交表单', reversible: false, expiresAt: Date.now() + 60_000, origin: 'https://example.com', pageTitle: 'Example' })
+      }
+      if (command === 'work_assistant_browser_approve_action') {
+        return Promise.resolve({ token: 'approval-race', previewId: 'preview-race', actionHash: 'hash-race', expires: Date.now() + 60_000 })
+      }
+      if (command === 'work_assistant_browser_execute_action') {
+        return new Promise((resolve) => { releaseExecution = resolve })
+      }
+      if (command === 'work_assistant_browser_cancel_run') return Promise.resolve(undefined)
+      return Promise.resolve({ ok: true, summary: 'unexpected browser action' })
+    })
+    setBrowserBridgeInvokerForTests(invoke)
+    const events: WorkAssistantEvent[] = []
+    const pending = executeAssistantToolCall({
+      runId: 'browser-race-run',
+      toolCall: call('browser_submit', { elementToken: 'submit', pageRevision: 'r1' }, 'race-submit'),
+      emit: (event) => events.push(event),
+      signal: controller.signal,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const approval = events.find((event): event is Extract<WorkAssistantEvent, { type: 'approval.required' }> => event.type === 'approval.required')
+    expect(approval && resolveAssistantApproval(approval.request.id, 'once')).toBe(true)
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('work_assistant_browser_execute_action', expect.anything()))
+
+    controller.abort()
+    await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'request_uncertain' })
+    expect(invoke).toHaveBeenCalledWith('work_assistant_browser_cancel_run', { run: 'browser-race-run' })
+    releaseExecution?.({ ok: true, summary: '已提交' })
   })
 
   it('does not invoke the browser bridge when the run is already aborted', async () => {

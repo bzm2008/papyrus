@@ -31,6 +31,7 @@ export function SecretaryRunStatusStack({ run, todos, queuedCount }: Props) {
       {tools.length ? <details className="mt-1"><summary>后台工具 {tools.length}</summary>{tools.map((tool) => <div key={tool.id} className="mt-1 flex justify-between"><span>{tool.intent || tool.name}</span><span>{tool.status}</span></div>)}</details> : null}
       {queuedCount ? <div className="mt-1 text-[#6f685c]">排队指令 {queuedCount}</div> : null}
       {stalled && run?.status === 'running' ? <div className="mt-1 text-[#9a6a32]">暂未收到新进展</div> : null}
+      {run?.error ? <div className="mt-1 text-[#9a4338]">{run.error}</div> : null}
     </section>
   )
 }

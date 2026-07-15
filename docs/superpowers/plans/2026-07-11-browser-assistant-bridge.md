@@ -11,18 +11,26 @@
 ## Implementation Audit (2026-07-15)
 
 `[x]` below means the implementation, test, or locally completed commit step is backed by current
-evidence. The latest hardening commit is `e115a43` (`fix: harden assistant bridge and entitlement display`).
+evidence. The latest baseline hardening commit is `e115a43` (`fix: harden assistant bridge and entitlement display`);
+the completion worktree includes the additional hardening described below.
 The complete canonical href is now bound to the native preview through an opaque fingerprint, and
 execution re-checks the current element target plus public-URL/DNS policy. Chromium regression
 coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is now
-38 tests, including an injected resolver/fetcher redirect fixture, token replay, wrong-tab,
+39 tests, including navigation-generation stale responses, FIFO cancellation-marker eviction,
+form-target validation/hash binding, an injected resolver/fetcher redirect fixture, token replay,
+wrong-tab,
 cross-origin, oversized-message, credential-link, executable-download, cancelled-run and pending
 request wake-up cases. Native snapshots now revalidate public URL/DNS after every navigation and
 discard private-page payloads before they can enter the Agent context. Native browser action completion/failure records append a redacted entry
 to the existing audit JSONL; browser or extension restart still requires explicit re-pairing
 because the one-time token is consumed by design. Approved actions use a native gate for the
 validated send transition, while cancellation wakes pending responses without waiting for the
-12-second response deadline.
+12-second response deadline. Submit controls bind both `form action` and submitter-level
+`formaction`, with a query-free approval hint and a complete native-only target. Snapshot requests
+carry the run id so cancelled reads stop promptly, and approved browser actions report
+`request_uncertain` when cancellation races with an already-sent side effect. The extension suite
+also covers socket-generation and navigation races, timeout cleanup, and remote-close heartbeat
+cleanup. These hardening changes are included in the completion worktree verification below.
 
 Two deliberate implementation decisions are recorded here. The loopback server keeps the bounded
 blocking `tungstenite` 0.27 thread model instead of introducing a second async WebSocket runtime;

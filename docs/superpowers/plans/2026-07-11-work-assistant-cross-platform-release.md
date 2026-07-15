@@ -12,10 +12,11 @@
 
 `[x]` means the files, local evidence, or locally completed commit were verified. The consolidated
 latest remote hardening commit is `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea` (`fix: stabilize hosted bundle smoke workflow`; local equivalent commit `9d4d592`).
-The aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E (9 tests),
-full TypeScript suite (200 tests), 135-test portable Rust gate, doctor probes, and Windows portable
-check pass locally. Desktop CI run `29408046525` and package smoke run `29408076266` pass on all
-three runners after the Windows path and Linux process-lifecycle fixes; real-device records and
+The aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E (11 tests),
+full TypeScript suite (205 tests), 138-test portable Rust gate, doctor probes, and Windows portable
+check pass locally. The extension integration suite has 14 tests and the native Browser Bridge
+subset has 39. Desktop CI run `29408046525` and package smoke run `29408076266` pass on all three
+runners after the Windows path and Linux process-lifecycle fixes; real-device records and
 production signing remain `pending`/`blocked`.
 
 ---

@@ -59,11 +59,11 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run lint`：通过。
 - `npm run test:wps`：2 个文件、17 项通过；包含流式 401/403 结构化错误、模型/额度部分成功、stale 保留和套餐权限文案回归。
 - `npx tsc -p tsconfig.app.json --noEmit`：通过。
-- `npm run test:unit`：36 个文件、200 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
-- `npm run test:browser`：扩展语法/构建、前端桥接测试和 Browser Bridge Vitest 通过；Browser Bridge 原生定向测试为 38 项，包含导航后公共 URL/DNS 复检和私网快照丢弃。
-- `npm run test:browser:e2e`：真实 Chromium 9 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、字段变更 stale、链接 query 变化 stale、凭据链接/可执行文件名阻断和受限页面。
+- `npm run test:unit`：37 个文件、205 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort、审批竞态、取消清理失败提示和浏览器动作 `request_uncertain`。
+- `npm run test:browser`：扩展语法/构建、前端桥接测试和 Browser Bridge Vitest 通过；扩展 service worker 集成 14 项，Browser Bridge 原生定向测试为 39 项，包含导航代际 stale 响应、FIFO 取消淘汰、表单 action/提交按钮 `formaction` 指纹与公共 URL/DNS 复检。
+- `npm run test:browser:e2e`：真实 Chromium 11 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、form action 与 submitter `formaction` 私网变更阻断、字段变更 stale、链接 query 变化 stale、凭据链接/可执行文件名阻断和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
-- `npm run ci:desktop`：36 个 TypeScript 文件、200 项通过；portable MSVC Rust 全量门禁 135 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理、导航 origin 重绑定和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
+- `npm run ci:desktop`：37 个 TypeScript 文件、205 项通过；portable MSVC Rust 全量门禁 138 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理、导航 origin 重绑定、导航迟到响应、表单目标校验、FIFO 取消标记和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - `npm run tauri:check:portable`：Windows MSVC portable check 通过。
 - `npm run browser:package`：生成 5 个运行时文件的 `Papyrus-Browser-Bridge_0.1.2.zip`。
@@ -71,7 +71,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run test:release-scripts`：13 项通过，覆盖 Linux AppDir 大小写冲突排除、Browser Bridge manifest/package 版本一致性、缺失 workflow 语义步骤、checkout SHA/产物命名、脚本 gate、CSP、命令白名单和扩展权限失败场景。
 - `npm run wps:build`：WPS 插件 TypeScript、Vite 生产构建和 legacy 入口准备通过。
 - Browser Bridge security：覆盖私网重定向/注入 DNS、受限字段、隐藏控件、跨源 tab、wrong-tab、stale snapshot、伪造/重放审批、超大消息和 token 单次使用。
-- Browser Bridge cancellation：原生取消命令按 run 清理预览/审批，disconnect 不清除已取消 run 标记；已批准动作的发送闸门与取消串行，pending 响应可被唤醒，前端 AbortSignal 在调用前 fail-closed。
+- Browser Bridge cancellation：原生取消命令按 run 清理预览/审批，disconnect 不清除已取消 run 标记；已取消 run 使用 FIFO 有界淘汰；已批准动作的发送闸门与取消串行，pending 响应可被唤醒，snapshot 请求携带 run id，前端 AbortSignal 在调用前 fail-closed；动作已发送后与取消竞态返回 `request_uncertain`，避免重复提交。
 - Approval scope：文件 run grant 绑定 tool/root/target-parent digest/conflict policy/operation kind/max item count；危险操作不允许 run-scoped 复用，TS 与 Rust 比较规则一致。
 - Work Assistant doctor：Rust 注入式诊断 6 项、TypeScript doctor 2 项通过；无文件、进程或 trash 副作用。
 - Browser Bridge workbench/settings：状态分层、当前标签页/来源、健康错误、配对 token 生命周期和受限页面展示回归通过。

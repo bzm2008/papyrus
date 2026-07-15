@@ -343,6 +343,7 @@ async function executeBrowserBridgeTool(call: AssistantToolCall, signal?: AbortS
         typeof args.pageRevision === 'string' ? args.pageRevision : undefined,
         typeof args.snapshotId === 'string' ? args.snapshotId : undefined,
         signal,
+        call.runId,
       )
       throwIfRunCancelled(call.runId, signal)
       return result
@@ -580,13 +581,40 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       if (manifest.executor === 'browser_bridge') {
         const grant = await approveBrowserAction(preview.id, input.runId, input.signal)
         throwIfRunCancelled(input.runId, input.signal)
-        const data = await executeApprovedBrowserAction({
-          previewId: grant.previewId,
-          approvalToken: grant.token,
-          actionHash: grant.actionHash,
-        }, input.signal)
+        let data: unknown
+        try {
+          data = await executeApprovedBrowserAction({
+            previewId: grant.previewId,
+            approvalToken: grant.token,
+            actionHash: grant.actionHash,
+          }, input.signal)
+        } catch (error) {
+          if (input.signal?.aborted || cancelledRuns.has(input.runId)) {
+            const cancellationFailures = await cancelRunScopedState(input.runId)
+            const uncertain = {
+              ok: false as const,
+              summary: cancellationFailures.length > 0
+                ? '浏览器动作可能已经发送，但取消清理未能确认；请检查浏览器后再决定是否重试。'
+                : '浏览器动作可能已经发送，取消请求到达时结果未确认；请检查浏览器后再决定是否重试。',
+              errorCode: 'request_uncertain' as const,
+              recoverable: true,
+            }
+            emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: uncertain, at: now() })
+            return uncertain
+          }
+          throw error
+        }
         const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
-        const result = actionPayload?.ok === false
+        const cancellationRequested = input.signal?.aborted || cancelledRuns.has(input.runId)
+        const result = cancellationRequested
+          ? {
+              ok: false as const,
+              summary: '浏览器动作可能已经发送，取消请求到达时结果未确认；请检查浏览器后再决定是否重试。',
+              errorCode: 'request_uncertain' as const,
+              recoverable: true,
+              data: sanitizedToolData(call.name, data),
+            }
+          : actionPayload?.ok === false
           ? {
               ok: false as const,
               summary: typeof actionPayload.summary === 'string' ? actionPayload.summary : '浏览器动作被安全策略阻止。',

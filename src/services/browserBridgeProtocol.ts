@@ -15,6 +15,8 @@ export type BrowserElementSnapshot = {
   inputType?: string
   hasValue: boolean
   href?: string
+  formAction?: string
+  formActionFingerprint?: string
   disabled?: boolean
   bounds?: { x: number; y: number; width: number; height: number }
 }

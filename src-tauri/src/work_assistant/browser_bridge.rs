@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
     sync::{mpsc, Arc, Condvar, Mutex},
     thread,
@@ -97,6 +97,14 @@ pub struct BrowserElementSnapshot {
     /// serialized back to the frontend or audit log.
     #[serde(default, skip_serializing)]
     pub target_href: Option<String>,
+    /// Sanitized form action shown only as a bounded, query-free hint. The
+    /// complete action stays native-only for approval validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form_action_fingerprint: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub target_form_action: Option<String>,
     #[serde(default)]
     pub disabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +164,12 @@ pub struct BrowserActionRequest {
     target_href: Option<String>,
     #[serde(default, skip_serializing)]
     href_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    form_action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    form_action_fingerprint: Option<String>,
+    #[serde(default, skip_serializing)]
+    target_form_action: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -237,7 +251,13 @@ struct SessionData {
     snapshot: Option<BrowserPageSnapshot>,
     outbound: Option<mpsc::Sender<String>>,
     responses: HashMap<String, Value>,
-    pending_requests: HashSet<String>,
+    pending_requests: HashMap<String, PendingBrowserRequestMetadata>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingBrowserRequestMetadata {
+    navigation_generation: u64,
+    tab_id: Option<i64>,
 }
 
 #[derive(Clone, Debug)]
@@ -279,7 +299,13 @@ struct BrowserBridgeInner {
     stop: Mutex<bool>,
     browser_previews: Mutex<HashMap<String, StoredBrowserPreview>>,
     browser_approvals: Mutex<HashMap<String, StoredBrowserApproval>>,
-    cancelled_runs: Mutex<HashSet<String>>,
+    cancelled_runs: Mutex<CancelledBrowserRuns>,
+}
+
+#[derive(Default)]
+struct CancelledBrowserRuns {
+    set: HashSet<String>,
+    order: VecDeque<String>,
 }
 
 pub struct BrowserBridgeState {
@@ -311,7 +337,7 @@ pub fn init_browser_bridge_state() -> BrowserBridgeState {
             stop: Mutex::new(false),
             browser_previews: Mutex::new(HashMap::new()),
             browser_approvals: Mutex::new(HashMap::new()),
-            cancelled_runs: Mutex::new(HashSet::new()),
+            cancelled_runs: Mutex::new(CancelledBrowserRuns::default()),
         }),
     }
 }
@@ -377,8 +403,9 @@ pub fn work_assistant_browser_disconnect(
 pub fn work_assistant_browser_snapshot(
     state: State<'_, BrowserBridgeState>,
     page_revision: Option<String>,
+    run_id: Option<String>,
 ) -> Result<BrowserPageSnapshot, String> {
-    browser_snapshot(state, page_revision)
+    browser_snapshot(state, page_revision, run_id)
 }
 
 #[tauri::command]
@@ -408,6 +435,9 @@ pub fn work_assistant_browser_preview_action(
             directory_root_id,
             target_href: None,
             href_fingerprint: None,
+            form_action: None,
+            form_action_fingerprint: None,
+            target_form_action: None,
         },
     )
 }
@@ -482,11 +512,13 @@ pub fn browser_open(
 pub fn browser_snapshot(
     state: State<'_, BrowserBridgeState>,
     page_revision: Option<String>,
+    run_id: Option<String>,
 ) -> Result<BrowserPageSnapshot, String> {
     let value = request_bridge_value(
         &state.inner,
         "snapshot",
         json!({ "pageRevision": page_revision }),
+        run_id.as_deref(),
     )?;
     if value.get("ok").and_then(Value::as_bool) == Some(false) {
         return Err(value
@@ -643,7 +675,7 @@ fn start_pairing(
         snapshot: None,
         outbound: None,
         responses: HashMap::new(),
-        pending_requests: HashSet::new(),
+        pending_requests: HashMap::new(),
     });
     inner.wake.notify_all();
     Ok(pairing)
@@ -749,12 +781,15 @@ fn cancel_browser_run(inner: &Arc<BrowserBridgeInner>, run_id: &str) -> Result<(
         .cancelled_runs
         .lock()
         .map_err(|_| "浏览器取消状态不可用".to_string())?;
-    if !cancelled_runs.contains(run_id) && cancelled_runs.len() >= MAX_BROWSER_CANCELLED_RUNS {
-        if let Some(oldest) = cancelled_runs.iter().next().cloned() {
-            cancelled_runs.remove(&oldest);
+    if cancelled_runs.set.insert(run_id.to_owned()) {
+        cancelled_runs.order.push_back(run_id.to_owned());
+        while cancelled_runs.set.len() > MAX_BROWSER_CANCELLED_RUNS {
+            let Some(oldest) = cancelled_runs.order.pop_front() else {
+                break;
+            };
+            cancelled_runs.set.remove(&oldest);
         }
     }
-    cancelled_runs.insert(run_id.to_owned());
 
     // Keep the cancellation marker locked while removing the token state. A
     // late preview/approval creation cannot pass the marker check and then
@@ -777,7 +812,7 @@ fn browser_run_is_cancelled(inner: &Arc<BrowserBridgeInner>, run_id: &str) -> Re
     inner
         .cancelled_runs
         .lock()
-        .map(|runs| runs.contains(run_id))
+        .map(|runs| runs.set.contains(run_id))
         .map_err(|_| "浏览器取消状态不可用".to_string())
 }
 
@@ -917,6 +952,10 @@ fn create_browser_action_preview(
             return Err("该控件已禁用或只读，无法操作".into());
         }
         validate_browser_element_target(&action, element).map_err(|error| error.message)?;
+        request.form_action = element.form_action.clone();
+        request.form_action_fingerprint = element.form_action_fingerprint.clone();
+        request.target_form_action = element.target_form_action.clone();
+        validate_browser_form_target(&action, element).map_err(|error| error.message)?;
         request.target_href = element.target_href.clone();
         request.href_fingerprint = element.href_fingerprint.clone();
         let semantic_risk = classify_browser_semantic_risk(&element.name);
@@ -961,7 +1000,7 @@ fn create_browser_action_preview(
     let target_summary = if action == "navigate" {
         format!("{} · 打开 {}", origin, target_url)
     } else {
-        format!(
+        let summary = format!(
             "{} · {}{}{}",
             origin,
             page_title,
@@ -973,7 +1012,16 @@ fn create_browser_action_preview(
                 .as_deref()
                 .map(|href| format!(" · 目标 {href}"))
                 .unwrap_or_default(),
-        )
+        );
+        if action == "submit" {
+            format!(
+                "{} · 表单目标 {}",
+                summary,
+                request.form_action.as_deref().unwrap_or("未验证"),
+            )
+        } else {
+            summary
+        }
     };
     let (risk, reversible, impact) = match action.as_str() {
         "fillDraft" => ("reversible", true, "填写普通文本草稿，不会提交"),
@@ -1007,7 +1055,7 @@ fn create_browser_action_preview(
         .cancelled_runs
         .lock()
         .map_err(|_| "浏览器取消状态不可用".to_string())?;
-    if cancelled_runs.contains(&run_id) {
+    if cancelled_runs.set.contains(&run_id) {
         return Err("运行已取消".into());
     }
     inner
@@ -1064,6 +1112,23 @@ fn validate_browser_element_target(
     validate_public_url(target).map(|_| ())
 }
 
+fn validate_browser_form_target(
+    action: &str,
+    element: &BrowserElementSnapshot,
+) -> Result<(), WorkAssistantError> {
+    if action != "submit" {
+        return Ok(());
+    }
+    let target = element
+        .target_form_action
+        .as_deref()
+        .ok_or_else(|| WorkAssistantError::blocked("表单目标无法验证，已阻止提交"))?;
+    if element.form_action_fingerprint.is_none() {
+        return Err(WorkAssistantError::blocked("表单目标指纹缺失，已阻止提交"));
+    }
+    validate_public_url(target).map(|_| ())
+}
+
 fn approve_browser_action(
     inner: &Arc<BrowserBridgeInner>,
     preview_id: &str,
@@ -1093,7 +1158,7 @@ fn approve_browser_action(
         .cancelled_runs
         .lock()
         .map_err(|_| "浏览器取消状态不可用".to_string())?;
-    if cancelled_runs.contains(run_id) {
+    if cancelled_runs.set.contains(run_id) {
         return Err("运行已取消".into());
     }
     inner
@@ -1216,7 +1281,7 @@ fn execute_approved_browser_action_with_audit(
     if current.navigation_generation != stored.navigation_generation {
         return Err("页面已经导航，请重新获取快照后再操作".into());
     }
-    let current_element = if matches!(stored.action.as_str(), "click" | "download") {
+    let current_element = if matches!(stored.action.as_str(), "click" | "download" | "submit") {
         let token = stored
             .request
             .element_token
@@ -1256,6 +1321,20 @@ fn execute_approved_browser_action_with_audit(
             return Err("页面链接目标已变化，请重新获取快照".into());
         }
         validate_browser_element_target(&action, element).map_err(|error| error.message)?;
+    } else if action == "submit" {
+        return Err("表单控件已失效，请重新获取快照".into());
+    }
+    if action == "submit" {
+        let element = current_element
+            .as_ref()
+            .ok_or_else(|| "表单控件已失效，请重新获取快照".to_string())?;
+        if element.form_action != stored.request.form_action
+            || element.form_action_fingerprint != stored.request.form_action_fingerprint
+            || element.target_form_action != stored.request.target_form_action
+        {
+            return Err("表单目标已变化，请重新获取快照".into());
+        }
+        validate_browser_form_target(&action, element).map_err(|error| error.message)?;
     }
     let pending_request = start_request_bridge(
         inner,
@@ -1420,6 +1499,9 @@ fn hash_browser_action(action: &str, request: &BrowserActionRequest) -> String {
         "directoryRootId": request.directory_root_id,
         "targetHref": request.target_href,
         "hrefFingerprint": request.href_fingerprint,
+        "formAction": request.form_action,
+        "formActionFingerprint": request.form_action_fingerprint,
+        "targetFormAction": request.target_form_action,
     });
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(&payload).unwrap_or_default());
@@ -1430,14 +1512,17 @@ fn request_bridge_value(
     inner: &Arc<BrowserBridgeInner>,
     action: &str,
     payload: Value,
+    run_id: Option<&str>,
 ) -> Result<Value, String> {
     let pending = start_request_bridge(inner, action, payload)?;
-    wait_request_bridge(inner, pending, None)
+    wait_request_bridge(inner, pending, run_id)
 }
 
 struct PendingBrowserRequest {
     request_id: String,
     session_id: String,
+    navigation_generation: u64,
+    tab_id: Option<i64>,
     deadline: std::time::Instant,
 }
 
@@ -1447,7 +1532,7 @@ fn start_request_bridge(
     payload: Value,
 ) -> Result<PendingBrowserRequest, String> {
     let request_id = Uuid::new_v4().to_string();
-    let (sender, session_id) = {
+    let (sender, session_id, navigation_generation, tab_id) = {
         let mut session = inner
             .session
             .lock()
@@ -1461,8 +1546,19 @@ fn start_request_bridge(
         if current.pending_requests.len() >= 64 {
             return Err("浏览器请求队列已满".into());
         }
-        current.pending_requests.insert(request_id.clone());
-        (sender, current.pairing.session_id.clone())
+        let metadata = PendingBrowserRequestMetadata {
+            navigation_generation: current.navigation_generation,
+            tab_id: current.tab_id,
+        };
+        current
+            .pending_requests
+            .insert(request_id.clone(), metadata);
+        (
+            sender,
+            current.pairing.session_id.clone(),
+            metadata.navigation_generation,
+            metadata.tab_id,
+        )
     };
     let message = json!({
         "type": "request",
@@ -1486,6 +1582,8 @@ fn start_request_bridge(
     Ok(PendingBrowserRequest {
         request_id,
         session_id,
+        navigation_generation,
+        tab_id,
         deadline: std::time::Instant::now() + RESPONSE_WAIT,
     })
 }
@@ -1498,6 +1596,8 @@ fn wait_request_bridge(
     let PendingBrowserRequest {
         request_id,
         session_id,
+        navigation_generation,
+        tab_id,
         deadline,
     } = pending;
     loop {
@@ -1522,9 +1622,17 @@ fn wait_request_bridge(
             if current.pairing.session_id != session_id {
                 return Err("浏览器会话已变化，请重新获取快照".into());
             }
+            if current.navigation_generation != navigation_generation || current.tab_id != tab_id {
+                current.pending_requests.remove(&request_id);
+                current.responses.remove(&request_id);
+                return Err("浏览器页面已经导航，请重新获取快照".into());
+            }
             if let Some(value) = current.responses.remove(&request_id) {
                 current.pending_requests.remove(&request_id);
                 return Ok(value);
+            }
+            if !current.pending_requests.contains_key(&request_id) {
+                return Err("浏览器响应已失效，请重新获取快照".into());
             }
         } else {
             return Err("浏览器连接已断开".into());
@@ -1754,11 +1862,16 @@ fn process_bridge_message(inner: &Arc<BrowserBridgeInner>, session_id: &str, raw
                     if current.pairing.session_id != session_id {
                         return;
                     }
-                    if !current.pending_requests.contains(request_id) {
+                    let Some(pending) = current.pending_requests.get(request_id).copied() else {
+                        return;
+                    };
+                    let tab_id = value.get("tabId").and_then(Value::as_i64);
+                    if pending.navigation_generation != current.navigation_generation {
+                        current.pending_requests.remove(request_id);
+                        current.responses.insert(request_id.to_string(), json!({ "ok": false, "summary": "浏览器页面已经导航，请重新获取快照", "errorCode": "stale_navigation", "recoverable": true }));
                         return;
                     }
-                    let tab_id = value.get("tabId").and_then(Value::as_i64);
-                    if current.tab_id != tab_id {
+                    if pending.tab_id != current.tab_id || current.tab_id != tab_id {
                         current.pending_requests.remove(request_id);
                         current.responses.insert(request_id.to_string(), json!({ "ok": false, "summary": "浏览器标签页已变化", "errorCode": "stale_tab", "recoverable": true }));
                         return;
@@ -1821,6 +1934,14 @@ fn process_bridge_message(inner: &Arc<BrowserBridgeInner>, session_id: &str, raw
                     current.page_revision = None;
                     current.snapshot_id = None;
                     current.navigation_generation = current.navigation_generation.saturating_add(1);
+                    let stale_requests = current
+                        .pending_requests
+                        .drain()
+                        .map(|(request_id, _)| request_id)
+                        .collect::<Vec<_>>();
+                    for request_id in stale_requests {
+                        current.responses.insert(request_id, json!({ "ok": false, "summary": "浏览器页面已经导航，请重新获取快照", "errorCode": "stale_navigation", "recoverable": true }));
+                    }
                 }
             }
             inner.wake.notify_all();
@@ -1999,6 +2120,15 @@ fn limit_snapshot(mut snapshot: BrowserPageSnapshot) -> BrowserPageSnapshot {
             element.target_href = element
                 .target_href
                 .and_then(|value| normalize_browser_target_url(&value));
+            element.form_action = element
+                .form_action
+                .map(|value| sanitize_browser_action_hint(&value, 512));
+            element.form_action_fingerprint = element
+                .form_action_fingerprint
+                .map(|value| value.chars().take(128).collect());
+            element.target_form_action = element
+                .target_form_action
+                .and_then(|value| normalize_browser_target_url(&value));
             element
         })
         .collect();
@@ -2020,6 +2150,16 @@ fn normalize_browser_target_url(raw: &str) -> Option<String> {
 
     let value = parsed.to_string();
     (value.chars().count() <= 2_048).then_some(value)
+}
+
+fn sanitize_browser_action_hint(raw: &str, limit: usize) -> String {
+    Url::parse(raw)
+        .map(|mut parsed| {
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string().chars().take(limit).collect()
+        })
+        .unwrap_or_else(|_| raw.chars().take(limit).collect())
 }
 
 fn is_sensitive_element(element: &BrowserElementSnapshot) -> bool {
@@ -2560,7 +2700,7 @@ mod tests {
             snapshot: None,
             outbound: None,
             responses: HashMap::new(),
-            pending_requests: HashSet::new(),
+            pending_requests: HashMap::new(),
         }
     }
 
@@ -2610,6 +2750,9 @@ mod tests {
                 href: None,
                 href_fingerprint: None,
                 target_href: None,
+                form_action: None,
+                form_action_fingerprint: None,
+                target_form_action: None,
                 disabled: false,
                 bounds: None,
             }],
@@ -2749,7 +2892,13 @@ mod tests {
         let inner = Arc::clone(&state.inner);
         if let Ok(mut session) = inner.session.lock() {
             let mut current = test_session("wrong-tab");
-            current.pending_requests.insert("request-1".into());
+            current.pending_requests.insert(
+                "request-1".into(),
+                PendingBrowserRequestMetadata {
+                    navigation_generation: current.navigation_generation,
+                    tab_id: current.tab_id,
+                },
+            );
             *session = Some(current);
         }
 
@@ -2761,7 +2910,7 @@ mod tests {
 
         let session = inner.session.lock().unwrap();
         let current = session.as_ref().unwrap();
-        assert!(!current.pending_requests.contains("request-1"));
+        assert!(!current.pending_requests.contains_key("request-1"));
         assert_eq!(
             current
                 .responses
@@ -2773,12 +2922,58 @@ mod tests {
     }
 
     #[test]
+    fn late_response_after_navigation_is_stale_and_cannot_rebind_the_snapshot() {
+        let state = init_browser_bridge_state();
+        let inner = Arc::clone(&state.inner);
+        if let Ok(mut session) = inner.session.lock() {
+            let mut current = test_session("navigation-race");
+            current.pending_requests.insert(
+                "request-navigation-race".into(),
+                PendingBrowserRequestMetadata {
+                    navigation_generation: 0,
+                    tab_id: Some(7),
+                },
+            );
+            current.navigation_generation = 1;
+            current.snapshot = None;
+            *session = Some(current);
+        }
+
+        process_bridge_message(
+            &inner,
+            "navigation-race",
+            r#"{"type":"response","requestId":"request-navigation-race","tabId":7,"payload":{"ok":true},"snapshot":{"tabId":7,"url":"https://example.com/old","origin":"https://example.com","title":"Old","text":"old","elements":[],"snapshotId":"old","pageRevision":"old"}}"#,
+        );
+
+        let session = inner.session.lock().unwrap();
+        let current = session.as_ref().unwrap();
+        assert!(current.snapshot.is_none());
+        assert!(!current
+            .pending_requests
+            .contains_key("request-navigation-race"));
+        assert_eq!(
+            current
+                .responses
+                .get("request-navigation-race")
+                .and_then(|value| value.get("errorCode"))
+                .and_then(Value::as_str),
+            Some("stale_navigation")
+        );
+    }
+
+    #[test]
     fn cross_origin_snapshot_is_rejected_and_reported_as_stale_origin() {
         let state = init_browser_bridge_state();
         let inner = Arc::clone(&state.inner);
         if let Ok(mut session) = inner.session.lock() {
             let mut current = test_session("cross-origin");
-            current.pending_requests.insert("request-2".into());
+            current.pending_requests.insert(
+                "request-2".into(),
+                PendingBrowserRequestMetadata {
+                    navigation_generation: current.navigation_generation,
+                    tab_id: current.tab_id,
+                },
+            );
             *session = Some(current);
         }
 
@@ -2863,6 +3058,9 @@ mod tests {
                     href: None,
                     href_fingerprint: None,
                     target_href: None,
+                    form_action: None,
+                    form_action_fingerprint: None,
+                    target_form_action: None,
                     disabled: false,
                     bounds: None,
                 }],
@@ -2890,6 +3088,9 @@ mod tests {
                 directory_root_id: None,
                 target_href: None,
                 href_fingerprint: None,
+                form_action: None,
+                form_action_fingerprint: None,
+                target_form_action: None,
             },
         )
         .expect_err("a stale page revision must not create a preview");
@@ -2917,6 +3118,9 @@ mod tests {
                 directory_root_id: None,
                 target_href: None,
                 href_fingerprint: None,
+                form_action: None,
+                form_action_fingerprint: None,
+                target_form_action: None,
             },
         )
         .expect("preview should be generated");
@@ -2973,6 +3177,9 @@ mod tests {
                 directory_root_id: None,
                 target_href: None,
                 href_fingerprint: None,
+                form_action: None,
+                form_action_fingerprint: None,
+                target_form_action: None,
             },
         )
         .expect("preview should be generated before cancellation");
@@ -2998,6 +3205,9 @@ mod tests {
                 directory_root_id: None,
                 target_href: None,
                 href_fingerprint: None,
+                form_action: None,
+                form_action_fingerprint: None,
+                target_form_action: None,
             },
         )
         .expect_err("cancelled runs must not create late previews");
@@ -3265,6 +3475,9 @@ mod tests {
                 directory_root_id: None,
                 target_href: None,
                 href_fingerprint: None,
+                form_action: None,
+                form_action_fingerprint: None,
+                target_form_action: None,
             },
         )
         .expect("preview should be generated");
@@ -3306,6 +3519,9 @@ mod tests {
                 directory_root_id: None,
                 target_href: None,
                 href_fingerprint: None,
+                form_action: None,
+                form_action_fingerprint: None,
+                target_form_action: None,
             },
         )
         .expect("navigation preview should be generated");
@@ -3338,6 +3554,9 @@ mod tests {
             directory_root_id: None,
             target_href: None,
             href_fingerprint: None,
+            form_action: None,
+            form_action_fingerprint: None,
+            target_form_action: None,
         };
 
         if let Ok(mut previews) = inner.browser_previews.lock() {
@@ -3455,6 +3674,9 @@ mod tests {
             href: Some("http://127.0.0.1:8080/admin".into()),
             href_fingerprint: Some("fingerprint".into()),
             target_href: Some("http://127.0.0.1:8080/admin".into()),
+            form_action: None,
+            form_action_fingerprint: None,
+            target_form_action: None,
             disabled: false,
             bounds: None,
         };
@@ -3481,6 +3703,9 @@ mod tests {
             href: None,
             href_fingerprint: None,
             target_href: None,
+            form_action: None,
+            form_action_fingerprint: None,
+            target_form_action: None,
             disabled: false,
             bounds: None,
         };
@@ -3499,11 +3724,67 @@ mod tests {
             href: Some("https://example.com/path".into()),
             href_fingerprint: Some("fingerprint".into()),
             target_href: Some("https://example.com/path?target=1#section".into()),
+            form_action: None,
+            form_action_fingerprint: None,
+            target_form_action: None,
             disabled: false,
             bounds: None,
         };
 
         assert!(validate_browser_element_target("click", &element).is_ok());
+    }
+
+    #[test]
+    fn form_submit_policy_revalidates_public_action_and_binds_the_action_hash() {
+        let private = BrowserElementSnapshot {
+            token: "submit-private".into(),
+            role: "button".into(),
+            name: "Save".into(),
+            input_type: Some("submit".into()),
+            has_value: false,
+            href: None,
+            href_fingerprint: None,
+            target_href: None,
+            form_action: Some("http://127.0.0.1:8080/admin".into()),
+            form_action_fingerprint: Some("private-fingerprint".into()),
+            target_form_action: Some("http://127.0.0.1:8080/admin".into()),
+            disabled: false,
+            bounds: None,
+        };
+        assert!(validate_browser_form_target("submit", &private).is_err());
+
+        let mut public_request = BrowserActionRequest {
+            element_token: Some("submit".into()),
+            value: None,
+            page_revision: "revision".into(),
+            snapshot_id: Some("snapshot".into()),
+            url: None,
+            directory_root_id: None,
+            target_href: None,
+            href_fingerprint: None,
+            form_action: Some("https://example.com/save".into()),
+            form_action_fingerprint: Some("fingerprint-a".into()),
+            target_form_action: Some("https://example.com/save".into()),
+        };
+        let first_hash = hash_browser_action("submit", &public_request);
+        public_request.form_action_fingerprint = Some("fingerprint-b".into());
+        let second_hash = hash_browser_action("submit", &public_request);
+        assert_ne!(first_hash, second_hash);
+    }
+
+    #[test]
+    fn cancelled_browser_runs_evict_oldest_marker_in_fifo_order() {
+        let state = init_browser_bridge_state();
+        let inner = Arc::clone(&state.inner);
+        for index in 0..MAX_BROWSER_CANCELLED_RUNS {
+            cancel_browser_run(&inner, &format!("run-{index}"))
+                .expect("cancellation marker should be recorded");
+        }
+        assert!(browser_run_is_cancelled(&inner, "run-0").unwrap());
+        cancel_browser_run(&inner, "run-256").expect("new cancellation marker should be recorded");
+        assert!(!browser_run_is_cancelled(&inner, "run-0").unwrap());
+        assert!(browser_run_is_cancelled(&inner, "run-1").unwrap());
+        assert!(browser_run_is_cancelled(&inner, "run-256").unwrap());
     }
 
     #[test]

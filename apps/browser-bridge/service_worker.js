@@ -3,6 +3,7 @@ let activeTabId
 let reconnectTimer
 let heartbeatTimer
 let connectionGeneration = 0
+let tabGeneration = 0
 
 function isLoopbackBridgeUrl(value) {
   try {
@@ -20,14 +21,23 @@ function sendSocket(value) {
   if (bridgeSocket?.readyState === WebSocket.OPEN) bridgeSocket.send(JSON.stringify(value))
 }
 
+function sendSocketTo(socket, value) {
+  if (bridgeSocket !== socket || socket.readyState !== WebSocket.OPEN) return false
+  socket.send(JSON.stringify(value))
+  return true
+}
+
 function closeSocket() {
+  connectionGeneration += 1
+  tabGeneration += 1
   if (reconnectTimer) clearTimeout(reconnectTimer)
   reconnectTimer = undefined
   if (heartbeatTimer) clearInterval(heartbeatTimer)
   heartbeatTimer = undefined
   activeTabId = undefined
-  if (bridgeSocket) bridgeSocket.close()
+  const socket = bridgeSocket
   bridgeSocket = undefined
+  if (socket) socket.close()
 }
 
 function startHeartbeat() {
@@ -60,14 +70,18 @@ async function connectBridge(config, tabId, origin) {
     let message
     try { message = JSON.parse(event.data) } catch { return }
     if (message.type !== 'request' || message.requestId == null || activeTabId == null) return
+    const requestTabId = activeTabId
+    const requestTabGeneration = tabGeneration
     try {
-      const response = await chrome.tabs.sendMessage(activeTabId, { type: 'bridge.request', action: message.action, payload: message.payload })
+      const response = await chrome.tabs.sendMessage(requestTabId, { type: 'bridge.request', action: message.action, payload: message.payload })
+      if (bridgeSocket !== socket || generation !== connectionGeneration || activeTabId !== requestTabId || tabGeneration !== requestTabGeneration) return
       const snapshot = response && typeof response === 'object' ? response.snapshot : undefined
       const payload = response && typeof response === 'object' ? { ...response } : response
       if (payload && typeof payload === 'object') delete payload.snapshot
-      sendSocket({ type: 'response', requestId: message.requestId, tabId: activeTabId, payload, ...(snapshot ? { snapshot } : {}) })
+      sendSocketTo(socket, { type: 'response', requestId: message.requestId, tabId: requestTabId, payload, ...(snapshot ? { snapshot } : {}) })
     } catch (error) {
-      sendSocket({ type: 'response', requestId: message.requestId, tabId: activeTabId, payload: { ok: false, summary: error instanceof Error ? error.message : '标签页不可用', errorCode: 'browser_disconnected', recoverable: true } })
+      if (bridgeSocket !== socket || generation !== connectionGeneration || activeTabId !== requestTabId || tabGeneration !== requestTabGeneration) return
+      sendSocketTo(socket, { type: 'response', requestId: message.requestId, tabId: requestTabId, payload: { ok: false, summary: error instanceof Error ? error.message : '标签页不可用', errorCode: 'browser_disconnected', recoverable: true } })
     }
   }
   socket.onerror = () => undefined
@@ -75,9 +89,15 @@ async function connectBridge(config, tabId, origin) {
     if (bridgeSocket !== socket || generation !== connectionGeneration) return
     bridgeSocket = undefined
     reconnectTimer = undefined
+    activeTabId = undefined
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    heartbeatTimer = undefined
   }
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ ok: false, message: '连接超时。' }), 5000)
+    const timer = setTimeout(() => {
+      if (bridgeSocket === socket && generation === connectionGeneration) closeSocket()
+      resolve({ ok: false, message: '连接超时。' })
+    }, 5000)
     socket.addEventListener('message', (event) => {
       if (bridgeSocket !== socket || generation !== connectionGeneration) return
       try {
@@ -91,6 +111,7 @@ async function connectBridge(config, tabId, origin) {
           resolve({ ok: true })
         } else if (message.type === 'error') {
           clearTimeout(timer)
+          closeSocket()
           resolve({ ok: false, message: typeof message.message === 'string' ? message.message.slice(0, 200) : 'Browser Bridge 配对失败。' })
         }
       } catch { /* ignore malformed bridge messages */ }
@@ -122,7 +143,10 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
   if (activeTabId != null && tabId !== activeTabId) closeSocket()
 })
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (tabId === activeTabId && changeInfo.status === 'loading') sendSocket({ type: 'navigation' })
+  if (tabId === activeTabId && changeInfo.status === 'loading') {
+    tabGeneration += 1
+    sendSocket({ type: 'navigation' })
+  }
   if (tabId === activeTabId && changeInfo.status === 'complete') {
     chrome.scripting.executeScript({ target: { tabId }, files: ['content_script.js'] }).catch(() => undefined)
   }
