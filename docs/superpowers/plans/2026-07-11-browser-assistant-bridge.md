@@ -11,14 +11,17 @@
 ## Implementation Audit (2026-07-15)
 
 `[x]` below means the implementation, test, or locally completed commit step is backed by current
-evidence. The consolidated local implementation commit is `fa9203e732b455b4c6a0e379938ab8dd411e3567`.
+evidence. The latest hardening commit is `c5daa79` (`fix: harden browser cancellation and approval scope`).
 The complete canonical href is now bound to the native preview through an opaque fingerprint, and
 execution re-checks the current element target plus public-URL/DNS policy. Chromium regression
-coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is 33
-tests, including an injected resolver/fetcher redirect fixture, token replay, wrong-tab,
-cross-origin, oversized-message, credential-link, and executable-download cases. Native browser action completion/failure records append
-a redacted entry to the existing audit JSONL; browser or extension restart still requires explicit
-re-pairing because the one-time token is consumed by design.
+coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is now
+36 tests, including an injected resolver/fetcher redirect fixture, token replay, wrong-tab,
+cross-origin, oversized-message, credential-link, executable-download, cancelled-run and pending
+request wake-up cases. Native browser action completion/failure records append a redacted entry
+to the existing audit JSONL; browser or extension restart still requires explicit re-pairing
+because the one-time token is consumed by design. Approved actions use a native gate for the
+validated send transition, while cancellation wakes pending responses without waiting for the
+12-second response deadline.
 
 Two deliberate implementation decisions are recorded here. The loopback server keeps the bounded
 blocking `tungstenite` 0.27 thread model instead of introducing a second async WebSocket runtime;

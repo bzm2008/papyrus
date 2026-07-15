@@ -6,10 +6,10 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `fa9203e732b455b4c6a0e379938ab8dd411e3567`（套餐/积分目录、审批 scope、Browser Bridge fail-closed 与 Linux 产物修复） |
+| Papyrus commit | `c5daa79`（取消竞态、canonical approval scope、Browser Bridge 版本同步与 Linux 产物修复） |
 | Desktop CI run | [29385279029](https://github.com/bzm2008/papyrus/actions/runs/29385279029) |
 | Package smoke run | [29385738173](https://github.com/bzm2008/papyrus/actions/runs/29385738173)；旧 Linux artifact `8331412342` 因 `Papyrus.png`/`papyrus.png` 冲突无法在 Windows 解压 |
-| 报告更新时间 | `2026-07-15（本地 plan-completion 收口）` |
+| 报告更新时间 | `2026-07-15（本地取消/审批 hardening 后）` |
 | 发布负责人 | `待填写` |
 | 总体状态 | `pending` |
 
@@ -58,18 +58,20 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run lint`：通过。
 - `npm run test:wps`：2 个文件、17 项通过；包含流式 401/403 结构化错误、模型/额度部分成功、stale 保留和套餐权限文案回归。
 - `npx tsc -p tsconfig.app.json --noEmit`：通过。
-- `npm run test:unit`：36 个文件、179 项通过；包含 review-only 不生成补丁、run-scope 审批复用/取消清理、`/goal` 取消后不再自动推进、审批 UI 浏览器上下文和敏感复制脱敏。
+- `npm run test:unit`：36 个文件、182 项通过；包含 review-only 不生成补丁、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
 - `npm run check:browser`：扩展语法/构建、前端桥接测试和 Rust Browser Bridge/Web Extract 定向测试通过；Rust Browser Bridge 定向为 33 项，包含注入式私网重定向 fixture。
 - `npm run test:browser:e2e`：真实 Chromium 9 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、字段变更 stale、链接 query 变化 stale、凭据链接/可执行文件名阻断和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
-- `npm run test:desktop`：36 个 TypeScript 文件、179 项通过；portable MSVC Rust 门禁 129 项通过，包含 run-scope approval、取消清理和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
+- `npm run test:desktop`：36 个 TypeScript 文件、182 项通过；portable MSVC Rust 门禁 133 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - `npm run tauri:check:portable`：Windows MSVC portable check 通过。
 - `npm run browser:package`：生成 5 个运行时文件的 `Papyrus-Browser-Bridge_0.1.2.zip`。
 - 本机 Windows unsigned NSIS smoke：两次隔离 target（含单线程 Cargo）均在 MSVC `link.exe` 关闭临时 DLL/build-script 文件时返回 `LNK1105` / Windows 错误 1224；未生成可验证安装包。GitHub Windows portable CI 对同一提交通过，package smoke 仍以远程 workflow artifact 为准。
-- `npm run test:release-scripts`：12 项通过，新增 Linux AppDir 大小写冲突排除规则回归，覆盖缺失 workflow 语义步骤、checkout SHA/产物命名、脚本 gate、CSP、命令白名单和扩展权限失败场景。
+- `npm run test:release-scripts`：13 项通过，覆盖 Linux AppDir 大小写冲突排除、Browser Bridge manifest/package 版本一致性、缺失 workflow 语义步骤、checkout SHA/产物命名、脚本 gate、CSP、命令白名单和扩展权限失败场景。
 - `npm run wps:build`：WPS 插件 TypeScript、Vite 生产构建和 legacy 入口准备通过。
 - Browser Bridge security：覆盖私网重定向/注入 DNS、受限字段、隐藏控件、跨源 tab、wrong-tab、stale snapshot、伪造/重放审批、超大消息和 token 单次使用。
+- Browser Bridge cancellation：原生取消命令按 run 清理预览/审批，disconnect 不清除已取消 run 标记；已批准动作的发送闸门与取消串行，pending 响应可被唤醒，前端 AbortSignal 在调用前 fail-closed。
+- Approval scope：文件 run grant 绑定 tool/root/target-parent digest/conflict policy/operation kind/max item count；危险操作不允许 run-scoped 复用，TS 与 Rust 比较规则一致。
 - Work Assistant doctor：Rust 注入式诊断 6 项、TypeScript doctor 2 项通过；无文件、进程或 trash 副作用。
 - Browser Bridge workbench/settings：状态分层、当前标签页/来源、健康错误、配对 token 生命周期和受限页面展示回归通过。
 - `npm run release:assistant-check`：release 阶段通过；检查三平台 workflow 的关键命令、手动 dispatch、artifact 上传/保留、checkout commit SHA、Linux 大小写冲突排除、签名边界和打包 overlay。
