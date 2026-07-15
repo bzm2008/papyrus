@@ -6,7 +6,7 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `d73b0d0`（套餐/积分实时同步、全量模型权限展示、取消竞态与 Browser Bridge 生命周期加固） |
+| Papyrus commit | `e115a43`（套餐/积分实时同步、全量模型权限展示、取消竞态与 Browser Bridge 生命周期加固） |
 | Desktop CI run | [29385279029](https://github.com/bzm2008/papyrus/actions/runs/29385279029) |
 | Package smoke run | [29385738173](https://github.com/bzm2008/papyrus/actions/runs/29385738173)；旧 Linux artifact `8331412342` 因 `Papyrus.png`/`papyrus.png` 冲突无法在 Windows 解压 |
 | 报告更新时间 | `2026-07-15（本地取消/审批 hardening 后）` |

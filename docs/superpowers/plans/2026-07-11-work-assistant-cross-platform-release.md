@@ -11,7 +11,7 @@
 ## Completion Audit (2026-07-15)
 
 `[x]` means the files, local evidence, or locally completed commit were verified. The consolidated
-latest local hardening commit is `d73b0d0` (`fix: harden entitlement sync and assistant cancellation`).
+latest local hardening commit is `e115a43` (`fix: harden assistant bridge and entitlement display`).
 The aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E (9 tests),
 full TypeScript suite (194 tests), 135-test portable Rust gate, doctor probes, and Windows portable
 check pass locally. Remote package smoke must still be rerun after the Linux artifact exclusion

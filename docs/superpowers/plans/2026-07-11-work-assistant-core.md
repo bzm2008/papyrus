@@ -11,7 +11,7 @@
 ## Implementation Audit (2026-07-15)
 
 `[x]` marks implementation, test, or locally completed commit steps. The consolidated local
-commit is `d73b0d0` (`fix: harden entitlement sync and assistant cancellation`), following the earlier
+commit is `e115a43` (`fix: harden assistant bridge and entitlement display`), following the earlier
 desktop/runtime implementation commits. The current local evidence is 36 desktop unit-test
 files/194 tests and 135 Rust tests through the portable MSVC gate. File run-scoped approvals now
 use a canonical scope containing tool, root, target-parent digest, conflict policy, operation kind,
