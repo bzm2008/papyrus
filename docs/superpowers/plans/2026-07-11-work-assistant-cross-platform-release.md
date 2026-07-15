@@ -14,8 +14,8 @@
 latest local hardening commit is `e115a43` (`fix: harden assistant bridge and entitlement display`).
 The aggregate `ci:desktop` rehearsal, WPS production build, Browser Bridge Chromium E2E (9 tests),
 full TypeScript suite (194 tests), 135-test portable Rust gate, doctor probes, and Windows portable
-check pass locally. Remote package smoke must still be rerun after the Linux artifact exclusion
-reaches the default branch; real-device records and production signing remain `pending`/`blocked`.
+check pass locally. Package smoke run `29398057472` passes on all three runners after the Linux
+artifact exclusion; real-device records and production signing remain `pending`/`blocked`.
 
 ---
 
@@ -496,9 +496,12 @@ Expected: all commands exit 0.
 
 The feature branch was pushed and Desktop CI run [29351096131](https://github.com/bzm2008/papyrus/actions/runs/29351096131) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `21b1427176fcee2925263ec141bcbda74c6d353f`. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
 
-- [ ] **Step 3: Trigger package smoke builds**
+- [x] **Step 3: Trigger package smoke builds**
 
-Run `desktop-packages.yml` through `workflow_dispatch`. Download every artifact and verify it contains the expected platform package plus the Browser Bridge ZIP. The prior run `29385738173` exposed a Linux AppDir case collision; the local workflow now excludes the duplicate lowercase icon and requires a fresh remote run before this step can be marked complete.
+Run `desktop-packages.yml` through `workflow_dispatch`. Run `29398057472` passed on Windows, macOS,
+and Ubuntu 24.04. Artifacts `8336049339`, `8336011570`, and `8336041656` contain the expected
+platform package plus Browser Bridge ZIP; Linux ZIP central-directory inspection found 262 entries,
+`Papyrus_0.1.2_amd64.AppImage`, `Papyrus_0.1.2_amd64.deb`, and zero case-insensitive duplicate paths.
 
 - [ ] **Step 4: Complete real-device records**
 
