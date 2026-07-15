@@ -6,9 +6,9 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea`（套餐/积分实时同步、全量模型权限展示、取消竞态、Browser Bridge 生命周期与跨平台 smoke 加固） |
-| Desktop CI run | [29408046525](https://github.com/bzm2008/papyrus/actions/runs/29408046525) |
-| Package smoke run | [29408076266](https://github.com/bzm2008/papyrus/actions/runs/29408076266)；Windows `8340022939`、macOS `8339989744`、Linux `8340015191` 均完成 |
+| Papyrus commit | `e0ef0e71124c5a6d64916006020e13a567b28c14`（套餐/积分实时同步、全量模型权限展示、取消竞态、Browser Bridge 生命周期与跨平台 smoke 加固） |
+| Desktop CI run | [29413687379](https://github.com/bzm2008/papyrus/actions/runs/29413687379) |
+| Package smoke run | [29414240914](https://github.com/bzm2008/papyrus/actions/runs/29414240914)；Windows `8342536560`、macOS `8342503640`、Linux `8342520662` 均完成 |
 | 报告更新时间 | `2026-07-15（远端三平台 CI/package smoke 通过后）` |
 | 发布负责人 | `待填写` |
 | 总体状态 | `pending` |
@@ -17,10 +17,10 @@
 
 | 平台 | CI 状态 | 包 smoke 状态 | 产物/日志 |
 | --- | --- | --- | --- |
-| Windows 11 / NSIS | pass | pass | Desktop CI 29408046525；artifact `8340022939` 含 `Papyrus_0.1.2_x64-setup.exe` 和 Browser Bridge ZIP；未完成真实安装验证 |
-| macOS 当前 / app + DMG | pass | pass | Desktop CI 29408046525；artifact `8339989744` 含 ARM64 DMG/app 和 Browser Bridge ZIP；未完成真实设备安装验证 |
+| Windows 11 / NSIS | pass | pass | Desktop CI 29413687379；artifact `8342536560` 含 `Papyrus_0.1.2_x64-setup.exe` 和 Browser Bridge ZIP；未完成真实安装验证 |
+| macOS 当前 / app + DMG | pass | pass | Desktop CI 29413687379；artifact `8342503640` 含 ARM64 DMG/app 和 Browser Bridge ZIP；未完成真实设备安装验证 |
 | macOS 上一主版本 / app + DMG | pending | pending |  |
-| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pass | Desktop CI 29408046525；artifact `8340015191` 含 DEB/AppImage 和 Browser Bridge ZIP；bundle smoke 日志 artifact `8340009947` |
+| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pass | Desktop CI 29413687379；artifact `8342520662` 含 DEB/AppImage 和 Browser Bridge ZIP；bundle smoke 日志 artifact `8342515464` |
 | 额外 Linux 桌面 / DEB + AppImage | pending | pending |  |
 
 Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包含版本号；smoke 产物不能被标记为已签名生产包。
@@ -42,8 +42,8 @@ Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包
 
 | ID | 描述 | 平台 | 修复/回归证据 | 状态 |
 | --- | --- | --- | --- | --- |
-| `REL-CERT-PENDING` | smoke 包真实安装/升级和真实设备矩阵尚未完成；macOS 上一主版本及额外 Linux 未覆盖 | all | Windows 10 补充记录为 blocked；Desktop CI 29408046525、package smoke 29408076266 三平台通过；支持设备记录待补 | open |
-| `REL-PACKAGE-LINUX` | Linux artifact 大小写冲突 | Linux | package smoke 29408076266 / artifact `8340015191`；bundle smoke artifact `8340009947`；Linux 包 job 通过 | resolved |
+| `REL-CERT-PENDING` | smoke 包真实安装/升级和真实设备矩阵尚未完成；macOS 上一主版本及额外 Linux 未覆盖 | all | Windows 10 补充记录为 blocked；Desktop CI 29413687379、package smoke 29414240914 三平台通过；支持设备记录待补 | open |
+| `REL-PACKAGE-LINUX` | Linux artifact 大小写冲突 | Linux | package smoke 29414240914 / artifact `8342520662`；bundle smoke artifact `8342515464`；Linux 包 job 通过 | resolved |
 | `REL-GITHUB-SCOPE` | GitHub workflow dispatch 权限 | all | `gh auth status` 已确认含 `workflow`；分支推送与 package smoke dispatch 成功 | resolved |
 
 路径逃逸、过期审批执行、受限页面动作、重复执行、崩溃或数据丢失必须保持为 blocker，不能以 warning 关闭。
@@ -92,6 +92,6 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - Desktop CI run [29398029671](https://github.com/bzm2008/papyrus/actions/runs/29398029671) 在 Windows、macOS ARM、Ubuntu 24.04 全部通过，头部 SHA 为 `0eb3439484ab646105c7ad6602206eda9bcd1f42`。
 - Desktop CI run [29399654442](https://github.com/bzm2008/papyrus/actions/runs/29399654442) 在 Windows、macOS ARM、Ubuntu 24.04 全部通过，头部 SHA 为 `556a40d8d1254dd1b1a8454fb0db62bd6f24dd3e`。
 - Package smoke run [29398057472](https://github.com/bzm2008/papyrus/actions/runs/29398057472) 三 job 全部通过；Windows artifact `8336049339`、macOS artifact `8336011570` 已下载并核对，Linux artifact `8336041656` 通过 ZIP 中央目录核对，包含 DEB/AppImage/Browser Bridge ZIP 且大小写重复为 0。
-- Desktop CI run [29408046525](https://github.com/bzm2008/papyrus/actions/runs/29408046525) 在同一远端提交 `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea` 上的 Windows、macOS、Ubuntu 24.04 全部通过。
-- Package smoke run [29408076266](https://github.com/bzm2008/papyrus/actions/runs/29408076266) 三 job 全部通过；Windows artifact `8340022939`、macOS artifact `8339989744`、Linux artifact `8340015191` 均上传，另有平台独立 bundle smoke 日志 artifacts `8340021879`、`8339987630`、`8340009947`。
+- Desktop CI run [29413687379](https://github.com/bzm2008/papyrus/actions/runs/29413687379) 在远端提交 `e0ef0e71124c5a6d64916006020e13a567b28c14` 上的 Windows、macOS、Ubuntu 24.04 全部通过。
+- Package smoke run [29414240914](https://github.com/bzm2008/papyrus/actions/runs/29414240914) 三 job 全部通过；Windows artifact `8342536560`、macOS artifact `8342503640`、Linux artifact `8342520662` 均上传，另有平台独立 bundle smoke 日志 artifacts `8342535066`、`8342502140`、`8342515464`。
 - 真实设备记录、生产签名/公证和 updater 产物仍未执行，不能关闭 `REL-CERT-PENDING`。
