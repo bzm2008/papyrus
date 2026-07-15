@@ -6,7 +6,7 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `feat/plan-completion`（待提交；套餐/积分目录、审批 scope、Browser Bridge fail-closed 与 Linux 产物修复） |
+| Papyrus commit | `fa9203e732b455b4c6a0e379938ab8dd411e3567`（套餐/积分目录、审批 scope、Browser Bridge fail-closed 与 Linux 产物修复） |
 | Desktop CI run | [29385279029](https://github.com/bzm2008/papyrus/actions/runs/29385279029) |
 | Package smoke run | [29385738173](https://github.com/bzm2008/papyrus/actions/runs/29385738173)；旧 Linux artifact `8331412342` 因 `Papyrus.png`/`papyrus.png` 冲突无法在 Windows 解压 |
 | 报告更新时间 | `2026-07-15（本地 plan-completion 收口）` |

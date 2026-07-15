@@ -11,7 +11,7 @@
 ## Implementation Audit (2026-07-15)
 
 `[x]` marks implementation, test, or locally completed commit steps. The consolidated local
-commit is the local `feat/plan-completion` worktree pending commit. The current local evidence is
+commit is `fa9203e732b455b4c6a0e379938ab8dd411e3567`. The current local evidence is
 36 desktop unit-test files/179 tests and 129 Rust tests through the portable MSVC gate. This audit
 also includes review-only patch suppression and run-scoped approval reuse bound to `runId + scope`,
 with cancellation invalidating all matching approvals. A real-user-file smoke transaction and
