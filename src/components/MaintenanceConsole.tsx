@@ -30,7 +30,7 @@ import {
 } from '../services/maintenance'
 import { getMaintenanceReadiness } from '../services/maintenanceReadiness'
 import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
-import { refreshScallionQuota, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import { getScallionQuotaDisplay, refreshScallionQuota, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { startScallionLogin } from '../services/scallionAuth'
 import {
   customContextTiers,
@@ -47,6 +47,7 @@ import {
   type ScallionPlan,
   type ScallionQuota,
   type ScallionSyncChannelState,
+  type ScallionUser,
 } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 
@@ -301,6 +302,7 @@ export function MaintenanceConsole() {
           >
             <ScallionAccountSummary
               token={scallionToken}
+              user={scallionUser}
               username={scallionUser?.username}
               memberType={scallionUser?.member_type}
               plan={scallionPlan}
@@ -647,6 +649,7 @@ function MemoryPanel({
 
 function ScallionAccountSummary({
   token,
+  user,
   username,
   memberType,
   plan: storedPlan,
@@ -656,6 +659,7 @@ function ScallionAccountSummary({
   authUserCode,
 }: {
   token?: string
+  user?: ScallionUser
   username?: string
   memberType?: string
   plan?: ScallionPlan
@@ -670,8 +674,9 @@ function ScallionAccountSummary({
     storedPlan?.name ||
     storedPlan?.key ||
     (memberType ? formatScallionPlanName(memberType) : undefined)
-  const points = quota?.pointsBalance ?? quota?.remaining
-  const pointsAreCached = !token || sync.status !== 'ready'
+  const quotaDisplay = getScallionQuotaDisplay({ token, quota, user, syncStatus: sync.status })
+  const points = quotaDisplay.value
+  const pointsAreCached = quotaDisplay.source === 'cached'
 
   return (
     <section className="mb-5 rounded-xl border border-[#d7aa4f]/45 bg-[#fff7e3] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.05)]">

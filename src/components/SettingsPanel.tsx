@@ -33,7 +33,7 @@ import {
 } from '../services/modelCatalog'
 import { checkAndDownloadUpdate, relaunchToInstallUpdate } from '../services/updater'
 import { logoutScallion, startScallionLogin } from '../services/scallionAuth'
-import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import { getScallionQuotaDisplay, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import {
@@ -89,9 +89,14 @@ export function SettingsPanel() {
   const authUserCode = useAppStore((state) => state.authUserCode)
   const cloudProvider = providerConfigs.qwen36
   const customProvider = providerConfigs.custom
-  const quotaScallionPoints = scallionQuota?.pointsBalance ?? scallionQuota?.remaining
-  const visibleScallionPoints = quotaScallionPoints ?? scallionUser?.points ?? scallionUser?.balance
-  const scallionPointsAreCached = quotaScallionPoints === undefined || !scallionToken
+  const scallionQuotaDisplay = getScallionQuotaDisplay({
+    token: scallionToken,
+    quota: scallionQuota,
+    user: scallionUser,
+    syncStatus: scallionSync.quota.status,
+  })
+  const visibleScallionPoints = scallionQuotaDisplay.value
+  const scallionPointsAreCached = scallionQuotaDisplay.source === 'cached'
   const vendorProviders = providerOrder
     .map((providerId) => providerConfigs[providerId])
     .filter((provider) => provider.type === 'vendor_key')
