@@ -146,6 +146,7 @@ export function MaintenanceConsole() {
           setMemoryUsageBytes(result.bytes)
           setMemoryUsageNotice(null)
         } else if (result.status !== 'ok') {
+          setMemoryClearNotice((notice) => (notice?.status === 'ok' ? null : notice))
           setMemoryUsageNotice(toMemoryUsageNotice(result))
         }
       }),
@@ -234,7 +235,7 @@ export function MaintenanceConsole() {
 
     const result = await rebuildProjectIndex()
 
-    if (typeof result.bytes === 'number') {
+    if (result.status === 'ok' && typeof result.bytes === 'number') {
       setMemoryUsageBytes(result.bytes)
     }
 
@@ -1242,8 +1243,7 @@ function safeMemoryClearMessage(message: string, fallback: string) {
   const normalized = message.replace(/\s+/g, ' ').trim()
   const unsafeDetail = [
     /(?:^|[^a-z])[a-z]:[\\/]/i,
-    /:[\\/][\w.-]+(?:\/[\w.-]+)*/,
-    /(?:^|[\s"'(])\/[\w.-]+(?:\/[\w.-]+)*/,
+    /(?:^|[^\w/])\/[\w.-]+(?:\/[\w.-]+)*/,
     /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
     /\bfile:(?:\/\/|\\\\)/i,
     /\b(?:[\w$]*error|exception|fatal|panic|stack(?:\s+trace)?|traceback|backtrace|unhandled(?:\s+rejection)?|permission denied|access denied|os error|errno)\b/i,

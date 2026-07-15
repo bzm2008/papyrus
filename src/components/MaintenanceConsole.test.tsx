@@ -80,6 +80,12 @@ async function confirmMemoryClear() {
   await waitFor(() => expect(maintenance.clearGlobalMemory).toHaveBeenCalledTimes(1))
 }
 
+async function confirmIndexRebuild() {
+  fireEvent.click(screen.getByRole('button', { name: /重建项目索引/ }))
+  fireEvent.click(screen.getByRole('button', { name: '确认执行' }))
+  await waitFor(() => expect(maintenance.rebuildProjectIndex).toHaveBeenCalledTimes(1))
+}
+
 describe('MaintenanceConsole global memory clearing', () => {
   it('clears local records only after the native clear succeeds and renders its success message', async () => {
     vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
@@ -116,6 +122,44 @@ describe('MaintenanceConsole global memory clearing', () => {
     expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
     expect(useAppStore.getState().agentRuns).toEqual([run])
     expect(screen.getByRole('alert')).toHaveTextContent('清理未完成')
+  })
+
+  it('keeps the prior usage when index rebuilding is only a recoverable warning', async () => {
+    vi.mocked(maintenance.getMemoryUsage).mockImplementation(() => new Promise<never>(() => undefined))
+    vi.mocked(maintenance.rebuildProjectIndex).mockResolvedValue({
+      status: 'warning',
+      message: '索引重建尚未完成。',
+      bytes: 512,
+    })
+    prepareMemoryState()
+
+    render(<MaintenanceConsole />)
+    await confirmIndexRebuild()
+
+    expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
+  })
+
+  it('replaces a completed clear notice with a later memory usage warning', async () => {
+    vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
+      status: 'ok',
+      message: '全局记忆已清空。',
+      bytes: 0,
+    })
+    vi.mocked(maintenance.getMemoryUsage)
+      .mockResolvedValueOnce({ status: 'ok', message: '占用已统计。', bytes: 1024 })
+      .mockResolvedValueOnce({ status: 'warning', message: '最新统计暂不可用。' })
+    prepareMemoryState()
+
+    render(<MaintenanceConsole />)
+    await waitFor(() => expect(maintenance.getMemoryUsage).toHaveBeenCalledTimes(1))
+    await confirmMemoryClear()
+    expect(screen.getByRole('alert')).toHaveTextContent('全局记忆已清空。')
+
+    fireEvent.click(screen.getByRole('button', { name: '重新检测' }))
+    await waitFor(() => expect(maintenance.getMemoryUsage).toHaveBeenCalledTimes(2))
+
+    expect(screen.getByRole('alert')).toHaveTextContent('最新统计暂不可用。')
+    expect(screen.queryByText('全局记忆已清空。')).not.toBeInTheDocument()
   })
 
   it('keeps local records and renders the native error message when cleanup fails', async () => {
@@ -158,6 +202,9 @@ describe('MaintenanceConsole global memory clearing', () => {
     ['single-component /var path', '/var is locked'],
     ['colon-adjacent /tmp path', 'failed:/tmp'],
     ['colon-adjacent nested POSIX path', 'failed:/usr/local/share/papyrus/memory.db'],
+    ['equals-adjacent POSIX path', 'details=/tmp/private.db'],
+    ['comma-adjacent POSIX path', 'failed,/usr/local/share/papyrus/memory.db'],
+    ['bracket-adjacent POSIX path', 'failed[/tmp]'],
     ['UNC path', '\\\\fileserver\\team-share\\papyrus\\memory.db is locked'],
     ['file URL', 'file:///usr/local/share/papyrus/memory.db is locked'],
     ['stack trace marker', 'Stack trace: at clear_memory (maintenance.rs:42)'],
