@@ -100,8 +100,8 @@ export async function getMemoryUsage() {
 
 export async function clearGlobalMemory() {
   return invokeMaintenance('clear_global_memory', undefined, {
-    status: 'ok',
-    message: '浏览器预览模式：已跳过真实清理。',
+    status: 'warning',
+    message: '当前环境未执行本地记忆清理。',
     bytes: 0,
   })
 }

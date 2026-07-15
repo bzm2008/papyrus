@@ -1218,10 +1218,16 @@ function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice 
 
 function safeMemoryClearMessage(message: string, fallback: string) {
   const normalized = message.replace(/\s+/g, ' ').trim()
-  const unsafeDetail =
-    /(?:[a-z]:[\\/]|(?:^|[\s"'(])[\\/](?:users|home|var|tmp|etc|private|mnt|opt|appdata|programdata)(?:[\\/]|$)|\b(?:stack trace|backtrace|panic|exception|permission denied|access denied|os error)\b|\b(?:error|exception)\s*:)/i
+  const unsafeDetail = [
+    /[a-z]:[\\/]/i,
+    /\/(?:[\w.-]+\/)+[\w.-]+/,
+    /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
+    /\bfile:(?:\/\/|\\\\)/i,
+    /\b(?:[\w$]*error|exception|fatal|panic|stack(?:\s+trace)?|traceback|backtrace|unhandled(?:\s+rejection)?|permission denied|access denied|os error|errno)\b/i,
+    /(?:^|\s)at\s+\S+/i,
+  ].some((pattern) => pattern.test(normalized))
 
-  return normalized && normalized.length <= 240 && !unsafeDetail.test(normalized) ? normalized : fallback
+  return normalized && normalized.length <= 240 && !unsafeDetail ? normalized : fallback
 }
 
 function formatBytes(bytes: number) {

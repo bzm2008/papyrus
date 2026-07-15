@@ -151,4 +151,24 @@ describe('MaintenanceConsole global memory clearing', () => {
     expect(alert).toHaveTextContent('清理未完成，当前本地记忆和运行记录已保留。')
     expect(alert).not.toHaveTextContent('C:\\Users\\Administrator')
   })
+
+  it.each([
+    ['Debian absolute path', '/usr/local/share/papyrus/memory.db is locked'],
+    ['UNC path', '\\\\fileserver\\team-share\\papyrus\\memory.db is locked'],
+    ['file URL', 'file:///usr/local/share/papyrus/memory.db is locked'],
+    ['stack trace marker', 'Stack trace: at clear_memory (maintenance.rs:42)'],
+  ])('redacts unsafe %s details', async (_kind, message) => {
+    vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
+      status: 'error',
+      message,
+    })
+    prepareMemoryState()
+
+    render(<MaintenanceConsole />)
+    await confirmMemoryClear()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('清理未完成，当前本地记忆和运行记录已保留。')
+    expect(alert).not.toHaveTextContent(message)
+  })
 })
