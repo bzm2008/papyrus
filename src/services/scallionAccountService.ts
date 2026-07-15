@@ -4,12 +4,19 @@ import {
   useAppStore,
   type ScallionModelMetadata,
   type ScallionQuota,
+  type ScallionSyncStatus,
   type ScallionUser,
 } from '../stores/useAppStore'
 
 const SCALLION_QUOTA_API = 'https://scallion.uno/api/papyrus/llm/quota'
 const DEFAULT_UPGRADE_URL = 'https://scallion.uno/pricing'
 const SCALLION_REQUEST_TIMEOUT_MS = 15_000
+
+export type ScallionQuotaDisplay = {
+  value?: number
+  source: 'realtime' | 'cached' | 'unavailable'
+  status: ScallionSyncStatus
+}
 
 let quotaRefreshInFlight: { token: string; promise: Promise<ScallionQuota | undefined> } | undefined
 let modelsRefreshInFlight: { token: string; promise: Promise<ScallionModelMetadata[]> } | undefined
@@ -300,6 +307,37 @@ export function quotaFromUser(user?: ScallionUser): ScallionQuota | undefined {
   }
 }
 
+/**
+ * Keep quota labels honest at every surface. Only a successful quota response
+ * carrying points_balance is allowed to be called realtime; persisted account
+ * data and the last successful value are explicitly treated as cached.
+ */
+export function getScallionQuotaDisplay(input: {
+  token?: string
+  quota?: ScallionQuota
+  user?: ScallionUser
+  syncStatus?: ScallionSyncStatus
+}): ScallionQuotaDisplay {
+  const status = input.syncStatus ?? 'idle'
+  const livePoints = finiteNumber(input.quota?.pointsBalance)
+  const fallbackPoints = firstFiniteNumber(
+    input.quota?.remaining,
+    input.user?.points,
+    input.user?.balance,
+  )
+
+  if (input.token?.trim() && status === 'ready' && livePoints !== undefined) {
+    return { value: livePoints, source: 'realtime', status }
+  }
+
+  const cachedValue = livePoints ?? fallbackPoints
+  return {
+    value: cachedValue,
+    source: cachedValue === undefined ? 'unavailable' : 'cached',
+    status,
+  }
+}
+
 export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): ScallionQuota {
   const accountUser = user ?? payload.user
   const quotaObject = payload.quota && typeof payload.quota === 'object' ? payload.quota : undefined
@@ -390,6 +428,24 @@ function firstNumber(...values: unknown[]) {
   }
 
   return 0
+}
+
+function firstFiniteNumber(...values: unknown[]) {
+  for (const value of values) {
+    const number = finiteNumber(value)
+    if (number !== undefined) {
+      return number
+    }
+  }
+  return undefined
+}
+
+function finiteNumber(value: unknown) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return undefined
+  }
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? Math.max(0, number) : undefined
 }
 
 function hasQuotaBalance(payload: AccountPayload, user?: ScallionUser) {

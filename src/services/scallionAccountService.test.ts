@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  getScallionQuotaDisplay,
   normalizeQuota,
   quotaFromUser,
   refreshScallionModels,
@@ -259,6 +260,54 @@ describe('normalizeQuota', () => {
         isMember: true,
       }),
     )
+  })
+})
+
+describe('getScallionQuotaDisplay', () => {
+  it('only labels points_balance from a ready authenticated quota response as realtime', () => {
+    expect(
+      getScallionQuotaDisplay({
+        token: 'jwt-token',
+        quota: {
+          remaining: 504,
+          pointsBalance: 504,
+          unit: '积分',
+          isMember: false,
+          memberPriceLabel: '',
+          upgradeUrl: '',
+          topUpUrl: '',
+          updatedAt: 1,
+        },
+        syncStatus: 'ready',
+      }),
+    ).toEqual({ value: 504, source: 'realtime', status: 'ready' })
+  })
+
+  it('marks the last successful value as cached while a refresh is stale', () => {
+    expect(
+      getScallionQuotaDisplay({
+        token: 'jwt-token',
+        quota: {
+          remaining: 503,
+          pointsBalance: 503,
+          unit: '积分',
+          isMember: false,
+          memberPriceLabel: '',
+          upgradeUrl: '',
+          topUpUrl: '',
+          updatedAt: 1,
+        },
+        syncStatus: 'stale',
+      }),
+    ).toEqual({ value: 503, source: 'cached', status: 'stale' })
+  })
+
+  it('does not display zero when no account value has been received', () => {
+    expect(getScallionQuotaDisplay({ token: 'jwt-token', syncStatus: 'syncing' })).toEqual({
+      value: undefined,
+      source: 'unavailable',
+      status: 'syncing',
+    })
   })
 })
 

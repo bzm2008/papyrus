@@ -64,8 +64,15 @@ async function fixture() {
     - run: npm ci
     - run: npm run ci:desktop
     - run: npm run test:browser:e2e
+    - run: sudo apt-get install -y xvfb dbus-x11
     - run: npm run browser:package
     - run: npm run tauri -- build --config \${{ matrix.config }}
+    - run: node scripts/smoke-tauri-bundle.mjs --bundle-dir src-tauri/target/release/bundle --output "$PAPYRUS_SMOKE_DIR"
+      env:
+        PAPYRUS_SMOKE_DIR: \${{ runner.temp }}/papyrus-bundle-smoke
+    - uses: actions/upload-artifact@v4
+      with:
+        path: \${{ runner.temp }}/papyrus-bundle-smoke
     - uses: actions/upload-artifact@v4
       with:
         name: \${{ matrix.artifact }}-\${{ steps.packaged.outputs.sha }}
