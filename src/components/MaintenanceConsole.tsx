@@ -26,6 +26,7 @@ import {
   clearGlobalMemory,
   getMemoryUsage,
   rebuildProjectIndex,
+  safeMaintenanceMessage,
   testModelConnection,
   type MaintenanceProbeResult,
 } from '../services/maintenance'
@@ -169,7 +170,7 @@ export function MaintenanceConsole() {
 
     setMaintenanceCheck(id, {
       status: result.status,
-      message: result.message,
+      message: safeMaintenanceMessage(result.message, '维护检查未完成。'),
       latencyMs: result.latencyMs,
     })
   }
@@ -192,13 +193,13 @@ export function MaintenanceConsole() {
 
       setMaintenanceCheck('llm', {
         status: result.status,
-        message: result.message,
+        message: safeMaintenanceMessage(result.message, '模型连通性测试未完成。'),
         latencyMs: result.latencyMs,
       })
     } catch (error) {
       setMaintenanceCheck('llm', {
         status: 'error',
-        message: error instanceof Error ? error.message : String(error || '模型连通性测试失败。'),
+        message: safeMaintenanceMessage(error, '模型连通性测试未完成。'),
       })
     } finally {
       setTestingProviderId(null)
@@ -978,6 +979,7 @@ function MemoryList({
 
 function StatusRow({ check }: { check: MaintenanceCheck }) {
   const status = statusTheme(check.status)
+  const message = safeMaintenanceMessage(check.message, '维护检查未完成。')
 
   return (
     <div className="flex items-center justify-between gap-4 rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">
@@ -989,7 +991,7 @@ function StatusRow({ check }: { check: MaintenanceCheck }) {
         </span>
         <div className="min-w-0">
           <div className="text-sm font-semibold text-[#171714]">{check.label}</div>
-          <div className="mt-1 truncate text-xs text-[#7d7a70]">{check.message}</div>
+          <div className="mt-1 truncate text-xs text-[#7d7a70]">{message}</div>
         </div>
       </div>
       <div className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${status.badge}`}>
@@ -1208,19 +1210,19 @@ function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice 
       return {
         status: 'ok',
         title: '记忆已清空',
-        message: safeMemoryClearMessage(result.message, '全局记忆已清空。'),
+        message: safeMaintenanceMessage(result.message, '全局记忆已清空。'),
       }
     case 'warning':
       return {
         status: 'warning',
         title: '清理未完成',
-        message: safeMemoryClearMessage(result.message, '清理未完整完成，当前本地记忆和运行记录已保留。'),
+        message: safeMaintenanceMessage(result.message, '清理未完整完成，当前本地记忆和运行记录已保留。'),
       }
     case 'error':
       return {
         status: 'error',
         title: '清理失败',
-        message: safeMemoryClearMessage(result.message, '清理未完成，当前本地记忆和运行记录已保留。'),
+        message: safeMaintenanceMessage(result.message, '清理未完成，当前本地记忆和运行记录已保留。'),
       }
   }
 }
@@ -1235,22 +1237,8 @@ function toMemoryUsageNotice(result: MaintenanceProbeResult): MemoryClearNotice 
   return {
     status,
     title: status === 'error' ? '存储统计失败' : '存储统计未执行',
-    message: safeMemoryClearMessage(result.message, fallback),
+    message: safeMaintenanceMessage(result.message, fallback),
   }
-}
-
-function safeMemoryClearMessage(message: string, fallback: string) {
-  const normalized = message.replace(/\s+/g, ' ').trim()
-  const unsafeDetail = [
-    /(?:^|[^a-z])[a-z]:[\\/]/i,
-    /(?:^|[^\w/])\/[\w.-]+(?:\/[\w.-]+)*/,
-    /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
-    /\bfile:(?:\/\/|\\\\)/i,
-    /\b(?:[\w$]*error|exception|fatal|panic|stack(?:\s+trace)?|traceback|backtrace|unhandled(?:\s+rejection)?|permission denied|access denied|os error|errno)\b/i,
-    /(?:^|\s)at\s+\S+/i,
-  ].some((pattern) => pattern.test(normalized))
-
-  return normalized && normalized.length <= 240 && !unsafeDetail ? normalized : fallback
 }
 
 function formatBytes(bytes: number) {

@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { clearGlobalMemory, getMemoryUsage } from '../services/maintenance'
+import { checkBackendCommunication, checkSqliteStatus, clearGlobalMemory, getMemoryUsage } from '../services/maintenance'
 import type { AgentMemoryRecord, AgentRunRecord } from '../stores/useAppStore'
 import { useAppStore } from '../stores/useAppStore'
 import { MaintenanceConsole } from './MaintenanceConsole'
@@ -14,9 +14,7 @@ vi.mock('../services/maintenance', async (importOriginal) => {
 
   return {
     ...actual,
-    checkBackendCommunication: vi.fn(async () => ({ status: 'ok', message: '桌面后端正常。' })),
     checkDefaultModelLatency: vi.fn(async () => ({ status: 'ok', message: '模型正常。' })),
-    checkSqliteStatus: vi.fn(async () => ({ status: 'ok', message: '数据库正常。' })),
   }
 })
 
@@ -81,6 +79,18 @@ afterEach(() => {
 })
 
 describe('MaintenanceConsole browser clear fallback', () => {
+  it('marks unavailable native core checks as not ready in browser preview', async () => {
+    const [backend, sqlite] = await Promise.all([checkBackendCommunication(), checkSqliteStatus()])
+
+    expect(backend.status).toBe('warning')
+    expect(sqlite.status).toBe('warning')
+
+    render(<MaintenanceConsole />)
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('health_check_backend'))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('check_sqlite_status'))
+    expect(screen.getByRole('button', { name: '进入 Papyrus' })).toBeDisabled()
+  })
+
   it('returns a non-executed memory usage warning without a byte count', async () => {
     const result = await getMemoryUsage()
 

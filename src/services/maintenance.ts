@@ -24,13 +24,12 @@ type NativeMaintenancePayload = {
 
 const previewResults: Record<MaintenanceCheckId, MaintenanceProbeResult> = {
   tauri: {
-    status: 'ok',
-    message: '浏览器预览模式：已使用前端降级检查。',
-    latencyMs: 0,
+    status: 'warning',
+    message: '当前环境未执行桌面后端检测。',
   },
   sqlite: {
-    status: 'ok',
-    message: '浏览器预览模式：本地存储由桌面端接管。',
+    status: 'warning',
+    message: '当前环境未执行本地存储检测。',
   },
   llm: {
     status: 'warning',
@@ -124,7 +123,7 @@ async function invokeMaintenance(
       ? await invoke<NativeMaintenancePayload>(command, args)
       : await invoke<NativeMaintenancePayload>(command)
 
-    return normalizeNativePayload(payload)
+    return normalizeNativePayload(payload, command)
   } catch (error) {
     if (!isTauriRuntime()) {
       return typeof fallback === 'function' ? await fallback() : fallback
@@ -132,7 +131,7 @@ async function invokeMaintenance(
 
     return {
       status: 'error',
-      message: errorToMessage(error, `${command} 执行失败。`),
+      message: errorToMessage(error, maintenanceFailureMessage(command)),
     } satisfies MaintenanceProbeResult
   }
 }
@@ -166,10 +165,15 @@ async function testModelConnectionInBrowser(provider: LlmProviderConfig) {
   } satisfies MaintenanceProbeResult
 }
 
-function normalizeNativePayload(payload: NativeMaintenancePayload): MaintenanceProbeResult {
+function normalizeNativePayload(payload: NativeMaintenancePayload, command: string): MaintenanceProbeResult {
+  const status = payload.status ?? 'warning'
+
   return {
-    status: payload.status ?? 'warning',
-    message: payload.message ?? '检测已完成。',
+    status,
+    message: safeMaintenanceMessage(
+      payload.message,
+      status === 'ok' ? '检测已完成。' : maintenanceFailureMessage(command),
+    ),
     latencyMs: payload.latencyMs ?? payload.latency_ms,
     bytes: payload.bytes,
   }
@@ -183,15 +187,44 @@ function isTauriRuntime() {
 }
 
 function errorToMessage(error: unknown, fallback: string) {
-  if (error instanceof Error && error.message.trim()) {
-    return error.message
-  }
+  return safeMaintenanceMessage(error, fallback)
+}
 
-  if (typeof error === 'string' && error.trim()) {
-    return error
-  }
+export function safeMaintenanceMessage(value: unknown, fallback: string) {
+  const message = typeof value === 'string' ? value : ''
+  const normalized = message.replace(/\s+/g, ' ').trim()
 
-  return fallback
+  return normalized && normalized.length <= 240 && !hasUnsafeMaintenanceDetail(normalized) ? normalized : fallback
+}
+
+function hasUnsafeMaintenanceDetail(message: string) {
+  return [
+    /(?:^|[^a-z])[a-z]:[\\/]/i,
+    /(?:^|[^\w/]|_)\/[\w.-]+(?:\/[\w.-]+)*/,
+    /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
+    /\bfile:(?:\/\/|\\\\)/i,
+    /\b(?:[\w$]*error|exception|fatal|panic|stack(?:\s+trace)?|traceback|backtrace|unhandled(?:\s+rejection)?|permission denied|access denied|os error|errno)\b/i,
+    /(?:^|\s)at\s+\S+/i,
+  ].some((pattern) => pattern.test(message))
+}
+
+function maintenanceFailureMessage(command: string) {
+  switch (command) {
+    case 'health_check_backend':
+      return '桌面后端检测未完成。'
+    case 'check_sqlite_status':
+      return '本地存储检测未完成。'
+    case 'get_memory_usage':
+      return '本地记忆统计未完成。'
+    case 'clear_global_memory':
+      return '本地记忆清理未完成。'
+    case 'rebuild_project_index':
+      return '项目索引重建未完成。'
+    case 'test_model_connection':
+      return '模型连通性测试未完成。'
+    default:
+      return '维护检查未完成。'
+  }
 }
 
 function resolveMaintenanceApiKey(provider: LlmProviderConfig) {

@@ -6,15 +6,20 @@ import type { AgentMemoryRecord, AgentRunRecord } from '../stores/useAppStore'
 import { useAppStore } from '../stores/useAppStore'
 import { MaintenanceConsole } from './MaintenanceConsole'
 
-vi.mock('../services/maintenance', () => ({
-  checkBackendCommunication: vi.fn(async () => ({ status: 'ok', message: '桌面后端正常。' })),
-  checkDefaultModelLatency: vi.fn(async () => ({ status: 'ok', message: '模型正常。' })),
-  checkSqliteStatus: vi.fn(async () => ({ status: 'ok', message: '数据库正常。' })),
-  clearGlobalMemory: vi.fn(),
-  getMemoryUsage: vi.fn(async () => ({ status: 'ok', message: '占用已统计。', bytes: 0 })),
-  rebuildProjectIndex: vi.fn(async () => ({ status: 'ok', message: '索引已重建。' })),
-  testModelConnection: vi.fn(async () => ({ status: 'ok', message: '模型正常。' })),
-}))
+vi.mock('../services/maintenance', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/maintenance')>()
+
+  return {
+    ...actual,
+    checkBackendCommunication: vi.fn(async () => ({ status: 'ok', message: '桌面后端正常。' })),
+    checkDefaultModelLatency: vi.fn(async () => ({ status: 'ok', message: '模型正常。' })),
+    checkSqliteStatus: vi.fn(async () => ({ status: 'ok', message: '数据库正常。' })),
+    clearGlobalMemory: vi.fn(),
+    getMemoryUsage: vi.fn(async () => ({ status: 'ok', message: '占用已统计。', bytes: 0 })),
+    rebuildProjectIndex: vi.fn(async () => ({ status: 'ok', message: '索引已重建。' })),
+    testModelConnection: vi.fn(async () => ({ status: 'ok', message: '模型正常。' })),
+  }
+})
 
 vi.mock('../services/scallionAccountService', () => ({
   getScallionQuotaDisplay: vi.fn(() => ({ value: undefined, source: 'none' })),
@@ -162,6 +167,25 @@ describe('MaintenanceConsole global memory clearing', () => {
     expect(screen.queryByText('全局记忆已清空。')).not.toBeInTheDocument()
   })
 
+  it.each([
+    ['maintenance', 'Error: /tmp/private.db is locked'],
+    ['model', '\\\\fileserver\\share\\model.log'],
+    ['maintenance file URL', 'file:///var/lib/papyrus/maintenance.log'],
+    ['model stack', 'Stack trace: at upstream_model (client.ts:42)'],
+  ])('redacts unsafe %s check messages before they reach StatusRow', async (kind, message) => {
+    if (kind.startsWith('model')) {
+      vi.mocked(maintenance.checkDefaultModelLatency).mockResolvedValue({ status: 'error', message })
+    } else {
+      vi.mocked(maintenance.checkBackendCommunication).mockResolvedValue({ status: 'error', message })
+    }
+    useAppStore.setState({ maintenanceTab: 'connections' })
+
+    render(<MaintenanceConsole />)
+
+    expect((await screen.findAllByText('维护检查未完成。')).length).toBeGreaterThan(0)
+    expect(screen.queryByText(message)).not.toBeInTheDocument()
+  })
+
   it('keeps local records and renders the native error message when cleanup fails', async () => {
     vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
       status: 'error',
@@ -205,6 +229,7 @@ describe('MaintenanceConsole global memory clearing', () => {
     ['equals-adjacent POSIX path', 'details=/tmp/private.db'],
     ['comma-adjacent POSIX path', 'failed,/usr/local/share/papyrus/memory.db'],
     ['bracket-adjacent POSIX path', 'failed[/tmp]'],
+    ['underscore-adjacent POSIX path', 'details_/tmp/private.db'],
     ['UNC path', '\\\\fileserver\\team-share\\papyrus\\memory.db is locked'],
     ['file URL', 'file:///usr/local/share/papyrus/memory.db is locked'],
     ['stack trace marker', 'Stack trace: at clear_memory (maintenance.rs:42)'],
