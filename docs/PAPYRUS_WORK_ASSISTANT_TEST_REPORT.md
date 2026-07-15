@@ -17,10 +17,10 @@
 
 | 平台 | CI 状态 | 包 smoke 状态 | 产物/日志 |
 | --- | --- | --- | --- |
-| Windows 11 / NSIS | pass | pending | Desktop CI run 29385279029；package artifact `8331424527` 已生成但未完成下载/安装验证 |
-| macOS 当前 / app + DMG | pass | pending | Desktop CI run 29385279029；package artifact `8331384687` 已生成但无本机设备安装记录 |
+| Windows 11 / NSIS | pass | pending | Desktop CI run 29385279029；artifact `8331424527` 已下载，含 `Papyrus_0.1.2_x64-setup.exe` 和 Browser Bridge ZIP，未完成真实安装验证 |
+| macOS 当前 / app + DMG | pass | pending | Desktop CI run 29385279029；artifact `8331384687` 已下载，含 ARM64 DMG/app 和 Browser Bridge ZIP，未完成真实设备安装验证 |
 | macOS 上一主版本 / app + DMG | pending | pending |  |
-| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pending | Desktop CI run 29385279029；旧 package artifact `8331412342` 大小写冲突，修复待远端重跑 |
+| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pending | Desktop CI run 29385279029；旧 artifact `8331412342` 报告大小写冲突，当前下载未完成，修复待远端重跑 |
 | 额外 Linux 桌面 / DEB + AppImage | pending | pending |  |
 
 Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包含版本号；smoke 产物不能被标记为已签名生产包。
@@ -85,5 +85,5 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 ## 远程仓库证据（2026-07-14）
 
 - 远程 `main` 当前为 `ac1f625`；Desktop CI run [29385279029](https://github.com/bzm2008/papyrus/actions/runs/29385279029) 在 Windows、macOS ARM、Ubuntu 24.04 全部通过。
-- Package smoke run [29385738173](https://github.com/bzm2008/papyrus/actions/runs/29385738173) 三 job 完成；Windows artifact `8331424527`、macOS artifact `8331384687` 已生成，Linux artifact `8331412342` 在 Windows 解压时暴露大小写冲突。修复已在本地工作树，尚未进入远端默认分支。
+- Package smoke run [29385738173](https://github.com/bzm2008/papyrus/actions/runs/29385738173) 三 job 完成；Windows artifact `8331424527` 和 macOS artifact `8331384687` 已下载并核对包文件，Linux artifact `8331412342` 暴露大小写冲突。修复已在本地工作树，尚未进入远端默认分支。
 - 真实设备记录、生产签名/公证和 updater 产物仍未执行，不能关闭 `REL-CERT-PENDING`。
