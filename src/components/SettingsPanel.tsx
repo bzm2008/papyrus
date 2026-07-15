@@ -239,7 +239,7 @@ export function SettingsPanel() {
                         </button>
                       </div>
                       <div className="grid gap-2 rounded-lg bg-[#fffefa] p-3">
-                        <div className="text-xs text-[#8f897a]">剩余内置模型额度</div>
+                        <div className="text-xs text-[#8f897a]">剩余积分</div>
                         <div className="text-xl font-semibold tabular-nums text-[#20201d]">
                           {scallionQuota
                             ? scallionQuota.pointsBalance ??
