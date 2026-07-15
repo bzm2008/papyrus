@@ -8,6 +8,7 @@ use crate::work_assistant::{
     append_audit_entry, platform, AssistantErrorPayload, AuthorizedRoot, DesktopStatus, DiskStatus,
     PathPolicy, RegisteredApplication, WorkAssistantError, WorkAssistantState,
 };
+use serde::Serialize;
 use std::{
     fs,
     io::{self, Read, Write},
@@ -29,6 +30,12 @@ const BLOCKED_OPEN_EXTENSIONS: &[&str] = &[
 
 const MAX_APPLICATION_LABEL_LENGTH: usize = 128;
 const DEFAULT_AUDIT_LIMIT: usize = 50;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DesktopRevealResult {
+    pub degraded: bool,
+    pub warning: Option<String>,
+}
 
 /// Validate an external URL before it reaches a platform opener.
 pub fn validate_open_url(value: &str) -> Result<(), WorkAssistantError> {
@@ -306,7 +313,7 @@ pub fn work_assistant_desktop_reveal_file(
     state: State<'_, WorkAssistantState>,
     root_id: String,
     path: String,
-) -> Result<(), AssistantErrorPayload> {
+) -> Result<DesktopRevealResult, AssistantErrorPayload> {
     let roots = state
         .roots
         .read()

@@ -134,6 +134,14 @@ async function flushAsync() {
 }
 
 describe('Browser Bridge extension protocol', () => {
+  it('keeps the shared JSON protocol fixtures parseable by the extension harness', () => {
+    const fixtureDir = path.resolve(process.cwd(), 'apps/browser-bridge/test-fixtures/protocol')
+    for (const file of ['pair.json', 'snapshot.json', 'action-request.json', 'action-response.json']) {
+      const value = JSON.parse(fs.readFileSync(path.join(fixtureDir, file), 'utf8')) as Record<string, unknown>
+      expect(value.type).toBeTypeOf('string')
+    }
+  })
+
   it('rejects a missing active tab before attempting injection', async () => {
     const harness = createHarness()
     const listener = findListener(harness)
@@ -234,6 +242,23 @@ describe('Browser Bridge extension protocol', () => {
     })
     harness.intervalCallbacks[0]?.()
     expect(socket?.sent.at(-1)).toMatchObject({ type: 'heartbeat', at: expect.any(Number) })
+  })
+
+  it('requires explicit re-pairing after a service-worker restart', async () => {
+    const harness = createHarness()
+    const listener = findListener(harness)
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-restart', nonce: 'nonce-restart' }, tabId: 24, origin: 'https://example.com' }, {}, () => undefined)
+    await flushAsync()
+    const socket = MockWebSocket.latest
+    socket?.onopen?.()
+    socket?.emitMessage({ type: 'paired' })
+    await flushAsync()
+    expect(harness.removedStorage).toContainEqual(['wsUrl', 'token', 'nonce'])
+
+    const restarted = createHarness()
+    const statusResponses: unknown[] = []
+    findListener(restarted)({ type: 'status' }, {}, (value: unknown) => statusResponses.push(value))
+    expect(statusResponses[0]).toMatchObject({ ok: false })
   })
 
   it('invalidates the active connection when the tab changes or disconnects', async () => {

@@ -15,9 +15,10 @@ evidence. The latest hardening commit is `d73b0d0` (`fix: harden entitlement syn
 The complete canonical href is now bound to the native preview through an opaque fingerprint, and
 execution re-checks the current element target plus public-URL/DNS policy. Chromium regression
 coverage includes query-target mutation returning `stale`; the native Browser Bridge suite is now
-36 tests, including an injected resolver/fetcher redirect fixture, token replay, wrong-tab,
+38 tests, including an injected resolver/fetcher redirect fixture, token replay, wrong-tab,
 cross-origin, oversized-message, credential-link, executable-download, cancelled-run and pending
-request wake-up cases. Native browser action completion/failure records append a redacted entry
+request wake-up cases. Native snapshots now revalidate public URL/DNS after every navigation and
+discard private-page payloads before they can enter the Agent context. Native browser action completion/failure records append a redacted entry
 to the existing audit JSONL; browser or extension restart still requires explicit re-pairing
 because the one-time token is consumed by design. Approved actions use a native gate for the
 validated send transition, while cancellation wakes pending responses without waiting for the
@@ -340,6 +341,9 @@ pub enum BrowserBridgeMessage {
 ```
 
 Add round-trip fixtures shared as JSON under `apps/browser-bridge/test-fixtures/protocol/` in Task 5.
+The current generic `pair`/`request`/`response` envelope is the canonical runtime protocol; the
+older typed frame names in this historical design section are retained as conceptual vocabulary,
+not a second wire contract.
 
 - [x] **Step 2: Define snapshot and element constraints**
 
@@ -585,7 +589,7 @@ The popup accepts `{ port, token }` copied from Papyrus. On `连接当前标签�
 
 - [x] **Step 4: Add extension tests**
 
-Mock `chrome.tabs`, `chrome.scripting`, and `chrome.storage.session`. Test missing active tab, restricted scheme, failed injection, wrong pairing response, successful connection, tab close, and service-worker restart recovery.
+Mock `chrome.tabs`, `chrome.scripting`, and `chrome.storage.session`. Test missing active tab, restricted scheme, failed injection, wrong pairing response, successful connection, tab close, and service-worker restart behavior. A restart cannot silently recover a consumed one-time token; the regression test verifies storage cleanup and requires explicit re-pairing.
 
 - [x] **Step 5: Build and commit**
 

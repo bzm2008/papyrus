@@ -1,4 +1,4 @@
-use crate::work_assistant::WorkAssistantError;
+use crate::work_assistant::{DesktopRevealResult, WorkAssistantError};
 use std::{path::Path, process::Command};
 
 pub(crate) fn open_url(value: &str) -> Result<(), WorkAssistantError> {
@@ -13,14 +13,17 @@ pub(crate) fn open_path(path: &Path) -> Result<(), WorkAssistantError> {
         .map_err(|error| WorkAssistantError::blocked(format!("could not open file: {error}")))
 }
 
-pub(crate) fn reveal_file(path: &Path) -> Result<(), WorkAssistantError> {
+pub(crate) fn reveal_file(path: &Path) -> Result<DesktopRevealResult, WorkAssistantError> {
     #[cfg(windows)]
     {
         let argument = format!("/select,{}", path.display());
         return Command::new("explorer.exe")
             .arg(argument)
             .spawn()
-            .map(|_| ())
+            .map(|_| DesktopRevealResult {
+                degraded: false,
+                warning: None,
+            })
             .map_err(|error| {
                 WorkAssistantError::blocked(format!("could not reveal file: {error}"))
             });
@@ -31,7 +34,10 @@ pub(crate) fn reveal_file(path: &Path) -> Result<(), WorkAssistantError> {
             .arg("-R")
             .arg(path)
             .spawn()
-            .map(|_| ())
+            .map(|_| DesktopRevealResult {
+                degraded: false,
+                warning: None,
+            })
             .map_err(|error| {
                 WorkAssistantError::blocked(format!("could not reveal file: {error}"))
             });
@@ -42,7 +48,10 @@ pub(crate) fn reveal_file(path: &Path) -> Result<(), WorkAssistantError> {
         return Command::new("xdg-open")
             .arg(parent)
             .spawn()
-            .map(|_| ())
+            .map(|_| DesktopRevealResult {
+                degraded: true,
+                warning: Some("Linux 文件管理器只能打开父目录，未能保证自动选中目标文件。".into()),
+            })
             .map_err(|error| {
                 WorkAssistantError::blocked(format!("could not reveal file: {error}"))
             });

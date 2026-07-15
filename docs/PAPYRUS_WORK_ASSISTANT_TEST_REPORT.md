@@ -58,11 +58,11 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run lint`：通过。
 - `npm run test:wps`：2 个文件、17 项通过；包含流式 401/403 结构化错误、模型/额度部分成功、stale 保留和套餐权限文案回归。
 - `npx tsc -p tsconfig.app.json --noEmit`：通过。
-- `npm run test:unit`：36 个文件、193 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
-- `npm run check:browser`：扩展语法/构建、前端桥接测试和 Rust Browser Bridge/Web Extract 定向测试通过；Rust Browser Bridge 定向为 33 项，包含注入式私网重定向 fixture。
+- `npm run test:unit`：36 个文件、194 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
+- `npm run test:browser`：扩展语法/构建、前端桥接测试和 Browser Bridge Vitest 通过；Browser Bridge 原生定向测试为 38 项，包含导航后公共 URL/DNS 复检和私网快照丢弃。
 - `npm run test:browser:e2e`：真实 Chromium 9 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、字段变更 stale、链接 query 变化 stale、凭据链接/可执行文件名阻断和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
-- `npm run test:desktop`：36 个 TypeScript 文件、193 项通过；portable MSVC Rust 门禁 133 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
+- `npm run ci:desktop`：36 个 TypeScript 文件、194 项通过；portable MSVC Rust 全量门禁 135 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理、导航 origin 重绑定和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - `npm run tauri:check:portable`：Windows MSVC portable check 通过。
 - `npm run browser:package`：生成 5 个运行时文件的 `Papyrus-Browser-Bridge_0.1.2.zip`。
@@ -78,6 +78,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - Scallion 模型/额度契约：模型目录默认请求 `include_unavailable=1`，套餐外模型只读展示并禁用；余额以 `points_balance` 为准；模型目录按 token 去重并设置超时；不确定的 Scallion 网络结果不会自动切换 Tauri 重发。
 - WPS 模型/额度同步：`/models` 与 `/quota` 独立更新；单通道失败时保留旧目录/积分并显示 `stale`，无旧值时显示 `error`；成功、402、5xx、超时和流中断后会触发额度刷新，取消和认证失效不重复刷新。
 - WPS 套餐降级显示：当 `/quota` 临时失败但 `/models` 返回套餐信息时，插件仍显示套餐类别和到期时间；积分仍只在额度成功响应中使用 `points_balance`，不会用模型目录伪造余额。
+- Papyrus 套餐/积分 UI：工作台每 15 秒刷新 quota、每 60 秒刷新完整目录；模型选择器、设置、维护控制台和状态栏显示当前套餐、points_balance 和同步状态。没有成功 quota 时显示登录缓存并明确标注，不冒充实时余额；套餐外模型保留在目录中并禁用，显示所需套餐/主站原因。
 - 跨目标静态检查：本机未安装 Linux/macOS Rust 标准库；对应验证由 Desktop CI 的 Ubuntu/macOS runner 完成。
 
 `npm run ci:desktop`：在停止并发编辑后的稳定工作树上通过；该聚合脚本不包含 Rust、portable MSVC 和真实 Chromium E2E，这些项目已由上面的独立门禁覆盖。`npm run release:assistant-check:local` 与 `npm run release:assistant-check` 均通过。真实用户文件的完整写入/恢复 smoke 尚未执行，不能用临时测试目录替代现场记录。

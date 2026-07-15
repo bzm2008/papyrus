@@ -437,7 +437,12 @@ export async function fetchScallionProxyModels(
   let response: Response
 
   try {
-    response = await fetch(endpoint, { method: 'GET', headers, signal: controller.signal })
+    response = await fetch(endpoint, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+      cache: 'no-store',
+    })
   } catch {
     if (controller.signal.aborted) {
       throw new LlmRequestError('模型目录请求超时，请稍后重试。', {

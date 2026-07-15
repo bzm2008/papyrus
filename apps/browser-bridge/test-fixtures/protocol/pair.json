@@ -1,0 +1,10 @@
+{
+  "type": "pair",
+  "payload": {
+    "token": "fixture-token",
+    "nonce": "fixture-nonce",
+    "extensionId": "fixture-extension",
+    "tabId": 17,
+    "origin": "https://example.com"
+  }
+}

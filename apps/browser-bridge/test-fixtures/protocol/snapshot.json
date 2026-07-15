@@ -1,0 +1,18 @@
+{
+  "type": "response",
+  "requestId": "fixture-request",
+  "tabId": 17,
+  "payload": {
+    "ok": true,
+    "summary": "Snapshot returned"
+  },
+  "snapshot": {
+    "snapshotId": "fixture-snapshot",
+    "pageRevision": "fixture-revision",
+    "url": "https://example.com/",
+    "origin": "https://example.com",
+    "title": "Example",
+    "text": "Public content",
+    "elements": []
+  }
+}

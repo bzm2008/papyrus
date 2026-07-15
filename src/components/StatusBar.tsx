@@ -39,6 +39,9 @@ export function StatusBar() {
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const activeProvider = providerConfigs[activeProviderId]
+  const quotaPointsBalance = scallionQuota?.pointsBalance ?? scallionQuota?.remaining
+  const visiblePointsBalance = quotaPointsBalance ?? scallionUser?.points ?? scallionUser?.balance
+  const pointsAreCached = quotaPointsBalance === undefined || !scallionToken
   const conversationChangedChars = documentChangeStats
     .filter((stat) => stat.chatId === activeChatId)
     .reduce((sum, stat) => sum + stat.changedChars, 0)
@@ -118,13 +121,14 @@ export function StatusBar() {
               .join(' · ')}
           >
             {scallionQuota?.planName || scallionQuota?.planKey || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : 'Scallion')} ·{' '}
-            {scallionQuota
-              ? `余 ${scallionQuota.pointsBalance ?? scallionQuota.remaining ?? scallionUser?.points ?? scallionUser?.balance ?? 0} ${scallionQuota.unit ?? '积分'}`
+            {visiblePointsBalance !== undefined
+              ? `${pointsAreCached ? '缓存余' : '余'} ${visiblePointsBalance} ${scallionQuota?.unit ?? '积分'}`
               : scallionSync.quota.status === 'error'
                 ? '积分同步失败'
                 : '积分同步中'}
-            {scallionQuota && scallionSync.quota.status === 'syncing' ? ' · 更新中' : ''}
-            {scallionQuota && scallionSync.quota.status === 'stale' ? ' · 可能过期' : ''}
+            {visiblePointsBalance !== undefined && scallionSync.quota.status === 'syncing' ? ' · 更新中' : ''}
+            {visiblePointsBalance !== undefined && scallionSync.quota.status === 'stale' ? ' · 可能过期' : ''}
+            {visiblePointsBalance !== undefined && scallionSync.quota.status === 'error' ? ' · 同步失败' : ''}
           </span>
         ) : (
           <button

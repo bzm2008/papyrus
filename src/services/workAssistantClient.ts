@@ -44,6 +44,11 @@ function abortError() {
   return new DOMException('Run cancelled', 'AbortError')
 }
 
+export type DesktopRevealResult = {
+  degraded: boolean
+  warning?: string
+}
+
 export function setWorkAssistantInvokerForTests(next: InvokeFn) {
   invokeFn = next
 }
@@ -164,7 +169,7 @@ export const openWorkAssistantFile = (rootId: string, path: string) =>
   invokeTyped<void>('work_assistant_desktop_open_file', { rootId, path })
 
 export const revealWorkAssistantFile = (rootId: string, path: string) =>
-  invokeTyped<void>('work_assistant_desktop_reveal_file', { rootId, path })
+  invokeTyped<DesktopRevealResult>('work_assistant_desktop_reveal_file', { rootId, path })
 
 export const listRegisteredApplications = () =>
   invokeTyped<RegisteredApplication[]>('work_assistant_list_applications')

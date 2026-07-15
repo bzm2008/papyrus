@@ -5,7 +5,7 @@ import { useContextAutomation } from '../hooks/useContextAutomation'
 import { useProjectGuidance } from '../hooks/useProjectGuidance'
 import { useRemoteRelay } from '../hooks/useRemoteRelay'
 import { refreshHardwareCapabilityProfile } from '../services/hardwareCapabilityService'
-import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import { refreshScallionQuota, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { useAppStore } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { EditorPane } from './EditorPane'
@@ -84,21 +84,28 @@ function MainWorkbench() {
       return undefined
     }
 
-    const refresh = () => {
+    const refreshQuota = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshScallionQuota()
+      }
+    }
+    const refreshAll = () => {
       if (document.visibilityState === 'visible') {
         void refreshScallionRuntimeMetadata()
       }
     }
-    const timer = window.setInterval(() => {
-      refresh()
-    }, 30000)
-    window.addEventListener('focus', refresh)
-    document.addEventListener('visibilitychange', refresh)
+    // Points can change after every paid call. Keep the balance fresh without
+    // forcing the full model catalog request on the same cadence.
+    const quotaTimer = window.setInterval(refreshQuota, 15000)
+    const catalogTimer = window.setInterval(refreshAll, 60000)
+    window.addEventListener('focus', refreshAll)
+    document.addEventListener('visibilitychange', refreshAll)
 
     return () => {
-      window.clearInterval(timer)
-      window.removeEventListener('focus', refresh)
-      document.removeEventListener('visibilitychange', refresh)
+      window.clearInterval(quotaTimer)
+      window.clearInterval(catalogTimer)
+      window.removeEventListener('focus', refreshAll)
+      document.removeEventListener('visibilitychange', refreshAll)
     }
   }, [scallionToken])
 

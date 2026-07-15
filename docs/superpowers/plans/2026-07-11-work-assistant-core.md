@@ -13,7 +13,7 @@
 `[x]` marks implementation, test, or locally completed commit steps. The consolidated local
 commit is `d73b0d0` (`fix: harden entitlement sync and assistant cancellation`), following the earlier
 desktop/runtime implementation commits. The current local evidence is 36 desktop unit-test
-files/193 tests and 133 Rust tests through the portable MSVC gate. File run-scoped approvals now
+files/194 tests and 135 Rust tests through the portable MSVC gate. File run-scoped approvals now
 use a canonical scope containing tool, root, target-parent digest, conflict policy, operation kind,
 and an item-count bound; browser and workspace cancellation invalidate matching state and late
 tool calls. A real-user-file smoke transaction and cross-platform device evidence remain pending
@@ -1011,10 +1011,10 @@ Tokens are random UUIDs bound to preview ID, revision, run ID, scope, expiry, an
 Rules:
 
 - `Copy`: `fs::copy`; reject directory sources in this phase.
-- `Move`/`Rename`: use `fs::rename`; if a regular file crosses volumes, copy then send the original to trash; reject cross-volume directories.
+- `Move`/`Rename`: use the platform no-replace primitive; if a regular file crosses volumes, copy and verify it before moving the original into the private recovery vault; reject cross-volume directories.
 - `CreateDirectory`: `fs::create_dir` only; do not create missing ancestor chains supplied by the model.
-- `Trash`: call `trash::delete` and never `remove_file`/`remove_dir_all`.
-- `Overwrite`: send the old destination to trash before writing the new destination.
+- `Trash`: move the validated source into the same-volume `.papyrus-recovery` vault and persist a receipt; never `remove_file`/`remove_dir_all`.
+- `Overwrite`: move the old destination into the private recovery vault before publishing the new destination.
 - Check cancellation between items and return completed, skipped, failed, and remaining lists.
 - Append one audit record per preview decision and one per executed item.
 

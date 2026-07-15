@@ -55,7 +55,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
         ? currentScallionModel
           ? `${currentScallionModel.modelName} · ${contextLabel(currentScallionModel.contextWindowTokens)}`
           : scallionQuota?.planName || scallionQuota?.planKey || scallionUser?.member_type
-            ? `${scallionQuota?.planName || scallionQuota?.planKey || formatScallionPlanName(scallionUser?.member_type ?? '')} · ${formatPoints(scallionQuota)}`
+            ? `${scallionQuota?.planName || scallionQuota?.planKey || formatScallionPlanName(scallionUser?.member_type ?? '')} · ${formatPoints(scallionQuota, scallionSync.quota.status, scallionUser)}`
             : '套餐模型尚未获取'
         : activeProvider.modelName
   const groups = useMemo(
@@ -157,6 +157,11 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectScallionModel = (model: ScallionModelMetadata) => {
+    const access = getScallionModelAccess(model)
+    if (!access.usable) {
+      return
+    }
+
     updateProviderModelMetadata('qwen36', {
       label: model.label,
       modelName: model.modelName,
@@ -258,7 +263,9 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                         {scallionQuota?.planName || scallionQuota?.planKey || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : scallionToken ? '套餐读取中' : '未登录 Scallion')}
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-[#8f897a]">
-                        {scallionToken ? formatPoints(scallionQuota, scallionSync.quota.status) : '登录后同步套餐和积分'}
+                        {scallionToken
+                          ? formatPoints(scallionQuota, scallionSync.quota.status, scallionUser)
+                          : '登录后同步套餐和积分'}
                         {scallionQuota?.planExpiresAt ? ` · 到期 ${formatExpiry(scallionQuota.planExpiresAt)}` : ''}
                         {scallionQuota?.updatedAt ? ` · ${formatSyncTime(scallionQuota.updatedAt)}` : ''}
                         {scallionSync.quota.error ? ` · ${scallionSync.quota.error}` : ''}
@@ -297,11 +304,12 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                     })()}
                     <div className="space-y-1">
                       {scallionModels.map((model) => {
+                        const access = getScallionModelAccess(model)
                         const active =
+                          access.usable &&
                           modelRoutingMode === 'manual' &&
                           activeProviderId === 'qwen36' &&
                           providerConfigs.qwen36.modelName === model.modelName
-                        const access = getScallionModelAccess(model)
                         const disabled = !access.usable
 
                         return (
@@ -310,6 +318,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                             type="button"
                             disabled={disabled}
                             onClick={() => selectScallionModel(model)}
+                            title={disabled ? `${model.label}：${access.detail}` : `${model.label}：当前套餐可调用`}
                             className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
                               active
                                 ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
@@ -318,10 +327,21 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                           >
                             <span className="min-w-0">
                               <span className="block truncate text-sm font-medium">{model.label}</span>
-                              <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
+                              <span className={`block break-words text-xs leading-4 ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
                                 {model.modelName} · {contextLabel(model.contextWindowTokens)}
                                 {model.tier ? ` · ${model.tier}` : ''}
-                                {disabled ? ` · ${access.label} · ${access.detail}` : ` · ${access.label}`}
+                              </span>
+                              <span
+                                className={`mt-1 block break-words text-[11px] leading-4 ${
+                                  active
+                                    ? 'text-[#f0d99b]'
+                                    : access.status === 'available'
+                                      ? 'text-[#416746]'
+                                      : 'text-[#9a4338]'
+                                }`}
+                              >
+                                {access.label}
+                                {disabled ? ` · ${access.detail}` : ''}
                               </span>
                             </span>
                             {active ? (
@@ -413,11 +433,21 @@ function contextLabel(tokens?: number) {
 function formatPoints(
   quota: { pointsBalance?: number; remaining?: number; unit?: string } | undefined,
   status: 'idle' | 'syncing' | 'ready' | 'stale' | 'error' = 'idle',
+  user?: { points?: number; balance?: number },
 ) {
-  if (!quota) return status === 'error' ? '积分同步失败' : '积分同步中'
-  const value = quota.pointsBalance ?? quota.remaining ?? 0
-  const freshness = status === 'syncing' ? ' · 更新中' : status === 'stale' ? ' · 可能过期' : ''
-  return `余 ${value} ${quota.unit ?? '积分'}${freshness}`
+  const quotaValue = quota?.pointsBalance ?? quota?.remaining
+  const value = quotaValue ?? user?.points ?? user?.balance
+  if (value === undefined) return status === 'error' ? '积分同步失败' : '积分同步中'
+  const freshness =
+    status === 'syncing'
+      ? ' · 更新中'
+      : status === 'stale'
+        ? ' · 可能过期'
+        : status === 'error'
+          ? ' · 同步失败'
+          : ''
+  const source = quotaValue === undefined ? ' · 登录缓存' : ''
+  return `余 ${value} ${quota?.unit ?? '积分'}${freshness}${source}`
 }
 
 function formatExpiry(value: string) {

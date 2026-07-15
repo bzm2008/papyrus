@@ -3,6 +3,7 @@ import {
   Check,
   ChevronRight,
   Database,
+  ExternalLink,
   HardDrive,
   Loader2,
   MemoryStick,
@@ -14,6 +15,8 @@ import {
   Settings2,
   ShieldAlert,
   Trash2,
+  TriangleAlert,
+  UserRound,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import {
@@ -26,6 +29,9 @@ import {
   testModelConnection,
 } from '../services/maintenance'
 import { getMaintenanceReadiness } from '../services/maintenanceReadiness'
+import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
+import { refreshScallionQuota, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import { startScallionLogin } from '../services/scallionAuth'
 import {
   customContextTiers,
   isProviderValidated,
@@ -37,6 +43,9 @@ import {
   type MaintenanceCheckId,
   type MaintenanceTab,
   type ProviderId,
+  type ScallionAuthStatus,
+  type ScallionQuota,
+  type ScallionSyncChannelState,
 } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 
@@ -71,10 +80,47 @@ export function MaintenanceConsole() {
   const activeProvider = providerConfigs[activeProviderId]
   const cloudProvider = providerConfigs.qwen36
   const customProvider = providerConfigs.custom
+  const scallionToken = useAppStore((state) => state.scallionToken)
+  const scallionUser = useAppStore((state) => state.scallionUser)
+  const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionModels = useAppStore((state) => state.scallionModels)
+  const scallionSync = useAppStore((state) => state.scallionSync)
+  const authStatus = useAppStore((state) => state.authStatus)
+  const authUserCode = useAppStore((state) => state.authUserCode)
   const readiness = useMemo(
     () => getMaintenanceReadiness(maintenanceChecks),
     [maintenanceChecks],
   )
+
+  useEffect(() => {
+    void refreshScallionRuntimeMetadata()
+
+    if (!scallionToken) {
+      return undefined
+    }
+
+    const refreshQuota = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshScallionQuota()
+      }
+    }
+    const refreshAll = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshScallionRuntimeMetadata()
+      }
+    }
+    const quotaTimer = window.setInterval(refreshQuota, 15000)
+    const catalogTimer = window.setInterval(refreshAll, 60000)
+    window.addEventListener('focus', refreshAll)
+    document.addEventListener('visibilitychange', refreshAll)
+
+    return () => {
+      window.clearInterval(quotaTimer)
+      window.clearInterval(catalogTimer)
+      window.removeEventListener('focus', refreshAll)
+      document.removeEventListener('visibilitychange', refreshAll)
+    }
+  }, [scallionToken])
 
   const runAllChecks = async () => {
     setCheckingAll(true)
@@ -251,6 +297,15 @@ export function MaintenanceConsole() {
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
           >
+            <ScallionAccountSummary
+              token={scallionToken}
+              username={scallionUser?.username}
+              memberType={scallionUser?.member_type}
+              quota={scallionQuota}
+              sync={scallionSync.quota}
+              authStatus={authStatus}
+              authUserCode={authUserCode}
+            />
             {maintenanceTab === 'connections' ? (
               <ConnectionsPanel checks={maintenanceChecks} checkingAll={checkingAll} onRetest={runAllChecks} />
             ) : null}
@@ -261,6 +316,10 @@ export function MaintenanceConsole() {
                 customProviderId="custom"
                 cloudProviderLabel={cloudProvider.label}
                 customProviderLabel={customProvider.label}
+                models={scallionModels}
+                scallionToken={scallionToken}
+                scallionQuota={scallionQuota}
+                scallionSync={scallionSync.models}
                 testingProviderId={testingProviderId}
                 onSetActiveProvider={setActiveProviderId}
                 onTestProvider={handleTestProvider}
@@ -328,6 +387,10 @@ function ModelsPanel({
   customProviderId,
   cloudProviderLabel,
   customProviderLabel,
+  models,
+  scallionToken,
+  scallionQuota,
+  scallionSync,
   testingProviderId,
   onSetActiveProvider,
   onTestProvider,
@@ -337,6 +400,10 @@ function ModelsPanel({
   customProviderId: ProviderId
   cloudProviderLabel: string
   customProviderLabel: string
+  models: ReturnType<typeof useAppStore.getState>['scallionModels']
+  scallionToken?: string
+  scallionQuota: ReturnType<typeof useAppStore.getState>['scallionQuota']
+  scallionSync: ReturnType<typeof useAppStore.getState>['scallionSync']['models']
   testingProviderId: ProviderId | null
   onSetActiveProvider: (providerId: ProviderId) => void
   onTestProvider: (providerId: ProviderId) => Promise<void>
@@ -369,6 +436,13 @@ function ModelsPanel({
           onTest={onTestProvider}
         />
       </div>
+      <ScallionMaintenanceModelDirectory
+        models={models}
+        hasToken={Boolean(scallionToken)}
+        quota={scallionQuota}
+        sync={scallionSync}
+        onRefresh={() => void refreshScallionRuntimeMetadata()}
+      />
     </section>
   )
 }
@@ -559,6 +633,196 @@ function MemoryPanel({
             meta: `${run.stepCount} steps · ${run.traceCount} traces · ${new Date(run.startedAt).toLocaleString()}`,
           }))}
         />
+      </div>
+    </section>
+  )
+}
+
+function ScallionAccountSummary({
+  token,
+  username,
+  memberType,
+  quota,
+  sync,
+  authStatus,
+  authUserCode,
+}: {
+  token?: string
+  username?: string
+  memberType?: string
+  quota?: ScallionQuota
+  sync: ScallionSyncChannelState
+  authStatus: ScallionAuthStatus
+  authUserCode?: string
+}) {
+  const plan =
+    quota?.planName ||
+    (quota?.planKey ? formatScallionPlanName(quota.planKey) : undefined) ||
+    (memberType ? formatScallionPlanName(memberType) : undefined)
+  const points = quota?.pointsBalance ?? quota?.remaining
+  const pointsAreCached = !token || sync.status !== 'ready'
+
+  return (
+    <section className="mb-5 rounded-xl border border-[#d7aa4f]/45 bg-[#fff7e3] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.05)]">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <UserRound size={16} className="mt-0.5 shrink-0 text-[#6f7f68]" />
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-[#2f2b22]">Scallion 账户状态</div>
+            <div className="mt-1 truncate text-xs text-[#7d7a70]">
+              {token ? username || '已登录用户' : authStatus === 'polling' ? `等待授权${authUserCode ? ` · ${authUserCode}` : ''}` : '未登录 Scallion'}
+            </div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {token ? (
+            <button
+              type="button"
+              onClick={() => void refreshScallionRuntimeMetadata()}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e8ddc7] bg-[#fffefa] px-2.5 text-xs text-[#6f7168] transition hover:text-[#171714]"
+            >
+              <RefreshCw size={12} />
+              刷新状态
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void startScallionLogin()}
+              disabled={authStatus === 'starting' || authStatus === 'polling' || authStatus === 'reconnecting'}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md bg-[#171714] px-2.5 text-xs font-medium text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-wait disabled:opacity-50"
+            >
+              <ExternalLink size={12} />
+              {authStatus === 'polling' ? '等待授权' : authStatus === 'reconnecting' ? '正在重连' : '登录主站'}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        <div className="rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 py-2">
+          <div className="text-[11px] text-[#8f897a]">当前套餐</div>
+          <div className="mt-1 text-sm font-semibold text-[#2f2b22]">{plan || (token ? '同步中' : '未登录')}</div>
+          {quota?.planExpiresAt ? (
+            <div className="mt-0.5 text-[10px] text-[#8f897a]">到期 {formatMaintenanceExpiry(quota.planExpiresAt)}</div>
+          ) : null}
+        </div>
+        <div className="rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 py-2">
+          <div className="text-[11px] text-[#8f897a]">剩余积分</div>
+          <div className="mt-1 text-sm font-semibold tabular-nums text-[#2f2b22]">
+            {points === undefined
+              ? sync.status === 'error'
+                ? '同步失败'
+                : '同步中'
+              : `${points} ${pointsAreCached ? '缓存积分' : quota?.unit ?? '积分'}`}
+          </div>
+        </div>
+        <div className="rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 py-2">
+          <div className="text-[11px] text-[#8f897a]">同步状态</div>
+          <div className="mt-1 text-sm font-semibold text-[#2f2b22]">
+            {!token
+              ? '登录后同步'
+              : sync.status === 'ready'
+                ? '实时'
+                : sync.status === 'syncing'
+                  ? '更新中'
+                  : sync.status === 'stale'
+                    ? '可能过期'
+                    : sync.status === 'error'
+                      ? '同步失败'
+                      : '等待同步'}
+          </div>
+          <div className="mt-0.5 truncate text-[10px] text-[#8f897a]" title={sync.error}>
+            {quota?.updatedAt ? `更新于 ${formatMaintenanceSyncTime(quota.updatedAt)}` : sync.error || '尚未完成同步'}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function ScallionMaintenanceModelDirectory({
+  models,
+  hasToken,
+  quota,
+  sync,
+  onRefresh,
+}: {
+  models: ReturnType<typeof useAppStore.getState>['scallionModels']
+  hasToken: boolean
+  quota?: ScallionQuota
+  sync: ScallionSyncChannelState
+  onRefresh: () => void
+}) {
+  const availableCount = models.filter((model) => getScallionModelAccess(model).status === 'available').length
+  const restrictedCount = models.filter((model) => getScallionModelAccess(model).status === 'plan_unavailable').length
+  const temporaryCount = models.length - availableCount - restrictedCount
+  const plan = quota?.planName || (quota?.planKey ? formatScallionPlanName(quota.planKey) : undefined)
+
+  return (
+    <section className="mt-5 rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-[#2f2b22]">Scallion 完整模型目录</div>
+          <div className="mt-1 text-xs leading-5 text-[#7d7a70]">
+            {plan ? `当前套餐：${plan}。` : hasToken ? '当前套餐同步中。' : '登录后读取套餐权限。'}
+            {' '}目录中的套餐受限模型仍会展示，但不会进入请求。
+          </div>
+          {hasToken ? (
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px]">
+              <span className="text-[#416746]">可用 {availableCount}</span>
+              <span className="text-[#9a4338]">套餐受限 {restrictedCount}</span>
+              {temporaryCount > 0 ? <span className="text-[#b7791f]">暂不可用 {temporaryCount}</span> : null}
+              {sync.status === 'stale' ? <span className="text-[#b7791f]">目录可能过期</span> : null}
+            </div>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={!hasToken}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#e8ddc7] bg-[#fffdf7] px-2.5 text-xs text-[#6f7168] transition hover:text-[#171714] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <RefreshCw size={12} />
+          刷新目录
+        </button>
+      </div>
+      {!hasToken ? (
+        <div className="mt-3 rounded-lg border border-dashed border-[#e8ddc7] px-3 py-3 text-xs leading-5 text-[#8f897a]">
+          登录 Scallion 后显示所有模型及套餐权限。
+        </div>
+      ) : models.length === 0 ? (
+        <div className="mt-3 rounded-lg border border-dashed border-[#e8ddc7] px-3 py-3 text-xs leading-5 text-[#8f897a]">
+          暂未读取到模型目录，请刷新后重试。
+        </div>
+      ) : (
+        <div className="mt-3 max-h-96 divide-y divide-[#f0e8da] overflow-y-auto rounded-lg border border-[#f0e8da]">
+          {models.map((model) => {
+            const access = getScallionModelAccess(model)
+            return (
+              <div key={model.id} className="flex items-start justify-between gap-3 px-3 py-2.5" title={access.detail}>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 text-sm font-medium text-[#2f2b22]">
+                    {access.usable ? <Check size={13} className="shrink-0 text-[#416746]" /> : <TriangleAlert size={13} className="shrink-0 text-[#b7791f]" />}
+                    <span className="truncate">{model.label}</span>
+                  </div>
+                  <div className="mt-1 break-words text-[11px] text-[#8f897a]">
+                    {model.id} · {model.contextWindowTokens ? `${Math.round(model.contextWindowTokens / 1024)}K` : '上下文未知'}
+                    {model.callPrice !== undefined ? ` · ${model.callPrice} 积分/次` : ''}
+                  </div>
+                </div>
+                <div className="max-w-[48%] shrink-0 text-right">
+                  <div className={`text-[11px] font-medium ${access.usable ? 'text-[#416746]' : access.status === 'plan_unavailable' ? 'text-[#9a4338]' : 'text-[#b7791f]'}`}>
+                    {access.label}
+                  </div>
+                  <div className="break-words text-[10px] leading-4 text-[#8f897a]">{access.detail}</div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-[#8f897a]">
+        <span>{hasToken ? `共 ${models.length} 个模型` : '目录未同步'}</span>
+        <span>{sync.updatedAt ? `同步于 ${formatMaintenanceSyncTime(sync.updatedAt)}` : sync.error || '等待同步'}</span>
       </div>
     </section>
   )
@@ -834,6 +1098,16 @@ function statusTheme(status: MaintenanceCheck['status']) {
     default:
       return { dot: 'bg-[#c9c0ae]', badge: 'bg-[#f4eddf] text-[#7d7a70]', label: '等待' }
   }
+}
+
+function formatMaintenanceExpiry(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('zh-CN')
+}
+
+function formatMaintenanceSyncTime(value: number) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '未知时间' : date.toLocaleTimeString('zh-CN')
 }
 
 function formatBytes(bytes: number) {

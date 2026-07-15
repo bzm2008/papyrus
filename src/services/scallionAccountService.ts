@@ -207,6 +207,7 @@ async function refreshScallionQuotaOnce(token: string, userAtRequest?: ScallionU
     const controller = new AbortController()
     timeout = globalThis.setTimeout(() => controller.abort(), SCALLION_REQUEST_TIMEOUT_MS)
     const response = await fetch(SCALLION_QUOTA_API, {
+      cache: 'no-store',
       headers: {
         Authorization: `Bearer ${token}`,
       },

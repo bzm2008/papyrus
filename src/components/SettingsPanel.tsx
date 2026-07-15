@@ -88,6 +88,9 @@ export function SettingsPanel() {
   const authUserCode = useAppStore((state) => state.authUserCode)
   const cloudProvider = providerConfigs.qwen36
   const customProvider = providerConfigs.custom
+  const quotaScallionPoints = scallionQuota?.pointsBalance ?? scallionQuota?.remaining
+  const visibleScallionPoints = quotaScallionPoints ?? scallionUser?.points ?? scallionUser?.balance
+  const scallionPointsAreCached = quotaScallionPoints === undefined || !scallionToken
   const vendorProviders = providerOrder
     .map((providerId) => providerConfigs[providerId])
     .filter((provider) => provider.type === 'vendor_key')
@@ -241,18 +244,14 @@ export function SettingsPanel() {
                       <div className="grid gap-2 rounded-lg bg-[#fffefa] p-3">
                         <div className="text-xs text-[#8f897a]">剩余积分</div>
                         <div className="text-xl font-semibold tabular-nums text-[#20201d]">
-                          {scallionQuota
-                            ? scallionQuota.pointsBalance ??
-                              scallionQuota.remaining ??
-                              scallionUser?.points ??
-                              scallionUser?.balance ??
-                              0
+                          {visibleScallionPoints !== undefined
+                            ? visibleScallionPoints
                             : scallionSync.quota.status === 'error'
                               ? '同步失败'
                               : '同步中'}
-                          {scallionQuota ? (
+                          {visibleScallionPoints !== undefined ? (
                             <span className="ml-1 text-xs font-normal text-[#8f897a]">
-                              {scallionQuota.unit ?? '积分'}
+                              {scallionPointsAreCached ? '缓存积分' : scallionQuota?.unit ?? '积分'}
                             </span>
                           ) : null}
                         </div>
@@ -263,6 +262,7 @@ export function SettingsPanel() {
                         ) : null}
                         <div className="text-xs text-[#8f897a]">
                           实时余额以主站 points_balance 为准
+                          {scallionPointsAreCached ? ' · 当前显示为登录缓存' : ''}
                           {scallionSync.quota.status === 'syncing'
                             ? ' · 正在更新'
                             : scallionSync.quota.status === 'stale'
@@ -537,10 +537,19 @@ function ScallionModelDirectory({
   sync: ScallionSyncChannelState
   onRefresh: () => void
 }) {
+  const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionUser = useAppStore((state) => state.scallionUser)
   const latestSync = models.reduce<number | undefined>(
     (latest, model) => (latest === undefined || model.updatedAt > latest ? model.updatedAt : latest),
     undefined,
   )
+  const availableCount = models.filter((model) => getScallionModelAccess(model).status === 'available').length
+  const restrictedCount = models.filter((model) => getScallionModelAccess(model).status === 'plan_unavailable').length
+  const unavailableCount = models.length - availableCount - restrictedCount
+  const planLabel =
+    scallionQuota?.planName ||
+    (scallionQuota?.planKey ? formatScallionPlanName(scallionQuota.planKey) : undefined) ||
+    (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined)
 
   return (
     <section className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffefa] p-3">
@@ -552,6 +561,16 @@ function ScallionModelDirectory({
             {sync.status === 'syncing' ? ' 正在同步目录。' : ''}
             {sync.status === 'stale' ? ' 最近同步失败，当前目录可能已过期。' : ''}
             {sync.status === 'error' ? ` ${sync.error || '目录同步失败。'}` : ''}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#6f7168]">
+            <span>{planLabel ? `当前套餐：${planLabel}` : hasToken ? '当前套餐：同步中' : '当前套餐：未登录'}</span>
+            {hasToken ? (
+              <>
+                <span className="text-[#416746]">可用 {availableCount}</span>
+                <span className="text-[#9a4338]">套餐受限 {restrictedCount}</span>
+                {unavailableCount > 0 ? <span className="text-[#b7791f]">暂不可用 {unavailableCount}</span> : null}
+              </>
+            ) : null}
           </div>
         </div>
         <button
@@ -577,10 +596,14 @@ function ScallionModelDirectory({
         <div className="max-h-80 divide-y divide-[#f0e8da] overflow-y-auto rounded-md border border-[#f0e8da]">
           {models.map((model) => {
             const access = getScallionModelAccess(model)
-            const active = model.id === activeModelId || model.modelName === activeModelId
+            const active = access.usable && (model.id === activeModelId || model.modelName === activeModelId)
 
             return (
-              <div key={model.id} className="flex items-start justify-between gap-3 px-3 py-2.5">
+              <div
+                key={model.id}
+                title={`${model.label}：${access.detail}`}
+                className="flex items-start justify-between gap-3 px-3 py-2.5"
+              >
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-[#2f2b22]">
                     {access.usable ? <Check size={13} className="shrink-0 text-[#416746]" /> : <TriangleAlert size={13} className="shrink-0 text-[#b7791f]" />}

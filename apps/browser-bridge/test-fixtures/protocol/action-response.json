@@ -1,0 +1,9 @@
+{
+  "type": "response",
+  "requestId": "fixture-action",
+  "tabId": 17,
+  "payload": {
+    "ok": true,
+    "summary": "Draft filled"
+  }
+}

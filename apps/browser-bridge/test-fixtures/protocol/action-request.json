@@ -1,0 +1,11 @@
+{
+  "type": "request",
+  "requestId": "fixture-action",
+  "action": "fillDraft",
+  "payload": {
+    "elementToken": "e-1-input-name",
+    "snapshotId": "fixture-snapshot",
+    "pageRevision": "fixture-revision",
+    "value": "draft"
+  }
+}

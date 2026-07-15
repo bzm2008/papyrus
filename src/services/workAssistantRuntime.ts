@@ -250,6 +250,9 @@ function failureKey(call: AssistantToolCall) {
 
 function resultSummary(value: unknown) {
   if (Array.isArray(value)) return `完成，返回 ${value.length} 项。`
+  if (value && typeof value === 'object' && typeof (value as { summary?: unknown }).summary === 'string') {
+    return String((value as { summary: string }).summary)
+  }
   if (value && typeof value === 'object') return '操作已完成。'
   return '操作已完成。'
 }

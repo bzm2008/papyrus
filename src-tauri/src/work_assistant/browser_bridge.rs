@@ -228,6 +228,7 @@ struct SessionData {
     pairing_consumed: bool,
     extension_id: Option<String>,
     tab_id: Option<i64>,
+    paired_origin: Option<String>,
     origin: Option<String>,
     page_revision: Option<String>,
     snapshot_id: Option<String>,
@@ -487,6 +488,13 @@ pub fn browser_snapshot(
         "snapshot",
         json!({ "pageRevision": page_revision }),
     )?;
+    if value.get("ok").and_then(Value::as_bool) == Some(false) {
+        return Err(value
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("浏览器快照不可用")
+            .to_string());
+    }
     let snapshot: BrowserPageSnapshot =
         serde_json::from_value(value).map_err(|_| "浏览器快照协议无效".to_string())?;
     if let Ok(mut session) = state.inner.session.lock() {
@@ -626,6 +634,7 @@ fn start_pairing(
         pairing_consumed: false,
         extension_id: None,
         tab_id: None,
+        paired_origin: None,
         origin: None,
         page_revision: None,
         snapshot_id: None,
@@ -681,6 +690,7 @@ fn pair_bridge(
     current.pairing_consumed = true;
     current.extension_id = Some(request.extension_id);
     current.tab_id = Some(request.tab_id);
+    current.paired_origin = Some(origin.clone());
     current.origin = Some(origin);
     current.last_heartbeat_at = unix_seconds();
     Ok(status_for_session(current))
@@ -1187,9 +1197,13 @@ fn execute_approved_browser_action_with_audit(
         .map_err(|_| "浏览器桥接状态不可用".to_string())?;
     let current = session.as_ref().ok_or_else(|| "浏览器未连接".to_string())?;
     if current.extension_id.is_none()
+        || current.paired_origin.is_none()
         || current.pairing.expires_at <= unix_seconds()
         || current.pairing.session_id != stored.session_id
-        || current.origin.as_deref() != Some(stored.preview.origin.as_str())
+        || current
+            .origin
+            .as_deref()
+            .is_some_and(|origin| origin != stored.preview.origin)
     {
         return Err("浏览器配对已失效，请重新配对".into());
     }
@@ -1710,6 +1724,7 @@ fn bridge_connection(stream: TcpStream, inner: Arc<BrowserBridgeInner>) {
                 current.outbound = None;
                 current.extension_id = None;
                 current.tab_id = None;
+                current.paired_origin = None;
                 current.origin = None;
                 current.page_revision = None;
                 current.snapshot_id = None;
@@ -1800,6 +1815,9 @@ fn process_bridge_message(inner: &Arc<BrowserBridgeInner>, session_id: &str, raw
                         return;
                     }
                     current.snapshot = None;
+                    // A new public origin may be accepted after navigation,
+                    // but only after apply_snapshot validates its URL/DNS.
+                    current.origin = None;
                     current.page_revision = None;
                     current.snapshot_id = None;
                     current.navigation_generation = current.navigation_generation.saturating_add(1);
@@ -1829,12 +1847,21 @@ fn apply_snapshot(
     if current.tab_id != tab_id {
         return Err(());
     }
+    let validated_url = validate_public_url(&snapshot.url).map_err(|_| ())?;
+    let validated_origin = validated_url.origin().ascii_serialization();
     let mut snapshot = limit_snapshot(snapshot);
-    let snapshot_origin = snapshot.origin.clone().or_else(|| {
-        Url::parse(&snapshot.url)
-            .ok()
-            .map(|url| url.origin().ascii_serialization())
-    });
+    let snapshot_origin = snapshot
+        .origin
+        .as_deref()
+        .and_then(|raw| Url::parse(raw).ok())
+        .map(|url| url.origin().ascii_serialization());
+    if snapshot_origin
+        .as_deref()
+        .is_some_and(|origin| origin != validated_origin)
+    {
+        return Err(());
+    }
+    let snapshot_origin = Some(validated_origin);
     if current.origin.is_some() && current.origin != snapshot_origin {
         return Err(());
     }
@@ -2525,6 +2552,7 @@ mod tests {
             extension_id: Some("abcdefghijklmnopabcdefghijklmnop".into()),
             tab_id: Some(7),
             origin: Some("https://example.com".into()),
+            paired_origin: Some("https://example.com".into()),
             page_revision: Some("revision".into()),
             snapshot_id: Some("snapshot".into()),
             navigation_generation: 0,
@@ -2771,6 +2799,46 @@ mod tests {
                 .and_then(Value::as_str),
             Some("stale_origin")
         );
+    }
+
+    #[test]
+    fn private_snapshot_is_rejected_before_it_can_reach_the_agent() {
+        let mut current = test_session("private-snapshot");
+        let snapshot = BrowserPageSnapshot {
+            tab_id: Some(7),
+            url: "http://127.0.0.1:8080/admin".into(),
+            origin: Some("http://127.0.0.1:8080".into()),
+            title: "Local admin".into(),
+            text: "secret".into(),
+            text_summary: None,
+            elements: Vec::new(),
+            sensitive: false,
+            restricted: false,
+            sensitive_reason: None,
+            restriction_reason: None,
+            snapshot_id: Some("private".into()),
+            page_revision: Some("private-revision".into()),
+        };
+
+        assert!(apply_snapshot(&mut current, snapshot, Some(7)).is_err());
+        assert!(current.snapshot.is_none());
+    }
+
+    #[test]
+    fn navigation_clears_origin_before_rebinding_a_new_public_snapshot() {
+        let state = init_browser_bridge_state();
+        let inner = Arc::clone(&state.inner);
+        if let Ok(mut session) = inner.session.lock() {
+            *session = Some(test_session("navigation-origin"));
+        }
+
+        process_bridge_message(&inner, "navigation-origin", r#"{"type":"navigation"}"#);
+
+        let session = inner.session.lock().unwrap();
+        let current = session.as_ref().unwrap();
+        assert!(current.origin.is_none());
+        assert!(current.snapshot.is_none());
+        assert!(current.page_revision.is_none());
     }
 
     #[test]
