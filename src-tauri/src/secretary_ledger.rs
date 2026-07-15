@@ -364,8 +364,8 @@ impl SecretaryLedger {
         }
         let title = normalize_text(input.title, 240)?;
         let kind = normalize_text(input.kind, 64)?;
-        let story_project_id = normalize_optional_text(input.story_project_id, 128)?;
-        let chat_id = normalize_optional_text(input.chat_id, 128)?;
+        let story_project_id = normalize_optional_identifier(input.story_project_id)?;
+        let chat_id = normalize_optional_identifier(input.chat_id)?;
         let now = unix_millis();
         let project = SecretaryProject {
             id,
@@ -1485,8 +1485,8 @@ fn prepare_legacy_batch(batch: LegacyImportBatch) -> Result<PreparedLegacyBatch,
             id,
             title: normalize_safe_text(project.title, 240)?,
             kind: normalize_safe_text(project.kind, 64)?,
-            story_project_id: normalize_optional_text(project.story_project_id, 128)?,
-            chat_id: normalize_optional_text(project.chat_id, 128)?,
+            story_project_id: normalize_optional_identifier(project.story_project_id)?,
+            chat_id: normalize_optional_identifier(project.chat_id)?,
             created_at: now,
             updated_at: now,
             archived: false,
@@ -2199,21 +2199,42 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecretaryProjec
 
 fn normalize_identifier(value: String) -> Result<String, LedgerError> {
     let value = value.trim().to_string();
-    let uuid_shaped = is_uuid_shaped_identifier(&value);
+    let uuid_candidate = is_uuid_candidate_identifier(&value);
+    let canonical_uuid = is_canonical_uuid_identifier(&value);
     if value.is_empty()
         || value.chars().count() > 128
         || !value.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         })
-        || (uuid_shaped && !is_canonical_uuid_identifier(&value))
-        || (contains_sensitive_input(&value) && !is_canonical_uuid_identifier(&value))
+        || (uuid_candidate && !canonical_uuid)
+        || (contains_sensitive_input(&value) && !canonical_uuid)
     {
         return Err(LedgerError::InvalidInput);
     }
     Ok(value)
 }
 
-fn is_uuid_shaped_identifier(value: &str) -> bool {
+fn is_uuid_candidate_identifier(value: &str) -> bool {
+    if has_canonical_uuid_layout(value) {
+        return true;
+    }
+
+    let bytes = value.as_bytes();
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_hexdigit() || *byte == b'-')
+    {
+        return false;
+    }
+    let hex_digits = bytes.iter().filter(|byte| byte.is_ascii_hexdigit()).count();
+    let hyphens = bytes.iter().filter(|byte| **byte == b'-').count();
+    hex_digits == 32
+        || ((28..32).contains(&hex_digits)
+            && (3..=5).contains(&hyphens)
+            && (32..=40).contains(&bytes.len()))
+}
+
+fn has_canonical_uuid_layout(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() == 36
         && bytes.iter().enumerate().all(|(index, byte)| {
@@ -2226,7 +2247,7 @@ fn is_uuid_shaped_identifier(value: &str) -> bool {
 }
 
 fn is_canonical_uuid_identifier(value: &str) -> bool {
-    if !is_uuid_shaped_identifier(value) {
+    if !has_canonical_uuid_layout(value) {
         return false;
     }
     let Ok(uuid) = Uuid::parse_str(value) else {
@@ -2250,13 +2271,8 @@ fn normalize_safe_text(value: String, maximum_chars: usize) -> Result<String, Le
     Ok(value)
 }
 
-fn normalize_optional_text(
-    value: Option<String>,
-    maximum_chars: usize,
-) -> Result<Option<String>, LedgerError> {
-    value
-        .map(|value| normalize_text(value, maximum_chars))
-        .transpose()
+fn normalize_optional_identifier(value: Option<String>) -> Result<Option<String>, LedgerError> {
+    value.map(normalize_identifier).transpose()
 }
 
 fn validate_confidence(confidence: f64) -> Result<(), LedgerError> {
@@ -3942,6 +3958,195 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "{table} must not retain a sensitive identifier");
         }
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_compact_or_mislaid_uuid_candidates_before_project_memory_task_or_fts_write() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        let compact_candidate = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let malformed_candidate = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa-";
+        let truncated_candidate = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa";
+        let non_hex_uuid_shape = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaag";
+        let canonical_uuid = Uuid::new_v4().to_string();
+        assert_eq!(
+            normalize_identifier(canonical_uuid.clone()).unwrap(),
+            canonical_uuid
+        );
+        assert_eq!(
+            normalize_identifier("project-a".into()).unwrap(),
+            "project-a"
+        );
+        for identifier in [
+            compact_candidate,
+            malformed_candidate,
+            truncated_candidate,
+            non_hex_uuid_shape,
+        ] {
+            assert!(matches!(
+                normalize_identifier(identifier.into()),
+                Err(LedgerError::InvalidInput)
+            ));
+        }
+
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        assert!(matches!(
+            ledger.create_project(CreateProjectInput {
+                id: Some(compact_candidate.into()),
+                title: "不应写入的项目".into(),
+                kind: "writing".into(),
+                story_project_id: None,
+                chat_id: None,
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.create_memory(
+                &project_a,
+                CreateMemoryInput {
+                    id: Some(truncated_candidate.into()),
+                    ..memory_input(MemoryScope::Project, Some("project-a"), "不应写入的记忆")
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.create_task(
+                &project_a,
+                CreateTaskInput {
+                    id: Some(non_hex_uuid_shape.into()),
+                    ..task_input("project-a")
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+
+        let connection = Connection::open(&path).unwrap();
+        let projects: i64 = connection
+            .query_row("SELECT COUNT(*) FROM secretary_projects", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(projects, 1);
+        for table in ["secretary_memories", "secretary_tasks", "secretary_fts"] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} must not retain a UUID candidate");
+        }
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn project_link_identifiers_reject_uuid_candidates_in_normal_and_legacy_imports() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        let version_zero_uuid = "4a1f9c2e-7b0d-0f3c-8e5a-1b9d0f2c7e4a";
+        let malformed_candidate = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa-";
+        let truncated_candidate = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa";
+        let non_hex_uuid_shape = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaag";
+
+        assert!(matches!(
+            ledger.create_project(CreateProjectInput {
+                id: Some("normal-story-invalid".into()),
+                title: "无效 story 链接".into(),
+                kind: "writing".into(),
+                story_project_id: Some(non_hex_uuid_shape.into()),
+                chat_id: None,
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.create_project(CreateProjectInput {
+                id: Some("normal-chat-invalid".into()),
+                title: "无效 chat 链接".into(),
+                kind: "writing".into(),
+                story_project_id: None,
+                chat_id: Some(truncated_candidate.into()),
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.import_legacy_batch(LegacyImportBatch {
+                migration_key: "legacy-story-invalid".into(),
+                projects: vec![LegacyProjectInput {
+                    id: "legacy-story-invalid".into(),
+                    title: "无效迁移 story 链接".into(),
+                    kind: "writing".into(),
+                    story_project_id: Some(malformed_candidate.into()),
+                    chat_id: None,
+                }],
+                memories: Vec::new(),
+                tasks: Vec::new(),
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.import_legacy_batch(LegacyImportBatch {
+                migration_key: "legacy-chat-invalid".into(),
+                projects: vec![LegacyProjectInput {
+                    id: "legacy-chat-invalid".into(),
+                    title: "无效迁移 chat 链接".into(),
+                    kind: "writing".into(),
+                    story_project_id: None,
+                    chat_id: Some(version_zero_uuid.into()),
+                }],
+                memories: Vec::new(),
+                tasks: Vec::new(),
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+
+        let imported = ledger
+            .import_legacy_batch(LegacyImportBatch {
+                migration_key: "legacy-safe-links".into(),
+                projects: vec![LegacyProjectInput {
+                    id: "legacy-safe-project".into(),
+                    title: "安全迁移链接".into(),
+                    kind: "writing".into(),
+                    story_project_id: Some("legacy-story-a".into()),
+                    chat_id: Some("legacy-chat-a".into()),
+                }],
+                memories: Vec::new(),
+                tasks: Vec::new(),
+            })
+            .unwrap();
+        assert!(imported.imported);
+        let safe_project = ledger
+            .list_projects(false, 20)
+            .unwrap()
+            .into_iter()
+            .find(|project| project.id == "legacy-safe-project")
+            .unwrap();
+        assert_eq!(
+            safe_project.story_project_id.as_deref(),
+            Some("legacy-story-a")
+        );
+        assert_eq!(safe_project.chat_id.as_deref(), Some("legacy-chat-a"));
+
+        let connection = Connection::open(&path).unwrap();
+        let projects: i64 = connection
+            .query_row("SELECT COUNT(*) FROM secretary_projects", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let imports: i64 = connection
+            .query_row("SELECT COUNT(*) FROM secretary_legacy_imports", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(projects, 1);
+        assert_eq!(imports, 1);
         drop(connection);
 
         fs::remove_dir_all(directory).unwrap();
