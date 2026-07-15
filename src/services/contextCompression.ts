@@ -1,4 +1,5 @@
 import { callOpenAICompatible, canCallProvider } from './llmClient'
+import { getAgentSamplingProfile } from './agentSamplingService'
 import { useAppStore } from '../stores/useAppStore'
 
 export async function compressCurrentContext(reason: 'manual' | 'auto') {
@@ -14,6 +15,7 @@ export async function compressCurrentContext(reason: 'manual' | 'auto') {
   )
 
   const provider = store.providerConfigs[store.activeProviderId]
+  const sampling = getAgentSamplingProfile('compression', store.flowThinkingEffort)
 
   try {
     const summary = canCallProvider(provider)
@@ -35,7 +37,10 @@ export async function compressCurrentContext(reason: 'manual' | 'auto') {
               .filter(Boolean)
               .join('\n\n'),
           },
-        ])
+        ],
+        undefined,
+        sampling,
+      )
       : createLocalSummary(store.editorText, store.flowMessages.map((message) => message.content))
 
     useAppStore.getState().applyContextCompression(summary, reason)

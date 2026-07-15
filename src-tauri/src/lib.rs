@@ -164,6 +164,8 @@ struct LlmChatRequest {
     messages: Vec<LlmChatMessage>,
     temperature: f32,
     max_tokens: u32,
+    frequency_penalty: Option<f32>,
+    presence_penalty: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -387,16 +389,7 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
     }
 
     let response = request_builder
-        .body(
-            json!({
-              "model": model_name,
-              "messages": request.messages,
-              "temperature": request.temperature,
-              "max_tokens": request.max_tokens,
-              "stream": false
-            })
-            .to_string(),
-        )
+        .body(llm_request_body(&request).to_string())
         .send()
         .await
         .map_err(|error| format!("LLM network request failed: {}", error))?;
@@ -436,6 +429,23 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
     }
 
     Ok(content)
+}
+
+fn llm_request_body(request: &LlmChatRequest) -> serde_json::Value {
+    let mut body = json!({
+      "model": request.model_name,
+      "messages": request.messages,
+      "temperature": request.temperature,
+      "max_tokens": request.max_tokens,
+      "stream": false
+    });
+    if let Some(frequency_penalty) = request.frequency_penalty {
+        body["frequency_penalty"] = json!(frequency_penalty);
+    }
+    if let Some(presence_penalty) = request.presence_penalty {
+        body["presence_penalty"] = json!(presence_penalty);
+    }
+    body
 }
 
 #[tauri::command]
@@ -1226,6 +1236,51 @@ mod security_tests {
                 "missing bounded command: {command}"
             );
         }
+    }
+
+    #[test]
+    fn native_llm_request_body_keeps_sampling_penalties() {
+        let request = LlmChatRequest {
+            base_url: "https://example.test/v1".into(),
+            model_name: "papyrus-test".into(),
+            api_key: "test-key".into(),
+            provider_type: "vendor_key".into(),
+            messages: vec![LlmChatMessage {
+                role: "user".into(),
+                content: "test".into(),
+            }],
+            temperature: 0.31,
+            max_tokens: 1234,
+            frequency_penalty: Some(0.48),
+            presence_penalty: Some(0.22),
+        };
+
+        let body = llm_request_body(&request);
+
+        assert!(
+            (body["frequency_penalty"].as_f64().unwrap() - 0.48).abs() < 0.000_001,
+            "frequency penalty must reach the native request body"
+        );
+        assert!(
+            (body["presence_penalty"].as_f64().unwrap() - 0.22).abs() < 0.000_001,
+            "presence penalty must reach the native request body"
+        );
+
+        let without_penalties = LlmChatRequest {
+            base_url: "https://example.test/v1".into(),
+            model_name: "papyrus-test".into(),
+            api_key: "test-key".into(),
+            provider_type: "vendor_key".into(),
+            messages: Vec::new(),
+            temperature: 0.28,
+            max_tokens: 512,
+            frequency_penalty: None,
+            presence_penalty: None,
+        };
+        let body_without_penalties = llm_request_body(&without_penalties);
+
+        assert!(body_without_penalties.get("frequency_penalty").is_none());
+        assert!(body_without_penalties.get("presence_penalty").is_none());
     }
 }
 

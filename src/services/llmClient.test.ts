@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { invoke } from '@tauri-apps/api/core'
 import {
   callOpenAICompatible,
   callOpenAICompatibleStream,
@@ -7,6 +8,8 @@ import {
 } from './llmClient'
 import { defaultProviderConfigs } from './modelCatalog'
 import { useAppStore } from '../stores/useAppStore'
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 function jsonResponse(payload: unknown, status = 200) {
   return {
@@ -33,11 +36,200 @@ function setUsableModel(modelName = 'agnes-2.0-flash') {
 
 afterEach(() => {
   vi.restoreAllMocks()
+  vi.mocked(invoke).mockReset()
   useAppStore.setState({
     scallionToken: undefined,
     scallionModels: [],
     scallionPlan: undefined,
     scallionQuota: undefined,
+  })
+})
+
+describe('desktop sampling parity', () => {
+  it('preserves every sampling option when a non-streaming request falls back to Tauri', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+    vi.mocked(invoke).mockResolvedValue('native reply')
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        undefined,
+        {
+          temperature: 0.31,
+          maxTokens: 1234,
+          frequencyPenalty: 0.48,
+          presencePenalty: 0.22,
+        },
+      ),
+    ).resolves.toBe('native reply')
+
+    expect(invoke).toHaveBeenCalledWith('llm_chat', {
+      request: expect.objectContaining({
+        temperature: 0.31,
+        maxTokens: 1234,
+        frequencyPenalty: 0.48,
+        presencePenalty: 0.22,
+      }),
+    })
+  })
+
+  it('keeps sampling options when an empty streaming body falls back to a regular request', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, body: null } as Response)
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: 'fallback reply' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        {
+          onToken: vi.fn(),
+          sampling: {
+            temperature: 0.31,
+            maxTokens: 1234,
+            frequencyPenalty: 0.48,
+            presencePenalty: 0.22,
+          },
+        },
+      ),
+    ).resolves.toBe('fallback reply')
+
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1].body)).toMatchObject({
+      stream: false,
+      temperature: 0.31,
+      max_tokens: 1234,
+      frequency_penalty: 0.48,
+      presence_penalty: 0.22,
+    })
+  })
+
+  it('downgrades a zero-token readable stream only once with the same sampling options', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({ read: async () => ({ done: true }) }),
+        },
+      } as unknown as Response)
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: 'zero token fallback' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        {
+          onToken: vi.fn(),
+          sampling: {
+            temperature: 0.31,
+            maxTokens: 1234,
+            frequencyPenalty: 0.48,
+            presencePenalty: 0.22,
+          },
+        },
+      ),
+    ).resolves.toBe('zero token fallback')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1].body)).toMatchObject({
+      stream: false,
+      temperature: 0.31,
+      max_tokens: 1234,
+      frequency_penalty: 0.48,
+      presence_penalty: 0.22,
+    })
+  })
+
+  it('downgrades a DONE-only SSE stream without trying to parse its marker as JSON', async () => {
+    const encoder = new TextEncoder()
+    let readCount = 0
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (readCount++ === 0) return { value: encoder.encode('data: [DONE]\n\n'), done: false }
+              return { done: true }
+            },
+          }),
+        },
+      } as unknown as Response)
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: 'done marker fallback' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        {
+          onToken: vi.fn(),
+          sampling: { temperature: 0.31, maxTokens: 1234, frequencyPenalty: 0.48, presencePenalty: 0.22 },
+        },
+      ),
+    ).resolves.toBe('done marker fallback')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not send a fallback request after a whitespace token was received', async () => {
+    const encoder = new TextEncoder()
+    let readCount = 0
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount++ === 0) {
+              return { value: encoder.encode('data: {"choices":[{"delta":{"content":" "}}]}\n\n'), done: false }
+            }
+            return { done: true }
+          },
+        }),
+      },
+    } as unknown as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        { onToken: vi.fn(), sampling: { temperature: 0.31, maxTokens: 1234 } },
+      ),
+    ).rejects.toMatchObject({ code: 'protocol_error', recoverable: true })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('makes only one non-streaming attempt after an empty stream fallback fails transiently', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: { getReader: () => ({ read: async () => ({ done: true }) }) },
+      } as unknown as Response)
+      .mockResolvedValue(jsonResponse({ error: { message: 'temporary upstream error' } }, 503))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        { onToken: vi.fn(), sampling: { temperature: 0.31, maxTokens: 1234 } },
+      ),
+    ).rejects.toMatchObject({ code: 'server_error' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
 

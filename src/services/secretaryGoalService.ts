@@ -1,4 +1,5 @@
 import { composeSystemPrompt } from './agentPromptContext'
+import { getAgentSamplingProfile } from './agentSamplingService'
 import { callOpenAICompatible, canCallProvider } from './llmClient'
 import { describeModelRouting, selectModelForRole } from './modelRouterService'
 import {
@@ -93,6 +94,7 @@ export async function judgeSecretaryGoal(
 ): Promise<GoalJudgeResult> {
   const routing = selectModelForRole('judge', { complexity: 'goal' })
   const provider = routing.provider
+  const sampling = getAgentSamplingProfile('judge', effort)
 
   if (!canCallProvider(provider)) {
     return fallbackJudge(goal, stageResult)
@@ -126,7 +128,7 @@ export async function judgeSecretaryGoal(
           `本阶段结果：\n${stageResult.slice(0, 6000)}`,
         ].join('\n\n'),
       },
-    ])
+    ], undefined, sampling)
 
     return sanitizeJudgeResult(JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] ?? raw))
   } catch {

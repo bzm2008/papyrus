@@ -1,4 +1,5 @@
 import { type LlmProviderConfig, useAppStore } from '../stores/useAppStore'
+import { getAgentSamplingProfile } from './agentSamplingService'
 import { composeSystemPrompt } from './agentPromptContext'
 import { callOpenAICompatible, canCallProvider } from './llmClient'
 import { retrieveMentionContext } from './projectContext'
@@ -37,6 +38,11 @@ export async function runCompanionRewrite({
   provider: LlmProviderConfig
 }): Promise<CompanionRewriteResult> {
   const text = selectedText.trim() || '这段文字'
+  const sampling = getAgentSamplingProfile(
+    action === '指令' ? 'writer' : 'judge',
+    useAppStore.getState().flowThinkingEffort,
+    action === '指令' ? { creative: true } : undefined,
+  )
 
   if (action === '查重') {
     if (!canCallProvider(provider)) {
@@ -60,7 +66,7 @@ export async function runCompanionRewrite({
           .filter(Boolean)
           .join('\n\n'),
       },
-    ])
+    ], undefined, sampling)
 
     return parseCheckupResult(response, text)
   }
@@ -86,7 +92,7 @@ export async function runCompanionRewrite({
         .filter(Boolean)
         .join('\n\n'),
     },
-  ])
+  ], undefined, sampling)
 
   return parseRewriteResult(response, action, text, customPrompt)
 }

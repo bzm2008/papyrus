@@ -18,6 +18,7 @@ import {
   searchSecretaryLedger,
   setSecretaryLedgerInvokerForTests,
   updateSecretaryLedgerMemory,
+  updateSecretaryLedgerTask,
 } from './secretaryLedgerClient'
 
 function setTauriRuntime(value: unknown) {
@@ -172,6 +173,71 @@ describe('secretaryLedgerClient', () => {
     })
   })
 
+  it('accepts task search content at the native FTS composition maximum', async () => {
+    const content = 'x'.repeat(40_003)
+    setSecretaryLedgerInvokerForTests(vi.fn(async () => [{
+      id: 'task-1',
+      entityType: 'task',
+      projectId: 'project-1',
+      projectTitle: '年度传播计划',
+      title: '整理调研摘要',
+      content,
+    }]))
+
+    await expect(searchSecretaryLedger({
+      query: '调研',
+      currentProjectId: 'project-1',
+      limit: 8,
+    })).resolves.toEqual({
+      ok: true,
+      value: [expect.objectContaining({ entityType: 'task', content })],
+    })
+  })
+
+  it('accepts native FTS record ids for event and checkpoint search hits', async () => {
+    setSecretaryLedgerInvokerForTests(vi.fn(async () => [
+      {
+        id: 'event:task-1:1',
+        entityType: 'event',
+        projectId: 'project-1',
+        projectTitle: '年度传播计划',
+        title: 'plan_ready',
+        content: '已生成公开计划。',
+      },
+      {
+        id: 'checkpoint:task-1:2',
+        entityType: 'checkpoint',
+        projectId: 'project-1',
+        projectTitle: '年度传播计划',
+        title: '任务检查点',
+        content: '继续完善摘要。',
+      },
+    ]))
+
+    await expect(searchSecretaryLedger({
+      query: '计划',
+      currentProjectId: 'project-1',
+      limit: 8,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: [
+        { id: 'event:task-1:1', entityType: 'event' },
+        { id: 'checkpoint:task-1:2', entityType: 'checkpoint' },
+      ],
+    })
+  })
+
+  it('returns typed invalid input for null runtime options instead of throwing', async () => {
+    await expect(Promise.resolve().then(() => listSecretaryLedgerProjects(null as never))).resolves.toMatchObject({
+      ok: false,
+      code: 'invalid_input',
+    })
+    await expect(Promise.resolve().then(() => searchSecretaryLedger(null as never))).resolves.toMatchObject({
+      ok: false,
+      code: 'invalid_input',
+    })
+  })
+
   it('maps task, event, and checkpoint commands with the current project access', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'secretary_ledger_record_event') {
@@ -205,6 +271,40 @@ describe('secretaryLedgerClient', () => {
       input: { contextSnapshot: { draft: '摘要' }, nextStep: '继续完善' },
     })
     expect(invoke).toHaveBeenNthCalledWith(4, 'secretary_ledger_load_latest_checkpoint', { access, taskId: 'task-1' })
+  })
+
+  it('rejects task schedule timestamps outside the native acknowledgement range before invoking', async () => {
+    const invoke = vi.fn(async () => task)
+    setSecretaryLedgerInvokerForTests(invoke)
+
+    await expect(createSecretaryLedgerTask(access, {
+      projectId: 'project-1',
+      title: '无效计划任务',
+      request: '不应写入。',
+      scheduleAt: -1,
+    })).resolves.toMatchObject({ ok: false, code: 'invalid_input' })
+    await expect(updateSecretaryLedgerTask(access, 'task-1', {
+      scheduleAt: Number.MAX_SAFE_INTEGER + 1,
+    })).resolves.toMatchObject({ ok: false, code: 'invalid_input' })
+
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('rejects event and checkpoint JSON that native must not commit without a parseable acknowledgement', async () => {
+    const invoke = vi.fn(async () => ({ taskId: 'task-1', sequence: 1, eventType: 'plan', payload: {}, createdAt: 3 }))
+    setSecretaryLedgerInvokerForTests(invoke)
+    const overlongArray = { entries: Array.from({ length: 101 }, () => 'x') }
+
+    await expect(recordSecretaryLedgerEvent(access, 'task-1', {
+      eventType: 'plan',
+      payload: overlongArray,
+    })).resolves.toMatchObject({ ok: false, code: 'invalid_input' })
+    await expect(saveSecretaryLedgerCheckpoint(access, 'task-1', {
+      contextSnapshot: overlongArray,
+      nextStep: '不应写入。',
+    })).resolves.toMatchObject({ ok: false, code: 'invalid_input' })
+
+    expect(invoke).not.toHaveBeenCalled()
   })
 
   it('maps a one-time legacy batch without creating browser storage', async () => {

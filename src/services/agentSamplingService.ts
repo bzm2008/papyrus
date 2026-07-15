@@ -4,6 +4,7 @@ export type AgentSamplingPhase =
   | 'classification'
   | 'planning'
   | 'research'
+  | 'tool_json'
   | 'agent_output'
   | 'writer'
   | 'judge'
@@ -25,11 +26,12 @@ export function getAgentSamplingProfile(
   options: { repeatRisk?: number; creative?: boolean } = {},
 ): AgentSamplingProfile {
   const repeatRisk = clamp(options.repeatRisk ?? 0, 0, 1)
-  const creativePhase = options.creative || phase === 'writer' || phase === 'repair'
+  const creativePhase = options.creative ?? (phase === 'writer' || phase === 'repair')
   const stablePhase =
     phase === 'classification' ||
     phase === 'planning' ||
     phase === 'research' ||
+    phase === 'tool_json' ||
     phase === 'judge' ||
     phase === 'compression' ||
     phase === 'connectivity'

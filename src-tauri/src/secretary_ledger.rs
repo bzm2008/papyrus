@@ -9,10 +9,15 @@ use std::{
 use tauri::Manager;
 use uuid::Uuid;
 
-pub const SECRETARY_LEDGER_SCHEMA_VERSION: i64 = 5;
+pub const SECRETARY_LEDGER_SCHEMA_VERSION: i64 = 6;
 const LEGACY_PROJECT_ID: &str = "__papyrus_legacy__";
 const MAX_LIST_RESULTS: u32 = 100;
 const MAX_LEGACY_IMPORT_RECORDS: usize = 100;
+const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
+const MAX_SAFE_JSON_CHARS: usize = 16_000;
+const MAX_SAFE_JSON_DEPTH: usize = 12;
+const MAX_SAFE_JSON_KEYS: usize = 100;
+const MAX_SAFE_JSON_NODES: usize = 1_000;
 
 #[derive(Clone, Debug)]
 pub struct SecretaryLedger {
@@ -181,10 +186,40 @@ pub struct UpdateTaskInput {
     pub request: Option<String>,
     pub status: Option<String>,
     pub priority: Option<i64>,
-    pub schedule_at: Option<i64>,
-    pub next_step: Option<String>,
-    pub public_plan: Option<String>,
-    pub summary: Option<String>,
+    #[serde(default)]
+    pub schedule_at: TaskFieldPatch<i64>,
+    #[serde(default)]
+    pub next_step: TaskFieldPatch<String>,
+    #[serde(default)]
+    pub public_plan: TaskFieldPatch<String>,
+    #[serde(default)]
+    pub summary: TaskFieldPatch<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskFieldPatch<T> {
+    Unchanged,
+    Clear,
+    Set(T),
+}
+
+impl<T> Default for TaskFieldPatch<T> {
+    fn default() -> Self {
+        Self::Unchanged
+    }
+}
+
+impl<'de, T> Deserialize<'de> for TaskFieldPatch<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer)
+            .map(|value| value.map(Self::Set).unwrap_or(Self::Clear))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -747,41 +782,60 @@ impl SecretaryLedger {
         let existing =
             find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
         authorize_project_write(&access, Some(&existing.project_id))?;
+        let UpdateTaskInput {
+            title,
+            request,
+            status,
+            priority,
+            schedule_at,
+            next_step,
+            public_plan,
+            summary,
+        } = input;
+        let title = title
+            .map(|value| normalize_safe_text(value, 240))
+            .transpose()?
+            .unwrap_or(existing.title);
+        let request = request
+            .map(|value| normalize_safe_text(value, 16_000))
+            .transpose()?
+            .unwrap_or(existing.request);
+        let status = status
+            .map(normalize_task_status)
+            .transpose()?
+            .unwrap_or(existing.status);
+        let priority = priority.unwrap_or(existing.priority);
+        let schedule_at = match schedule_at {
+            TaskFieldPatch::Unchanged => existing.schedule_at,
+            TaskFieldPatch::Clear => None,
+            TaskFieldPatch::Set(value) => Some(normalize_schedule_at(value)?),
+        };
+        let next_step = match next_step {
+            TaskFieldPatch::Unchanged => existing.next_step,
+            TaskFieldPatch::Clear => None,
+            TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 4_000)?),
+        };
+        let public_plan = match public_plan {
+            TaskFieldPatch::Unchanged => existing.public_plan,
+            TaskFieldPatch::Clear => None,
+            TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 16_000)?),
+        };
+        let summary = match summary {
+            TaskFieldPatch::Unchanged => existing.summary,
+            TaskFieldPatch::Clear => None,
+            TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 4_000)?),
+        };
         let task = SecretaryTask {
             id,
             project_id: existing.project_id,
-            title: input
-                .title
-                .map(|value| normalize_safe_text(value, 240))
-                .transpose()?
-                .unwrap_or(existing.title),
-            request: input
-                .request
-                .map(|value| normalize_safe_text(value, 16_000))
-                .transpose()?
-                .unwrap_or(existing.request),
-            status: input
-                .status
-                .map(normalize_task_status)
-                .transpose()?
-                .unwrap_or(existing.status),
-            priority: input.priority.unwrap_or(existing.priority),
-            schedule_at: input.schedule_at.or(existing.schedule_at),
-            next_step: input
-                .next_step
-                .map(|value| normalize_safe_text(value, 4_000))
-                .transpose()?
-                .or(existing.next_step),
-            public_plan: input
-                .public_plan
-                .map(|value| normalize_safe_text(value, 16_000))
-                .transpose()?
-                .or(existing.public_plan),
-            summary: input
-                .summary
-                .map(|value| normalize_safe_text(value, 4_000))
-                .transpose()?
-                .or(existing.summary),
+            title,
+            request,
+            status,
+            priority,
+            schedule_at,
+            next_step,
+            public_plan,
+            summary,
             created_at: existing.created_at,
             updated_at: unix_millis(),
         };
@@ -1447,6 +1501,26 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), LedgerError> {
             [],
         )?;
     }
+    let sixth_migration_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM secretary_schema_migrations WHERE version = 6)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if sixth_migration_applied == 0 {
+        transaction.execute(
+            "
+            UPDATE secretary_tasks
+            SET schedule_at = NULL
+            WHERE schedule_at IS NOT NULL
+              AND (schedule_at < 0 OR schedule_at > ?1)
+            ",
+            params![MAX_SAFE_JSON_INTEGER],
+        )?;
+        transaction.execute(
+            "INSERT INTO secretary_schema_migrations(version, applied_at) VALUES (6, unixepoch())",
+            [],
+        )?;
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -1658,7 +1732,7 @@ fn normalized_new_task(input: CreateTaskInput) -> Result<SecretaryTask, LedgerEr
         request: normalize_safe_text(input.request, 16_000)?,
         status,
         priority,
-        schedule_at: input.schedule_at,
+        schedule_at: input.schedule_at.map(normalize_schedule_at).transpose()?,
         next_step: input
             .next_step
             .map(|value| normalize_safe_text(value, 4_000))
@@ -1699,6 +1773,13 @@ fn validate_priority(priority: i64) -> Result<(), LedgerError> {
         return Err(LedgerError::InvalidInput);
     }
     Ok(())
+}
+
+fn normalize_schedule_at(value: i64) -> Result<i64, LedgerError> {
+    if !(0..=MAX_SAFE_JSON_INTEGER).contains(&value) {
+        return Err(LedgerError::InvalidInput);
+    }
+    Ok(value)
 }
 
 fn ensure_task_project(
@@ -1885,9 +1966,84 @@ fn normalize_safe_json(
     value: serde_json::Value,
     maximum_chars: usize,
 ) -> Result<serde_json::Value, LedgerError> {
+    let mut budget = SafeJsonBudget {
+        remaining_chars: maximum_chars.min(MAX_SAFE_JSON_CHARS),
+        remaining_nodes: MAX_SAFE_JSON_NODES,
+    };
+    validate_safe_json_value(&value, 0, &mut budget)?;
     let serialized = serialize_json(&value)?;
     normalize_safe_text(serialized, maximum_chars)?;
     Ok(value)
+}
+
+struct SafeJsonBudget {
+    remaining_chars: usize,
+    remaining_nodes: usize,
+}
+
+fn validate_safe_json_value(
+    value: &serde_json::Value,
+    depth: usize,
+    budget: &mut SafeJsonBudget,
+) -> Result<(), LedgerError> {
+    if depth > MAX_SAFE_JSON_DEPTH || budget.remaining_nodes == 0 {
+        return Err(LedgerError::InvalidInput);
+    }
+    budget.remaining_nodes -= 1;
+
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => Ok(()),
+        serde_json::Value::Number(number) => {
+            let is_safe = number
+                .as_i64()
+                .map(|value| (-MAX_SAFE_JSON_INTEGER..=MAX_SAFE_JSON_INTEGER).contains(&value))
+                .or_else(|| {
+                    number
+                        .as_u64()
+                        .map(|value| value <= MAX_SAFE_JSON_INTEGER as u64)
+                })
+                .or_else(|| {
+                    number.as_f64().map(|value| {
+                        value.is_finite() && value.abs() <= MAX_SAFE_JSON_INTEGER as f64
+                    })
+                })
+                .unwrap_or(false);
+            is_safe.then_some(()).ok_or(LedgerError::InvalidInput)
+        }
+        serde_json::Value::String(value) => consume_safe_json_chars(value.chars().count(), budget),
+        serde_json::Value::Array(values) => {
+            if values.len() > MAX_LIST_RESULTS as usize {
+                return Err(LedgerError::InvalidInput);
+            }
+            for item in values {
+                validate_safe_json_value(item, depth + 1, budget)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(values) => {
+            if values.len() > MAX_SAFE_JSON_KEYS {
+                return Err(LedgerError::InvalidInput);
+            }
+            for (key, item) in values {
+                if key.chars().count() > 128
+                    || matches!(key.as_str(), "__proto__" | "constructor" | "prototype")
+                {
+                    return Err(LedgerError::InvalidInput);
+                }
+                consume_safe_json_chars(key.chars().count(), budget)?;
+                validate_safe_json_value(item, depth + 1, budget)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn consume_safe_json_chars(count: usize, budget: &mut SafeJsonBudget) -> Result<(), LedgerError> {
+    if count > budget.remaining_chars {
+        return Err(LedgerError::InvalidInput);
+    }
+    budget.remaining_chars -= count;
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -3056,10 +3212,10 @@ mod tests {
                     request: None,
                     status: Some("paused".into()),
                     priority: None,
-                    schedule_at: None,
-                    next_step: None,
-                    public_plan: None,
-                    summary: Some("等待会议纪要补充".into()),
+                    schedule_at: TaskFieldPatch::Unchanged,
+                    next_step: TaskFieldPatch::Unchanged,
+                    public_plan: TaskFieldPatch::Unchanged,
+                    summary: TaskFieldPatch::Set("等待会议纪要补充".into()),
                 },
             )
             .unwrap();
@@ -3078,6 +3234,145 @@ mod tests {
             })
             .unwrap()
             .is_empty());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_unacknowledgeable_task_schedule_timestamps_before_writing() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let mut invalid_create = task_input("project-a");
+        invalid_create.schedule_at = Some(-1);
+
+        assert!(matches!(
+            ledger.create_task(&project_a, invalid_create),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(ledger.list_tasks(&project_a, 20).unwrap().is_empty());
+
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        assert!(matches!(
+            ledger.update_task(
+                &project_a,
+                &task.id,
+                UpdateTaskInput {
+                    title: None,
+                    request: None,
+                    status: None,
+                    priority: None,
+                    schedule_at: TaskFieldPatch::Set(MAX_SAFE_JSON_INTEGER + 1),
+                    next_step: TaskFieldPatch::Unchanged,
+                    public_plan: TaskFieldPatch::Unchanged,
+                    summary: TaskFieldPatch::Unchanged,
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert_eq!(
+            ledger
+                .get_task(&project_a, &task.id)
+                .unwrap()
+                .unwrap()
+                .schedule_at,
+            None
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn distinguishes_missing_and_null_task_patch_fields_and_clears_nullable_values() {
+        let missing: UpdateTaskInput = serde_json::from_value(serde_json::json!({})).unwrap();
+        let clear: UpdateTaskInput = serde_json::from_value(serde_json::json!({
+            "scheduleAt": null,
+            "nextStep": null,
+            "publicPlan": null,
+            "summary": null,
+        }))
+        .unwrap();
+        assert!(matches!(missing.schedule_at, TaskFieldPatch::Unchanged));
+        assert!(matches!(clear.schedule_at, TaskFieldPatch::Clear));
+        assert!(matches!(clear.next_step, TaskFieldPatch::Clear));
+
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let mut input = task_input("project-a");
+        input.schedule_at = Some(1_780_000_000_000);
+        input.summary = Some("待清空摘要".into());
+        let task = ledger.create_task(&project_a, input).unwrap();
+
+        let updated = ledger
+            .update_task(
+                &project_a,
+                &task.id,
+                UpdateTaskInput {
+                    title: None,
+                    request: None,
+                    status: None,
+                    priority: None,
+                    schedule_at: TaskFieldPatch::Clear,
+                    next_step: TaskFieldPatch::Clear,
+                    public_plan: TaskFieldPatch::Clear,
+                    summary: TaskFieldPatch::Clear,
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.schedule_at, None);
+        assert_eq!(updated.next_step, None);
+        assert_eq!(updated.public_plan, None);
+        assert_eq!(updated.summary, None);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_unparseable_event_and_checkpoint_json_before_committing() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        let overlong_array = serde_json::json!({ "entries": vec!["x"; 101] });
+
+        assert!(matches!(
+            ledger.record_event(
+                &project_a,
+                &task.id,
+                RecordEventInput {
+                    event_type: "plan".into(),
+                    payload: overlong_array.clone(),
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.save_checkpoint(
+                &project_a,
+                &task.id,
+                SaveCheckpointInput {
+                    context_snapshot: overlong_array,
+                    next_step: "不应写入".into(),
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(ledger
+            .list_events(&project_a, &task.id, 20)
+            .unwrap()
+            .is_empty());
+        assert!(ledger
+            .load_latest_checkpoint(&project_a, &task.id)
+            .unwrap()
+            .is_none());
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3546,10 +3841,10 @@ mod tests {
                     request: None,
                     status: Some("paused".into()),
                     priority: None,
-                    schedule_at: None,
-                    next_step: None,
-                    public_plan: None,
-                    summary: None,
+                    schedule_at: TaskFieldPatch::Unchanged,
+                    next_step: TaskFieldPatch::Unchanged,
+                    public_plan: TaskFieldPatch::Unchanged,
+                    summary: TaskFieldPatch::Unchanged,
                 },
             ),
             Err(LedgerError::InvalidInput)
@@ -3621,10 +3916,10 @@ mod tests {
                     request: None,
                     status: Some("paused".into()),
                     priority: None,
-                    schedule_at: None,
-                    next_step: None,
-                    public_plan: None,
-                    summary: None,
+                    schedule_at: TaskFieldPatch::Unchanged,
+                    next_step: TaskFieldPatch::Unchanged,
+                    public_plan: TaskFieldPatch::Unchanged,
+                    summary: TaskFieldPatch::Unchanged,
                 },
             ),
             Err(LedgerError::InvalidInput)

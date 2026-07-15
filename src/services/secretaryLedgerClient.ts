@@ -10,6 +10,8 @@ const MAX_SOURCE_CHARS = 96
 const MAX_STATUS_CHARS = 32
 const MAX_NEXT_STEP_CHARS = 4_000
 const MAX_SEARCH_CONTENT_CHARS = 24_000
+const MAX_TASK_SEARCH_CONTENT_CHARS = 16_000 + 4_000 + 16_000 + 4_000 + 3
+const MAX_FTS_RECORD_ID_CHARS = MAX_IDENTIFIER_CHARS + 32
 const MAX_LEGACY_IMPORT_RECORDS = 101
 const MAX_SCHEMA_VERSION = 100_000
 const MAX_JSON_DEPTH = 12
@@ -305,6 +307,7 @@ export function createSecretaryLedgerProject(input: CreateSecretaryLedgerProject
 }
 
 export function listSecretaryLedgerProjects(options: { includeArchived?: boolean; limit?: number } = {}) {
+  if (!isRecord(options)) return invalidInputResult<SecretaryLedgerProject[]>()
   const limit = resolveLimit(options.limit)
   if (limit === null || (options.includeArchived !== undefined && typeof options.includeArchived !== 'boolean')) {
     return invalidInputResult<SecretaryLedgerProject[]>()
@@ -351,6 +354,7 @@ export function deleteSecretaryLedgerMemory(access: SecretaryLedgerProjectAccess
 }
 
 export function searchSecretaryLedger(input: SecretaryLedgerSearchInput) {
+  if (!isRecord(input)) return invalidInputResult<SecretaryLedgerSearchResult[]>()
   const limit = resolveLimit(input.limit)
   const access = normalizeProjectAccess({
     currentProjectId: input.currentProjectId,
@@ -371,6 +375,7 @@ export function searchSecretaryLedger(input: SecretaryLedgerSearchInput) {
 }
 
 export function createSecretaryLedgerTask(access: SecretaryLedgerProjectAccess, input: CreateSecretaryLedgerTaskInput) {
+  if (!hasSafeOptionalScheduleAt(input)) return invalidInputResult<SecretaryLedgerTask>()
   return callWithAccess('secretary_ledger_create_task', access, { input }, parseTask)
 }
 
@@ -389,6 +394,7 @@ export function updateSecretaryLedgerTask(
   id: string,
   input: UpdateSecretaryLedgerTaskInput,
 ) {
+  if (!hasSafeOptionalScheduleAt(input)) return invalidInputResult<SecretaryLedgerTask>()
   return callWithAccess('secretary_ledger_update_task', access, { id, input }, parseTask)
 }
 
@@ -401,7 +407,9 @@ export function recordSecretaryLedgerEvent(
   taskId: string,
   input: RecordSecretaryLedgerEventInput,
 ) {
-  return callWithAccess('secretary_ledger_record_event', access, { taskId, input }, parseTaskEvent)
+  const normalizedInput = normalizeEventInput(input)
+  if (normalizedInput === null) return invalidInputResult<SecretaryLedgerTaskEvent>()
+  return callWithAccess('secretary_ledger_record_event', access, { taskId, input: normalizedInput }, parseTaskEvent)
 }
 
 export function listSecretaryLedgerEvents(
@@ -419,7 +427,9 @@ export function saveSecretaryLedgerCheckpoint(
   taskId: string,
   input: SaveSecretaryLedgerCheckpointInput,
 ) {
-  return callWithAccess('secretary_ledger_save_checkpoint', access, { taskId, input }, parseCheckpoint)
+  const normalizedInput = normalizeCheckpointInput(input)
+  if (normalizedInput === null) return invalidInputResult<SecretaryLedgerCheckpoint>()
+  return callWithAccess('secretary_ledger_save_checkpoint', access, { taskId, input: normalizedInput }, parseCheckpoint)
 }
 
 export function loadLatestSecretaryLedgerCheckpoint(access: SecretaryLedgerProjectAccess, taskId: string) {
@@ -473,6 +483,36 @@ function normalizeProjectAccess(access: SecretaryLedgerProjectAccess) {
 function resolveLimit(value: number | undefined) {
   if (value === undefined) return DEFAULT_LIST_LIMIT
   return isSafeIntegerInRange(value, 1, MAX_LIST_RESULTS) ? value : null
+}
+
+function hasSafeOptionalScheduleAt(input: unknown) {
+  if (!isRecord(input)) return false
+  if (!Object.prototype.hasOwnProperty.call(input, 'scheduleAt')) return true
+  const value = input.scheduleAt
+  return value === null || isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER)
+}
+
+function normalizeEventInput(input: unknown): RecordSecretaryLedgerEventInput | null {
+  if (!isRecord(input) || typeof input.eventType !== 'string') return null
+  const payload = normalizeJsonInput(input.payload)
+  return payload === null ? null : { eventType: input.eventType, payload }
+}
+
+function normalizeCheckpointInput(input: unknown): SaveSecretaryLedgerCheckpointInput | null {
+  if (!isRecord(input) || typeof input.nextStep !== 'string') return null
+  const contextSnapshot = normalizeJsonInput(input.contextSnapshot)
+  return contextSnapshot === null ? null : { contextSnapshot, nextStep: input.nextStep }
+}
+
+function normalizeJsonInput(value: unknown): SecretaryLedgerJson | null {
+  const parsed = parseJson(value)
+  if (parsed === invalidPayload) return null
+
+  try {
+    return Array.from(JSON.stringify(parsed)).length <= MAX_MEMORY_CONTENT_CHARS ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 function isLegacyBatchBounded(batch: SecretaryLedgerLegacyImportBatch) {
@@ -568,12 +608,18 @@ function parseMemoryList(payload: unknown) {
 
 function parseSearchResult(payload: unknown): SecretaryLedgerSearchResult | typeof invalidPayload {
   if (!isRecord(payload)) return invalidPayload
-  const id = readIdentifier(payload, 'id')
   const entityType = readEnum(payload, 'entityType', ['memory', 'task', 'event', 'checkpoint'] as const)
+  const id = entityType === 'event' || entityType === 'checkpoint'
+    ? readFtsRecordId(payload, 'id', entityType)
+    : readIdentifier(payload, 'id')
   const projectId = readNullableIdentifier(payload, 'projectId')
   const projectTitle = readNullableText(payload, 'projectTitle', MAX_PROJECT_TITLE_CHARS)
   const title = readText(payload, 'title', MAX_PROJECT_TITLE_CHARS)
-  const content = readText(payload, 'content', MAX_SEARCH_CONTENT_CHARS)
+  const content = readText(
+    payload,
+    'content',
+    entityType === 'task' ? MAX_TASK_SEARCH_CONTENT_CHARS : MAX_SEARCH_CONTENT_CHARS,
+  )
   if (
     id === invalidPayload ||
     entityType === invalidPayload ||
@@ -785,6 +831,18 @@ function parseJson(
 function readIdentifier(record: Record<string, unknown>, key: string) {
   const value = record[key]
   return isIdentifier(value) ? value : invalidPayload
+}
+
+function readFtsRecordId(
+  record: Record<string, unknown>,
+  key: string,
+  entityType: 'event' | 'checkpoint',
+) {
+  const value = record[key]
+  const pattern = new RegExp(`^${entityType}:[A-Za-z0-9._-]{1,${MAX_IDENTIFIER_CHARS}}:[1-9]\\d{0,18}$`)
+  return typeof value === 'string' && value.length <= MAX_FTS_RECORD_ID_CHARS && pattern.test(value)
+    ? value
+    : invalidPayload
 }
 
 function readNullableIdentifier(record: Record<string, unknown>, key: string) {

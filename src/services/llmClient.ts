@@ -152,6 +152,8 @@ type NativeLlmPayload = {
     messages: ChatMessage[]
     temperature: number
     maxTokens: number
+    frequencyPenalty?: number
+    presencePenalty?: number
   }
 }
 
@@ -225,6 +227,8 @@ async function callOpenAICompatibleOnce(
     const fallback = await callViaTauri(provider, messages, {
       temperature: requestBody.temperature,
       maxTokens: requestBody.max_tokens,
+      frequencyPenalty: requestBody.frequency_penalty,
+      presencePenalty: requestBody.presence_penalty,
     })
     scheduleScallionQuotaRefresh(provider)
     return fallback
@@ -270,10 +274,13 @@ export async function callOpenAICompatibleStream(
   { signal, onToken, sampling }: StreamOptions,
 ) {
   let receivedToken = false
+  const emptyStreamFallback = { attempted: false }
 
-  return withLlmRetry(
-    () =>
-      callOpenAICompatibleStreamOnce(provider, messages, {
+  try {
+    return await callOpenAICompatibleStreamOnce(
+      provider,
+      messages,
+      {
         signal,
         sampling,
         onToken: (token) => {
@@ -282,10 +289,22 @@ export async function callOpenAICompatibleStream(
           }
           onToken(token)
         },
-      }),
-    3,
-    (error) => !receivedToken && !signal?.aborted && isTransientLlmError(error),
-  )
+      },
+      true,
+      emptyStreamFallback,
+    )
+  } catch (error) {
+    if (
+      receivedToken ||
+      emptyStreamFallback.attempted ||
+      signal?.aborted ||
+      (error instanceof LlmRequestError && error.code === 'request_uncertain')
+    ) {
+      throw error
+    }
+
+    return fallbackFromEmptyStream(provider, messages, signal, sampling, onToken, emptyStreamFallback)
+  }
 }
 
 async function callOpenAICompatibleStreamOnce(
@@ -293,6 +312,7 @@ async function callOpenAICompatibleStreamOnce(
   messages: ChatMessage[],
   { signal, onToken, sampling }: StreamOptions,
   allowModelRecovery = true,
+  emptyStreamFallback = { attempted: false },
 ) {
   const modelName = resolveProviderModelName(provider)
 
@@ -374,6 +394,7 @@ async function callOpenAICompatibleStreamOnce(
           messages,
           { signal, onToken, sampling },
           false,
+          emptyStreamFallback,
         )
       }
     }
@@ -382,9 +403,7 @@ async function callOpenAICompatibleStreamOnce(
   }
 
   if (!response.body) {
-    const text = await callOpenAICompatible(provider, messages, signal)
-    onToken(text)
-    return text
+    return fallbackFromEmptyStream(provider, messages, signal, sampling, onToken, emptyStreamFallback)
   }
 
   const reader = response.body.getReader()
@@ -425,11 +444,18 @@ async function callOpenAICompatibleStreamOnce(
   }
 
   if (!fullText.trim()) {
-    const payload = JSON.parse(rawText || '{}') as ChatCompletionResponse
+    if (fullText.length > 0) {
+      throw new LlmRequestError('流式响应只包含空白内容，未自动重试以避免重复请求。', {
+        code: 'protocol_error',
+        recoverable: true,
+      })
+    }
+
+    const payload = tryParseChatCompletionResponse(rawText)
     const content = payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text
 
     if (!content?.trim()) {
-      throw new Error('LLM 没有返回可用文本')
+      return fallbackFromEmptyStream(provider, messages, signal, sampling, onToken, emptyStreamFallback)
     }
 
     onToken(content)
@@ -439,6 +465,35 @@ async function callOpenAICompatibleStreamOnce(
 
   scheduleScallionQuotaRefresh(provider)
   return fullText.trim()
+}
+
+async function fallbackFromEmptyStream(
+  provider: LlmProviderConfig,
+  messages: ChatMessage[],
+  signal: AbortSignal | undefined,
+  sampling: LlmSamplingOptions | undefined,
+  onToken: (token: string) => void,
+  state: { attempted: boolean },
+) {
+  if (state.attempted) {
+    throw new LlmRequestError('流式响应未返回内容，已完成一次兼容回退。', {
+      code: 'protocol_error',
+      recoverable: true,
+    })
+  }
+
+  state.attempted = true
+  const fallback = await callOpenAICompatibleOnce(provider, messages, signal, sampling)
+  onToken(fallback)
+  return fallback
+}
+
+function tryParseChatCompletionResponse(value: string): ChatCompletionResponse {
+  try {
+    return JSON.parse(value || '{}') as ChatCompletionResponse
+  } catch {
+    return {}
+  }
 }
 
 export async function fetchScallionProxyModels(
@@ -643,6 +698,8 @@ async function callViaTauri(
       messages,
       temperature: options.temperature,
       maxTokens: options.maxTokens,
+      frequencyPenalty: options.frequencyPenalty,
+      presencePenalty: options.presencePenalty,
     },
   }
 

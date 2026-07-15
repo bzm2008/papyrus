@@ -41,12 +41,14 @@ export async function callCacheableModel(
   messages: ChatMessage[],
   options: CachedModelCallOptions,
 ) {
-  const cacheKey = createModelCallCacheKey(options)
+  const sampling = resolveSampling(options)
+  const cacheKey = createModelCallCacheKey({ ...options, sampling })
+  const taskType = cacheTaskType(options, sampling)
 
   if (!options.bypass && isCacheableStage(options.stage)) {
     const hit =
-      findExactSemanticCacheHit(cacheKey, cacheTaskType(options)) ??
-      findSemanticCacheHit(cacheKey, cacheTaskType(options))
+      findExactSemanticCacheHit(cacheKey, taskType) ??
+      findSemanticCacheHit(cacheKey, taskType)
 
     if (hit?.summary) {
       recordModelCacheMetric(cacheKey, options.stage, true)
@@ -54,13 +56,10 @@ export async function callCacheableModel(
     }
   }
 
-  const sampling =
-    options.sampling ??
-    getAgentSamplingProfile(options.samplingPhase ?? stageToSamplingPhase(options.stage), options.thinkingEffort)
   const result = await callOpenAICompatible(provider, messages, options.signal, sampling)
 
   if (isCacheableStage(options.stage)) {
-    rememberSemanticResult(cacheKey, cacheTaskType(options), result)
+    rememberSemanticResult(cacheKey, taskType, result)
     recordModelCacheMetric(cacheKey, options.stage, false, '首次调用或上下文变化')
   } else {
     recordModelCacheMetric(cacheKey, options.stage, false, '该阶段不适合安全复用')
@@ -80,6 +79,8 @@ function stageToSamplingPhase(stage: CacheableModelStage): AgentSamplingPhase {
 }
 
 export function createModelCallCacheKey(options: CachedModelCallOptions) {
+  const sampling = resolveSampling(options)
+
   return [
     options.stage,
     options.taskType,
@@ -87,10 +88,27 @@ export function createModelCallCacheKey(options: CachedModelCallOptions) {
     options.providerRole ?? 'default',
     options.thinkingEffort ?? 'medium',
     options.contextHash ?? 'ctx:none',
+    samplingFingerprint(sampling),
     createSemanticFingerprint(options.prompt),
   ]
     .filter(Boolean)
     .join('::')
+}
+
+function resolveSampling(options: CachedModelCallOptions) {
+  return (
+    options.sampling ??
+    getAgentSamplingProfile(options.samplingPhase ?? stageToSamplingPhase(options.stage), options.thinkingEffort)
+  )
+}
+
+function samplingFingerprint(sampling: AgentSamplingProfile) {
+  return [
+    `t:${sampling.temperature}`,
+    `fp:${sampling.frequencyPenalty}`,
+    `pp:${sampling.presencePenalty}`,
+    `mt:${sampling.maxTokens}`,
+  ].join(',')
 }
 
 export function getModelCacheStats() {
@@ -138,6 +156,6 @@ function isCacheableStage(stage: CacheableModelStage) {
   ].includes(stage)
 }
 
-function cacheTaskType(options: CachedModelCallOptions) {
-  return `model-cache:${options.stage}:${options.taskType}`
+function cacheTaskType(options: CachedModelCallOptions, sampling: AgentSamplingProfile) {
+  return `model-cache:${options.stage}:${options.taskType}:sampling:${samplingFingerprint(sampling)}`
 }

@@ -237,7 +237,7 @@ export async function sendFlowMessage(
         if (!canCallProvider(workRouting.provider)) {
           throw new Error('当前没有可用模型来规划受控电脑操作。')
         }
-        const sampling = getAgentSamplingProfile('agent_output', thinkingEffort)
+        const sampling = getAgentSamplingProfile('tool_json', thinkingEffort)
         const workResult = await runWorkAssistantAgentLoop({
           runId: run.id,
           prompt: executionContent,
@@ -1600,7 +1600,7 @@ function throwIfAborted(signal?: AbortSignal) {
   throw error
 }
 
-async function streamOrCall(
+export async function streamOrCall(
   provider: Parameters<typeof callOpenAICompatible>[0],
   messages: ChatMessage[],
   onText?: (text: string) => void,
@@ -1612,29 +1612,15 @@ async function streamOrCall(
   }
 
   let text = ''
-  let receivedToken = false
 
-  try {
-    return await callOpenAICompatibleStream(provider, messages, {
-      onToken: (token) => {
-        if (token) {
-          receivedToken = true
-        }
-        text += token
-        onText(text)
-      },
-      signal,
-      sampling,
-    })
-  } catch (error) {
-    if (receivedToken || (error instanceof DOMException && error.name === 'AbortError')) {
-      throw error
-    }
-
-    const fallback = await callOpenAICompatible(provider, messages, signal, sampling)
-    onText(fallback)
-    return fallback
-  }
+  return callOpenAICompatibleStream(provider, messages, {
+    onToken: (token) => {
+      text += token
+      onText(text)
+    },
+    signal,
+    sampling,
+  })
 }
 
 function isInsufficientDraft(draft: string | undefined, prompt: string) {
