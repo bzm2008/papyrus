@@ -38,7 +38,7 @@ export function validateOutputDirectory(outputDir, bundleDir, rootDir = ROOT, cw
 }
 
 export async function assertNoSymlinkAncestors(targetPath, protectedPaths = []) {
-  const protectedResolved = protectedPaths.map((value) => path.resolve(value))
+  const protectedResolved = await Promise.all(protectedPaths.map((value) => canonicalPath(value)))
   let current = path.resolve(targetPath)
   while (true) {
     try {
@@ -58,6 +58,36 @@ export async function assertNoSymlinkAncestors(targetPath, protectedPaths = []) 
     const parent = path.dirname(current)
     if (parent === current) break
     current = parent
+  }
+}
+
+async function canonicalPath(value) {
+  const resolved = path.resolve(value)
+  try {
+    return await fs.realpath(resolved)
+  } catch (error) {
+    if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error
+    const parent = path.dirname(resolved)
+    if (parent === resolved) return resolved
+    const canonicalParent = await canonicalPath(parent)
+    return path.join(canonicalParent, path.basename(resolved))
+  }
+}
+
+async function hasOwnedSmokeMarker(markerPath) {
+  let stat
+  try {
+    stat = await fs.lstat(markerPath)
+  } catch {
+    return false
+  }
+  if (!stat.isFile() || stat.isSymbolicLink()) return false
+  const markerContents = await fs.readFile(markerPath, 'utf8').catch(() => '')
+  try {
+    const parsed = JSON.parse(markerContents)
+    return parsed?.tool === 'papyrus-bundle-smoke' && parsed?.version === 1
+  } catch {
+    return false
   }
 }
 
@@ -81,15 +111,7 @@ export async function prepareOutputDirectory(outputDir, bundleDir) {
       throw new Error('smoke output directory is non-empty and is not owned by this smoke run')
     }
     if (entries.includes(OUTPUT_MARKER)) {
-      const markerContents = await fs.readFile(marker, 'utf8').catch(() => '')
-      let owned = false
-      try {
-        const parsed = JSON.parse(markerContents)
-        owned = parsed?.tool === 'papyrus-bundle-smoke' && parsed?.version === 1
-      } catch {
-        owned = false
-      }
-      if (!owned) throw new Error('smoke output directory marker is invalid')
+      if (!(await hasOwnedSmokeMarker(marker))) throw new Error('smoke output directory marker is invalid')
       await fs.rm(output, { recursive: true, force: true })
     }
   }
@@ -560,8 +582,7 @@ async function main() {
       await assertNoSymlinkAncestors(outputDir, [ROOT, process.cwd(), options.bundleDir])
       const marker = path.join(outputDir, OUTPUT_MARKER)
       const outputStat = await fs.lstat(outputDir)
-      const markerExists = await fs.stat(marker).then(() => true).catch(() => false)
-      if (outputStat.isDirectory() && !outputStat.isSymbolicLink() && markerExists) {
+      if (outputStat.isDirectory() && !outputStat.isSymbolicLink() && await hasOwnedSmokeMarker(marker)) {
         await fs.writeFile(path.join(outputDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`)
       }
     } catch {

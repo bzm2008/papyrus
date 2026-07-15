@@ -78,4 +78,33 @@ describe('ModelSelector Scallion entitlement display', () => {
     expect(screen.getByText(/需要 Deeper 套餐/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Nemotron 3 Ultra/ })).toBeDisabled()
   })
+
+  it('labels a stale balance as cached instead of realtime', () => {
+    const current = useAppStore.getState()
+    useAppStore.setState({
+      ...current,
+      scallionToken: 'jwt-token',
+      scallionQuota: {
+        remaining: 503,
+        pointsBalance: 503,
+        planKey: 'free',
+        planName: 'Free',
+        unit: '积分',
+        isMember: false,
+        memberPriceLabel: '9.9 元/月',
+        upgradeUrl: 'https://scallion.uno/pricing',
+        topUpUrl: 'https://scallion.uno/pricing',
+        updatedAt: Date.now(),
+      },
+      scallionSync: {
+        ...current.scallionSync,
+        quota: { ...current.scallionSync.quota, status: 'stale' },
+      },
+    })
+
+    render(<ModelSelector />)
+    fireEvent.click(screen.getByTitle('更换模型'))
+
+    expect(screen.getByText(/余 503 积分 · 可能过期/)).toBeInTheDocument()
+  })
 })

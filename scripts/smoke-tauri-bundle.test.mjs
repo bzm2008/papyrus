@@ -123,6 +123,7 @@ test('bundle smoke rejects symlinked output ancestors when the host permits link
     try {
       await fs.symlink(protectedTarget, protectedLink, process.platform === 'win32' ? 'junction' : 'dir')
       await assert.rejects(assertNoSymlinkAncestors(path.join(protectedLink, 'output'), [protectedTarget]), /protected path/)
+      await assert.rejects(assertNoSymlinkAncestors(path.join(protectedLink, 'output'), [protectedLink]), /protected path/)
     } catch {
       // Link creation may be unavailable even when the first link succeeded.
     }

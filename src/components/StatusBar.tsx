@@ -1,4 +1,5 @@
 import { Columns3, LogIn, PanelLeft, PanelRight, Radio, Sparkles } from 'lucide-react'
+import { getScallionQuotaDisplay } from '../services/scallionAccountService'
 import { formatScallionPlanName } from '../services/scallionModelCatalog'
 import { type ColumnMode, useAppStore } from '../stores/useAppStore'
 
@@ -40,9 +41,14 @@ export function StatusBar() {
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const activeProvider = providerConfigs[activeProviderId]
-  const quotaPointsBalance = scallionQuota?.pointsBalance ?? scallionQuota?.remaining
-  const visiblePointsBalance = quotaPointsBalance ?? scallionUser?.points ?? scallionUser?.balance
-  const pointsAreCached = quotaPointsBalance === undefined || !scallionToken
+  const quotaDisplay = getScallionQuotaDisplay({
+    token: scallionToken,
+    quota: scallionQuota,
+    user: scallionUser,
+    syncStatus: scallionSync.quota.status,
+  })
+  const visiblePointsBalance = quotaDisplay.value
+  const pointsAreCached = quotaDisplay.source === 'cached'
   const conversationChangedChars = documentChangeStats
     .filter((stat) => stat.chatId === activeChatId)
     .reduce((sum, stat) => sum + stat.changedChars, 0)

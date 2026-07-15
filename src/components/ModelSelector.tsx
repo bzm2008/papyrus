@@ -4,8 +4,15 @@ import { createPortal } from 'react-dom'
 import { canCallProvider } from '../services/llmClient'
 import { getEffectiveContextLimit, isProviderValidated } from '../services/modelCatalog'
 import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
-import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
-import { providerOrder, useAppStore, type ProviderId, type ScallionModelMetadata } from '../stores/useAppStore'
+import { getScallionQuotaDisplay, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import {
+  providerOrder,
+  useAppStore,
+  type ProviderId,
+  type ScallionModelMetadata,
+  type ScallionQuota,
+  type ScallionUser,
+} from '../stores/useAppStore'
 
 type PopoverRect = {
   left: number
@@ -56,7 +63,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
         ? currentScallionModel
           ? `${currentScallionModel.modelName} · ${contextLabel(currentScallionModel.contextWindowTokens)}`
           : scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || scallionUser?.member_type
-            ? `${scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || formatScallionPlanName(scallionUser?.member_type ?? '')} · ${formatPoints(scallionQuota, scallionSync.quota.status, scallionUser)}`
+            ? `${scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || formatScallionPlanName(scallionUser?.member_type ?? '')} · ${formatPoints(scallionQuota, scallionSync.quota.status, scallionUser, scallionToken)}`
             : '套餐模型尚未获取'
         : activeProvider.modelName
   const groups = useMemo(
@@ -265,7 +272,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-[#8f897a]">
                         {scallionToken
-                          ? formatPoints(scallionQuota, scallionSync.quota.status, scallionUser)
+                          ? formatPoints(scallionQuota, scallionSync.quota.status, scallionUser, scallionToken)
                           : '登录后同步套餐和积分'}
                         {(scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt) ? ` · 到期 ${formatExpiry((scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt) as string)}` : ''}
                         {scallionQuota?.updatedAt ? ` · ${formatSyncTime(scallionQuota.updatedAt)}` : ''}
@@ -432,22 +439,27 @@ function contextLabel(tokens?: number) {
 }
 
 function formatPoints(
-  quota: { pointsBalance?: number; remaining?: number; unit?: string } | undefined,
+  quota: ScallionQuota | undefined,
   status: 'idle' | 'syncing' | 'ready' | 'stale' | 'error' = 'idle',
-  user?: { points?: number; balance?: number },
+  user?: ScallionUser,
+  token?: string,
 ) {
-  const quotaValue = quota?.pointsBalance ?? quota?.remaining
-  const value = quotaValue ?? user?.points ?? user?.balance
+  const display = getScallionQuotaDisplay({ token, quota, user, syncStatus: status })
+  const value = display.value
   if (value === undefined) return status === 'error' ? '积分同步失败' : '积分同步中'
   const freshness =
-    status === 'syncing'
+    display.source === 'realtime'
+      ? ''
+      : status === 'syncing'
       ? ' · 更新中'
       : status === 'stale'
         ? ' · 可能过期'
         : status === 'error'
           ? ' · 同步失败'
           : ''
-  const source = quotaValue === undefined ? ' · 登录缓存' : ''
+  const source = display.source === 'cached' && status !== 'syncing' && status !== 'stale' && status !== 'error'
+    ? ' · 登录缓存'
+    : ''
   return `余 ${value} ${quota?.unit ?? '积分'}${freshness}${source}`
 }
 
