@@ -39,14 +39,16 @@ export function validateOutputDirectory(outputDir, bundleDir, rootDir = ROOT, cw
 
 export async function assertNoSymlinkAncestors(targetPath, protectedPaths = []) {
   const protectedResolved = await Promise.all(protectedPaths.map((value) => canonicalPath(value)))
-  let current = path.resolve(targetPath)
+  const targetResolved = path.resolve(targetPath)
+  let current = targetResolved
   while (true) {
     try {
       const stat = await fs.lstat(current)
       if (stat.isSymbolicLink()) {
         const realTarget = await fs.realpath(current).catch(() => current)
+        const expandedTarget = path.resolve(realTarget, path.relative(current, targetResolved))
         const pointsAtProtectedPath = protectedResolved.some(
-          (protectedPath) => isPathWithin(realTarget, protectedPath) || isPathWithin(protectedPath, realTarget),
+          (protectedPath) => isPathWithin(protectedPath, expandedTarget),
         )
         if (protectedResolved.length === 0 || pointsAtProtectedPath) {
           throw new Error(`smoke output path cannot contain a symlink or junction to a protected path: ${current}`)
