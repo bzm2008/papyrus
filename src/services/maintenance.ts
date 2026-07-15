@@ -12,6 +12,7 @@ export type MaintenanceProbeResult = {
   message: string
   latencyMs?: number
   bytes?: number
+  clearCommitted?: boolean
 }
 
 type NativeMaintenanceCommand =
@@ -28,11 +29,13 @@ type ValidatedNativeMaintenancePayload = {
   status: NativeMaintenanceStatus
   latencyMs?: number
   bytes?: number
+  clearCommitted?: boolean
 }
 
 const MAX_NATIVE_LATENCY_MS = 120_000
 const MAX_NATIVE_BYTES = 1_099_511_627_776
 const invalidNumericField = Symbol('invalidNumericField')
+const invalidBooleanField = Symbol('invalidBooleanField')
 
 const previewResults: Record<MaintenanceCheckId, MaintenanceProbeResult> = {
   tauri: {
@@ -198,6 +201,7 @@ function normalizeNativePayload(payload: unknown, command: NativeMaintenanceComm
     message: maintenanceResultMessage(command, validated.status),
     latencyMs: validated.latencyMs,
     bytes: validated.bytes,
+    clearCommitted: validated.clearCommitted,
   }
 }
 
@@ -215,7 +219,12 @@ function validateNativeMaintenancePayload(payload: unknown): ValidatedNativeMain
 
   const latencyMs = readBoundedNumericField(payload, ['latencyMs', 'latency_ms'], MAX_NATIVE_LATENCY_MS)
   const bytes = readBoundedNumericField(payload, ['bytes'], MAX_NATIVE_BYTES)
-  if (latencyMs === invalidNumericField || bytes === invalidNumericField) {
+  const clearCommitted = readOptionalBooleanField(payload, 'clearCommitted')
+  if (
+    latencyMs === invalidNumericField ||
+    bytes === invalidNumericField ||
+    clearCommitted === invalidBooleanField
+  ) {
     return null
   }
 
@@ -223,6 +232,7 @@ function validateNativeMaintenancePayload(payload: unknown): ValidatedNativeMain
     status: payload.status,
     latencyMs,
     bytes,
+    clearCommitted,
   }
 }
 
@@ -258,6 +268,17 @@ function readBoundedNumericField(
   }
 
   return values[0] as number
+}
+
+function readOptionalBooleanField(
+  payload: Record<string, unknown>,
+  key: string,
+): boolean | undefined | typeof invalidBooleanField {
+  if (!Object.prototype.hasOwnProperty.call(payload, key) || payload[key] === null) {
+    return undefined
+  }
+
+  return typeof payload[key] === 'boolean' ? payload[key] : invalidBooleanField
 }
 
 function maintenanceFailureResult(command: NativeMaintenanceCommand): MaintenanceProbeResult {

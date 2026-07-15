@@ -307,7 +307,7 @@ export function MaintenanceConsole() {
         }
 
         const notice = toMemoryClearNotice(result)
-        if (notice.status === 'ok') {
+        if (didCommitMemoryClear(result)) {
           if (typeof result.bytes === 'number') {
             setMemoryUsageBytes(result.bytes)
           }
@@ -1425,6 +1425,13 @@ function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice 
         message: '全局记忆已清空。',
       }
     case 'warning':
+      if (result.clearCommitted) {
+        return {
+          status: 'warning',
+          title: '账本已清空，旧记忆待清理',
+          message: '秘书账本已清空，旧记忆清理仍待处理。',
+        }
+      }
       return {
         status: 'warning',
         title: '清理未完成',
@@ -1437,6 +1444,10 @@ function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice 
         message: '清理未完成，当前本地记忆和运行记录已保留。',
       }
   }
+}
+
+function didCommitMemoryClear(result: MaintenanceProbeResult) {
+  return result.status === 'ok' || (result.status === 'warning' && result.clearCommitted === true)
 }
 
 function toProjectIndexRebuildNotice(result: MaintenanceProbeResult): MemoryClearNotice {

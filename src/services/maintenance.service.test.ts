@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { checkBackendCommunication, checkSqliteStatus, getMemoryUsage } from './maintenance'
+import { checkBackendCommunication, checkSqliteStatus, clearGlobalMemory, getMemoryUsage } from './maintenance'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
@@ -122,6 +122,42 @@ describe('maintenance service safety', () => {
       message: '桌面后端检测通过。',
       latencyMs: 0,
       bytes: undefined,
+    })
+  })
+
+  it('preserves an explicit ledger-clear commitment from a native warning', async () => {
+    setTauriRuntime({})
+    vi.mocked(invoke).mockResolvedValue({
+      status: 'warning',
+      message: '秘书账本已清空，旧记忆已隔离但仍待清理',
+      bytes: 512,
+      clearCommitted: true,
+    })
+
+    const result = await clearGlobalMemory()
+
+    expect(result).toEqual({
+      status: 'warning',
+      message: '本地记忆清理未完成。',
+      latencyMs: undefined,
+      bytes: 512,
+      clearCommitted: true,
+    })
+  })
+
+  it('rejects a native clear commitment that is not boolean', async () => {
+    setTauriRuntime({})
+    vi.mocked(invoke).mockResolvedValue({
+      status: 'warning',
+      message: '秘书账本已清空，旧记忆已隔离但仍待清理',
+      clearCommitted: 'yes',
+    })
+
+    const result = await clearGlobalMemory()
+
+    expect(result).toEqual({
+      status: 'error',
+      message: '本地记忆清理未完成。',
     })
   })
 

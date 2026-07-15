@@ -135,6 +135,8 @@ struct MaintenanceStatus {
     message: String,
     latency_ms: Option<u128>,
     bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clear_committed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +214,7 @@ fn health_check_backend() -> MaintenanceStatus {
         message: "Tauri 后端通信正常".into(),
         latency_ms: Some(0),
         bytes: None,
+        clear_committed: None,
     }
 }
 
@@ -226,6 +229,7 @@ fn check_sqlite_status(app: tauri::AppHandle) -> Result<MaintenanceStatus, Strin
         message: "秘书账本 SQLite 与 FTS5 可用".into(),
         latency_ms: None,
         bytes: Some(health.bytes),
+        clear_committed: None,
     })
 }
 
@@ -250,6 +254,7 @@ fn get_memory_usage(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> 
         },
         latency_ms: None,
         bytes: Some(bytes),
+        clear_committed: None,
     })
 }
 
@@ -273,6 +278,7 @@ fn clear_global_memory(app: tauri::AppHandle) -> Result<MaintenanceStatus, Strin
         },
         latency_ms: None,
         bytes: Some(result.bytes),
+        clear_committed: Some(true),
     })
 }
 
@@ -291,6 +297,7 @@ fn rebuild_project_index(app: tauri::AppHandle) -> Result<MaintenanceStatus, Str
         message: "项目索引重建请求已记录，真实向量库接入后会执行完整重建".into(),
         latency_ms: None,
         bytes: Some(directory_size(&memory_dir)),
+        clear_committed: None,
     })
 }
 
@@ -353,6 +360,7 @@ async fn test_model_connection(
         message: "模型联通性检测通过".into(),
         latency_ms: Some(started_at.elapsed().as_millis()),
         bytes: None,
+        clear_committed: None,
     })
 }
 
@@ -571,9 +579,22 @@ fn clear_memory_storage(
     memory_dir: &Path,
     clear_ledger: impl FnOnce() -> Result<u64, secretary_ledger::LedgerError>,
 ) -> Result<MemoryStorageClearResult, String> {
-    clear_memory_storage_with_staged_cleanup(memory_dir, clear_ledger, |staged| {
-        fs::remove_dir_all(staged)
-    })
+    clear_memory_storage_with_staged_cleanup(memory_dir, clear_ledger, remove_staged_memory_entry)
+}
+
+fn remove_staged_memory_entry(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
+        fs::remove_dir_all(path)
+    } else if file_type.is_file() || file_type.is_symlink() {
+        fs::remove_file(path)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported staged memory entry",
+        ))
+    }
 }
 
 fn clear_memory_storage_with_staged_cleanup(
@@ -752,6 +773,30 @@ mod security_tests {
     use std::fs;
 
     #[test]
+    fn maintenance_status_serializes_clear_commitment_in_camel_case_only_when_known() {
+        let committed = MaintenanceStatus {
+            status: "warning".into(),
+            message: "ledger clear committed".into(),
+            latency_ms: None,
+            bytes: Some(12),
+            clear_committed: Some(true),
+        };
+        let uncommitted = MaintenanceStatus {
+            status: "error".into(),
+            message: "ledger clear did not commit".into(),
+            latency_ms: None,
+            bytes: None,
+            clear_committed: None,
+        };
+
+        let committed_payload = serde_json::to_value(committed).unwrap();
+        let uncommitted_payload = serde_json::to_value(uncommitted).unwrap();
+
+        assert_eq!(committed_payload["clearCommitted"], true);
+        assert!(uncommitted_payload.get("clearCommitted").is_none());
+    }
+
+    #[test]
     fn clear_memory_storage_restores_legacy_memory_when_ledger_clear_fails() {
         let root = std::env::temp_dir().join(format!(
             "papyrus-clear-memory-test-{}",
@@ -854,6 +899,119 @@ mod security_tests {
         assert!(staged_memory_directories(&root).unwrap().is_empty());
         assert!(!memory_dir.join("current-memory.json").exists());
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_regular_memory_clear_file_is_removed_before_a_new_clear() {
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-stale-memory-clear-file-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let memory_dir = root.join("memory");
+        let stale_file = root.join(".memory-clear-stale-file");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("current-memory.json"), "current memory").unwrap();
+        fs::write(&stale_file, "stale clear marker").unwrap();
+        let ledger_clears = std::cell::Cell::new(0);
+
+        let usage = memory_storage_usage(&memory_dir).unwrap();
+        assert!(usage.legacy_cleanup_pending);
+        assert_eq!(
+            usage.bytes,
+            ("current memory".len() + "stale clear marker".len()) as u64
+        );
+
+        let result = clear_memory_storage(&memory_dir, || {
+            ledger_clears.set(ledger_clears.get() + 1);
+            Ok(0)
+        })
+        .unwrap();
+
+        assert_eq!(ledger_clears.get(), 1);
+        assert!(!result.legacy_cleanup_pending);
+        assert!(!stale_file.exists());
+        assert!(staged_memory_directories(&root).unwrap().is_empty());
+        assert!(!memory_dir.join("current-memory.json").exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn staged_memory_symlink_is_removed_without_following_its_target() {
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-staged-memory-symlink-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let target = root.join("target");
+        let staged_symlink = root.join(".memory-clear-staged-symlink");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("keep.txt"), "target data").unwrap();
+
+        #[cfg(unix)]
+        let link_result = std::os::unix::fs::symlink(&target, &staged_symlink);
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_dir(&target, &staged_symlink);
+
+        if let Err(error) = link_result {
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                || error.raw_os_error() == Some(1314)
+            {
+                fs::remove_dir_all(root).unwrap();
+                return;
+            }
+            panic!("failed to create staged memory symlink: {error}");
+        }
+
+        remove_staged_memory_entry(&staged_symlink).unwrap();
+
+        assert!(fs::symlink_metadata(&staged_symlink).is_err());
+        assert_eq!(
+            fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "target data"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staged_memory_cleanup_treats_symlinks_as_leaf_entries() {
+        let source = include_str!("lib.rs");
+        let cleanup_start = source
+            .find("fn remove_staged_memory_entry")
+            .expect("staged memory cleanup helper must exist");
+        let cleanup_end = cleanup_start
+            + source[cleanup_start..]
+                .find("\nfn clear_memory_storage_with_staged_cleanup")
+                .expect("staged memory cleanup helper must end before the clear workflow");
+        let cleanup = &source[cleanup_start..cleanup_end];
+
+        assert!(cleanup.contains("fs::symlink_metadata(path)"));
+        assert!(cleanup.contains("let file_type = metadata.file_type();"));
+        assert!(cleanup.contains("file_type.is_symlink()"));
+        assert!(cleanup.contains("fs::remove_file(path)"));
+        assert!(cleanup.contains("std::io::ErrorKind::InvalidInput"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_memory_cleanup_rejects_unsupported_entry_kinds() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-staged-memory-unsupported-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let staged_fifo = root.join(".memory-clear-staged-fifo");
+        fs::create_dir_all(&root).unwrap();
+        let fifo_path = CString::new(staged_fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let error = remove_staged_memory_entry(&staged_fifo).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        fs::remove_file(staged_fifo).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

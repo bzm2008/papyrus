@@ -285,11 +285,30 @@ describe('MaintenanceConsole global memory clearing', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('全局记忆已清空。')
   })
 
-  it('keeps local records and renders a warning when native cleanup is incomplete', async () => {
+  it('clears local records after a committed warning and reports pending legacy cleanup', async () => {
     vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
       status: 'warning',
       message: '秘书账本已清空，旧记忆已隔离但仍待清理。',
       bytes: 512,
+      clearCommitted: true,
+    })
+    prepareMemoryState()
+    const clearAgentMemory = vi.spyOn(useAppStore.getState(), 'clearAgentMemory')
+
+    render(<MaintenanceConsole />)
+    await confirmMemoryClear()
+
+    await waitFor(() => expect(clearAgentMemory).toHaveBeenCalledTimes(1))
+    expect(useAppStore.getState().agentMemoryRecords).toEqual([])
+    expect(useAppStore.getState().agentRuns).toEqual([])
+    expect(screen.getByRole('alert')).toHaveTextContent('秘书账本已清空，旧记忆清理仍待处理。')
+    expect(screen.getByRole('alert')).toHaveTextContent('账本已清空，旧记忆待清理')
+  })
+
+  it('keeps local records for an uncommitted fallback warning', async () => {
+    vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
+      status: 'warning',
+      message: '当前环境未执行本地记忆清理。',
     })
     prepareMemoryState()
     const clearAgentMemory = vi.spyOn(useAppStore.getState(), 'clearAgentMemory')
@@ -302,6 +321,7 @@ describe('MaintenanceConsole global memory clearing', () => {
     expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
     expect(useAppStore.getState().agentRuns).toEqual([run])
     expect(screen.getByRole('alert')).toHaveTextContent('清理未完成')
+    expect(screen.getByRole('alert')).not.toHaveTextContent('当前环境未执行本地记忆清理。')
   })
 
   it('keeps the prior usage when index rebuilding is only a recoverable warning', async () => {
@@ -362,11 +382,12 @@ describe('MaintenanceConsole global memory clearing', () => {
     expect(screen.queryByText(message)).not.toBeInTheDocument()
   })
 
-  it('keeps local records and renders the native error message when cleanup fails', async () => {
+  it('keeps local records and renders a safe error when cleanup is uncommitted', async () => {
     vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
       status: 'error',
       message: '旧记忆仍在安全隔离区，未删除本地记录。',
       bytes: 1024,
+      clearCommitted: false,
     })
     prepareMemoryState()
     const clearAgentMemory = vi.spyOn(useAppStore.getState(), 'clearAgentMemory')
