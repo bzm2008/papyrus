@@ -31,6 +31,7 @@ export function StatusBar() {
   const updateStatus = useAppStore((state) => state.updateStatus)
   const updateMessage = useAppStore((state) => state.updateMessage)
   const scallionUser = useAppStore((state) => state.scallionUser)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
   const scallionSync = useAppStore((state) => state.scallionSync)
   const scallionToken = useAppStore((state) => state.scallionToken)
@@ -113,14 +114,14 @@ export function StatusBar() {
           <span
             className="truncate tabular-nums"
             title={[
-              scallionQuota?.planName || scallionQuota?.planKey || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : 'Scallion 套餐'),
+              scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : 'Scallion 套餐'),
               scallionQuota?.updatedAt ? `最近同步 ${formatSyncTime(scallionQuota.updatedAt)}` : '',
               scallionSync.quota.error || '',
             ]
             .filter(Boolean)
               .join(' · ')}
           >
-            {scallionQuota?.planName || scallionQuota?.planKey || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : 'Scallion')} ·{' '}
+            {scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : 'Scallion')} ·{' '}
             {visiblePointsBalance !== undefined
               ? `${pointsAreCached ? '缓存余' : '余'} ${visiblePointsBalance} ${scallionQuota?.unit ?? '积分'}`
               : scallionSync.quota.status === 'error'

@@ -15,6 +15,7 @@ afterEach(() => {
     scallionToken: undefined,
     scallionQuota: undefined,
     scallionModels: [],
+    scallionPlan: undefined,
     scallionSync: { models: { status: 'idle' }, quota: { status: 'idle' } },
     authStatus: 'idle',
   })
@@ -321,7 +322,7 @@ describe('refreshScallionModels', () => {
           ok: true,
           status: 200,
           json: async () => ({
-            data: [
+          data: [
               {
                 id: 'agnes-2.0-flash',
                 name: 'Agnes 2.0 Flash',
@@ -358,6 +359,38 @@ describe('refreshScallionModels', () => {
     expect(useAppStore.getState().scallionModels).toHaveLength(2)
     expect(useAppStore.getState().scallionSync.models).toEqual(
       expect.objectContaining({ status: 'ready', error: undefined }),
+    )
+  })
+
+  it('stores the plan returned by the model directory even before quota succeeds', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash', plan_available: true }],
+            plan: {
+              key: 'briefly',
+              name: 'Briefly',
+              expires_at: '2026-08-12T00:00:00.000Z',
+              available_models: ['agnes-2.0-flash'],
+            },
+          }),
+        }) as Response,
+      ),
+    )
+
+    await refreshScallionModels()
+
+    expect(useAppStore.getState().scallionPlan).toEqual(
+      expect.objectContaining({
+        key: 'briefly',
+        name: 'Briefly',
+        expiresAt: '2026-08-12T00:00:00.000Z',
+      }),
     )
   })
 
@@ -475,6 +508,7 @@ describe('refreshScallionRuntimeMetadata', () => {
                 availability_reason: '当前 Free 套餐不可用',
               },
             ],
+            plan: { key: 'briefly', name: 'Briefly', expires_at: null },
           }),
         } as Response
       }
@@ -512,5 +546,37 @@ describe('refreshScallionRuntimeMetadata', () => {
     expect(useAppStore.getState().scallionQuota).toEqual(
       expect.objectContaining({ pointsBalance: 503, planKey: 'free', planName: 'Free' }),
     )
+    expect(useAppStore.getState().scallionPlan).toEqual(
+      expect.objectContaining({ key: 'free', name: 'Free' }),
+    )
+  })
+
+  it('keeps the model-directory plan when quota refresh fails', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', scallionUser: undefined, scallionQuota: undefined })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/models')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash', plan_available: true }],
+            plan: { key: 'briefly', name: 'Briefly', expires_at: null },
+          }),
+        } as Response
+      }
+      return {
+        ok: false,
+        status: 503,
+        json: async () => ({ error: { message: 'quota offline' } }),
+      } as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await refreshScallionRuntimeMetadata()
+
+    expect(useAppStore.getState().scallionPlan).toEqual(
+      expect.objectContaining({ key: 'briefly', name: 'Briefly' }),
+    )
+    expect(useAppStore.getState().scallionSync.quota.status).toBe('error')
   })
 })

@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { callOpenAICompatible, callOpenAICompatibleStream, fetchScallionProxyModels } from './llmClient'
+import {
+  callOpenAICompatible,
+  callOpenAICompatibleStream,
+  fetchScallionProxyModelCatalog,
+  fetchScallionProxyModels,
+} from './llmClient'
 import { defaultProviderConfigs } from './modelCatalog'
 import { useAppStore } from '../stores/useAppStore'
 
@@ -31,6 +36,7 @@ afterEach(() => {
   useAppStore.setState({
     scallionToken: undefined,
     scallionModels: [],
+    scallionPlan: undefined,
     scallionQuota: undefined,
   })
 })
@@ -125,6 +131,36 @@ describe('Scallion production contract', () => {
       code: 'network_error',
       recoverable: true,
     })
+  })
+
+  it('preserves the top-level plan metadata alongside the full model directory', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash' }],
+          plan: {
+            key: 'briefly',
+            name: 'Briefly',
+            expires_at: '2026-08-12T00:00:00.000Z',
+            available_models: ['agnes-2.0-flash'],
+          },
+        }),
+      ),
+    )
+
+    const catalog = await fetchScallionProxyModelCatalog(defaultProviderConfigs.qwen36)
+
+    expect(catalog.plan).toEqual(
+      expect.objectContaining({
+        key: 'briefly',
+        name: 'Briefly',
+        expiresAt: '2026-08-12T00:00:00.000Z',
+        availableModels: ['agnes-2.0-flash'],
+      }),
+    )
+    expect(catalog.models).toHaveLength(1)
   })
 
   it('classifies a malformed successful model catalog response as a recoverable protocol error', async () => {

@@ -1,4 +1,4 @@
-import { fetchScallionProxyModels } from './llmClient'
+import { fetchScallionProxyModelCatalog } from './llmClient'
 import { buildModelTierAssessments } from './modelGovernanceService'
 import {
   useAppStore,
@@ -63,6 +63,7 @@ export function refreshScallionModels() {
 
   if (!state.scallionToken) {
     state.setScallionModelMetadata([])
+    state.setScallionPlan(undefined)
     state.setScallionSyncState('models', { status: 'idle', error: undefined, attemptedAt: Date.now() })
     return Promise.resolve([])
   }
@@ -116,13 +117,13 @@ export function refreshScallionModels() {
 async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<ScallionModelMetadata[]> {
   const state = useAppStore.getState()
   const provider = state.providerConfigs.qwen36
-  let models: Awaited<ReturnType<typeof fetchScallionProxyModels>>
+  let catalog: Awaited<ReturnType<typeof fetchScallionProxyModelCatalog>>
 
   try {
     // The selector must be able to explain plan restrictions, so always ask
     // the gateway for its complete public catalog. The gateway still remains
     // the authority for which entries are callable.
-    models = await fetchScallionProxyModels(provider, { includeUnavailable: true })
+    catalog = await fetchScallionProxyModelCatalog(provider, { includeUnavailable: true })
   } catch (error) {
     if (isUnauthorizedError(error) && useAppStore.getState().scallionToken === tokenAtRequest) {
       useAppStore.getState().expireScallionSession()
@@ -132,6 +133,15 @@ async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<Scalli
   if (useAppStore.getState().scallionToken !== tokenAtRequest) {
     return []
   }
+  if (catalog.plan) {
+    const current = useAppStore.getState()
+    // A successful quota response is the billing authority. Do not let a
+    // slower model-directory response overwrite a newer quota plan.
+    if (current.scallionSync.quota.status !== 'ready') {
+      current.setScallionPlan(catalog.plan)
+    }
+  }
+  const models = catalog.models
   const now = Date.now()
   const metadata: ScallionModelMetadata[] = models.map((model, index) => ({
     id: model.id || model.modelName || `scallion-${index}`,
@@ -263,9 +273,16 @@ async function refreshScallionQuotaOnce(token: string, userAtRequest?: ScallionU
     }
 
     const current = useAppStore.getState()
+    const planFromModelCatalog = current.scallionPlan
     const fallback = current.scallionQuota ?? quotaFromUser(current.scallionUser ?? userAtRequest)
     if (fallback && current.scallionQuota !== fallback) {
       current.setScallionQuota(fallback)
+      // A model catalog response carries the same entitlement and may win the
+      // race while the quota endpoint is temporarily unavailable. Keep it
+      // instead of replacing it with an older user snapshot.
+      if (planFromModelCatalog) {
+        current.setScallionPlan(planFromModelCatalog)
+      }
     }
     current.setScallionSyncState('quota', {
       status: fallback ? 'stale' : 'error',

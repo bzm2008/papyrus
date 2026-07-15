@@ -26,6 +26,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   const setSettingsOpen = useAppStore((state) => state.setSettingsOpen)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const scallionModels = useAppStore((state) => state.scallionModels)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
   const scallionSync = useAppStore((state) => state.scallionSync)
   const scallionUser = useAppStore((state) => state.scallionUser)
@@ -54,8 +55,8 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
       : activeProvider.type === 'scallion_proxy'
         ? currentScallionModel
           ? `${currentScallionModel.modelName} · ${contextLabel(currentScallionModel.contextWindowTokens)}`
-          : scallionQuota?.planName || scallionQuota?.planKey || scallionUser?.member_type
-            ? `${scallionQuota?.planName || scallionQuota?.planKey || formatScallionPlanName(scallionUser?.member_type ?? '')} · ${formatPoints(scallionQuota, scallionSync.quota.status, scallionUser)}`
+          : scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || scallionUser?.member_type
+            ? `${scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || formatScallionPlanName(scallionUser?.member_type ?? '')} · ${formatPoints(scallionQuota, scallionSync.quota.status, scallionUser)}`
             : '套餐模型尚未获取'
         : activeProvider.modelName
   const groups = useMemo(
@@ -260,13 +261,13 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                   <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] px-3 py-2">
                     <div className="min-w-0">
                       <div className="truncate text-xs font-semibold text-[#2f2b22]">
-                        {scallionQuota?.planName || scallionQuota?.planKey || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : scallionToken ? '套餐读取中' : '未登录 Scallion')}
+                        {scallionQuota?.planName || scallionQuota?.planKey || scallionPlan?.name || scallionPlan?.key || (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : scallionToken ? '套餐读取中' : '未登录 Scallion')}
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-[#8f897a]">
                         {scallionToken
                           ? formatPoints(scallionQuota, scallionSync.quota.status, scallionUser)
                           : '登录后同步套餐和积分'}
-                        {scallionQuota?.planExpiresAt ? ` · 到期 ${formatExpiry(scallionQuota.planExpiresAt)}` : ''}
+                        {(scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt) ? ` · 到期 ${formatExpiry((scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt) as string)}` : ''}
                         {scallionQuota?.updatedAt ? ` · ${formatSyncTime(scallionQuota.updatedAt)}` : ''}
                         {scallionSync.quota.error ? ` · ${scallionSync.quota.error}` : ''}
                       </div>

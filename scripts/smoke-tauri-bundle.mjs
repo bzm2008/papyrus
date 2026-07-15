@@ -228,15 +228,19 @@ async function smokeWindows(bundleDir, outputDir, graceMs) {
   if (!artifacts.installer) throw new Error('Windows NSIS installer was not found')
   const installDir = path.join(outputDir, 'windows-install')
   await fs.mkdir(installDir, { recursive: true })
-  const install = await runCommand(artifacts.installer, ['/S', `/D=${installDir}`], { timeoutMs: 120_000 })
-  if (install.code !== 0) throw new Error(`NSIS installer exited with ${install.code ?? install.signal}`)
-  const executable = await findNamedFile(installDir, 'papyrus.exe')
-  if (!executable) throw new Error('Installed Papyrus.exe was not found')
-  const { env } = await buildIsolatedEnvironment(outputDir)
-  const launch = await observeProcess(executable, [], { env, graceMs })
-  if (!launch.alive) throw new Error(`installed Papyrus.exe exited before smoke window (code=${launch.code ?? 'none'})`)
-  await runCommand(path.join(installDir, 'uninstall.exe'), ['/S'], { timeoutMs: 30_000 }).catch(() => undefined)
-  return { artifact: artifacts.installer, executable, installCode: install.code, launch }
+  try {
+    const install = await runCommand(artifacts.installer, ['/S', `/D=${installDir}`], { timeoutMs: 120_000 })
+    if (install.code !== 0) throw new Error(`NSIS installer exited with ${install.code ?? install.signal}`)
+    const executable = await findNamedFile(installDir, 'papyrus.exe')
+    if (!executable) throw new Error('Installed Papyrus.exe was not found')
+    const { env } = await buildIsolatedEnvironment(outputDir)
+    const launch = await observeProcess(executable, [], { env, graceMs })
+    if (!launch.alive) throw new Error(`installed Papyrus.exe exited before smoke window (code=${launch.code ?? 'none'})`)
+    return { artifact: artifacts.installer, executable, installCode: install.code, launch }
+  } finally {
+    await runCommand(path.join(installDir, 'uninstall.exe'), ['/S'], { timeoutMs: 30_000 }).catch(() => undefined)
+    await fs.rm(installDir, { recursive: true, force: true }).catch(() => undefined)
+  }
 }
 
 async function smokeMac(bundleDir, outputDir, graceMs) {
@@ -299,7 +303,6 @@ async function smokeLinux(bundleDir, outputDir, graceMs) {
 export async function runBundleSmoke(options) {
   await fs.rm(options.outputDir, { recursive: true, force: true })
   await fs.mkdir(options.outputDir, { recursive: true })
-  const { env } = await buildIsolatedEnvironment(options.outputDir)
   const platform = process.platform
   const smoke = platform === 'win32'
     ? smokeWindows

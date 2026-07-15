@@ -845,6 +845,7 @@ function SecretaryUsageOverview({
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const scallionToken = useAppStore((state) => state.scallionToken)
   const scallionQuotaSyncStatus = useAppStore((state) => state.scallionSync.quota.status)
@@ -883,6 +884,8 @@ function SecretaryUsageOverview({
   const planLabel =
     scallionQuota?.planName ??
     scallionQuota?.planKey ??
+    scallionPlan?.name ??
+    scallionPlan?.key ??
     (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined)
   const contextTitle = [
     `已用 ${formatCompactNumber(contextUsedTokens)} / 上限 ${formatCompactNumber(effectiveContextLimitTokens)} tokens`,

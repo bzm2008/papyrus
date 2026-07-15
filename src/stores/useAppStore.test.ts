@@ -5,6 +5,7 @@ afterEach(() => {
   useAppStore.setState({
     scallionToken: undefined,
     scallionModels: [],
+    scallionPlan: undefined,
     scallionQuota: undefined,
   })
 })
@@ -55,6 +56,12 @@ describe('Scallion model metadata', () => {
   it('fully clears an expired Scallion session instead of leaving a stale account visible', () => {
     useAppStore.setState({
       scallionToken: 'jwt-token',
+      scallionPlan: {
+        key: 'briefly',
+        name: 'Briefly',
+        availableModels: [],
+        updatedAt: Date.now(),
+      },
       scallionUser: { id: 1, username: 'demo', points: 500 },
       scallionQuota: {
         remaining: 500,
@@ -75,6 +82,7 @@ describe('Scallion model metadata', () => {
       scallionUser: undefined,
       scallionQuota: undefined,
       scallionModels: [],
+      scallionPlan: undefined,
       authStatus: 'expired',
     }))
   })

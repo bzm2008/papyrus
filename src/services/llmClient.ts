@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useAppStore, type LlmProviderConfig } from '../stores/useAppStore'
+import { useAppStore, type LlmProviderConfig, type ScallionPlan } from '../stores/useAppStore'
 
 const SCALLION_MODELS_TIMEOUT_MS = 15_000
 
@@ -73,6 +73,37 @@ export type ScallionModel = {
 type ScallionModelResponse = {
   data?: ScallionModel[]
   models?: ScallionModel[]
+  plan?: ScallionPlanPayload
+}
+
+type ScallionPlanPayload = {
+  key?: unknown
+  name?: unknown
+  expires_at?: unknown
+  expiresAt?: unknown
+  available_models?: unknown
+  availableModels?: unknown
+}
+
+export type ScallionProxyModel = {
+  id: string
+  label: string
+  modelName: string
+  name?: string
+  provider?: string
+  billingMode?: string
+  callPrice?: number
+  planAvailable?: boolean
+  requiredPlan?: string
+  availabilityReason?: string
+  available?: boolean
+  contextWindowTokens?: number
+  contextWindowLabel?: string
+}
+
+export type ScallionModelCatalog = {
+  models: ScallionProxyModel[]
+  plan?: ScallionPlan
 }
 
 export type LlmErrorCode =
@@ -414,12 +445,20 @@ export async function fetchScallionProxyModels(
   provider: LlmProviderConfig,
   options: { includeUnavailable?: boolean } = {},
 ) {
+  const catalog = await fetchScallionProxyModelCatalog(provider, options)
+  return catalog.models
+}
+
+export async function fetchScallionProxyModelCatalog(
+  provider: LlmProviderConfig,
+  options: { includeUnavailable?: boolean } = {},
+): Promise<ScallionModelCatalog> {
   if (provider.type !== 'scallion_proxy' || !provider.baseUrl.trim()) {
-    return []
+    return { models: [] }
   }
 
   if (!resolveProviderApiKey(provider)) {
-    return []
+    return { models: [] }
   }
 
   const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models${
@@ -489,7 +528,15 @@ export async function fetchScallionProxyModels(
     })
   }
 
-  return models
+  const plan = normalizeScallionPlanPayload(
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as ScallionModelResponse).plan
+      : undefined,
+  )
+
+  return {
+    plan,
+    models: models
     .map((model) => {
       const id = model.id?.trim() || model.modelName?.trim() || model.model_name?.trim() || ''
       const name = model.name?.trim() || model.displayName?.trim() || model.label?.trim() || id
@@ -519,7 +566,8 @@ export async function fetchScallionProxyModels(
         contextWindowLabel: model.contextWindowLabel ?? model.context_window_label,
       }
     })
-    .filter((model) => Boolean(model.id))
+    .filter((model) => Boolean(model.id)),
+  }
 }
 
 export function canCallProvider(provider: LlmProviderConfig) {
@@ -696,6 +744,40 @@ function scheduleScallionQuotaRefresh(provider: LlmProviderConfig) {
   void import('./scallionAccountService')
     .then(({ refreshScallionQuota }) => refreshScallionQuota())
     .catch(() => undefined)
+}
+
+function normalizeScallionPlanPayload(payload?: ScallionPlanPayload): ScallionPlan | undefined {
+  if (!payload || typeof payload !== 'object') {
+    return undefined
+  }
+
+  const rawKey = typeof payload.key === 'string' ? payload.key.trim().toLowerCase() : ''
+  const key = rawKey && rawKey !== 'none' ? rawKey : ''
+  const name = typeof payload.name === 'string' ? payload.name.trim() : ''
+  if (!key && !name) {
+    return undefined
+  }
+
+  const availableModels = Array.isArray(payload.available_models)
+    ? payload.available_models
+    : Array.isArray(payload.availableModels)
+      ? payload.availableModels
+      : []
+
+  return {
+    key: key || name.toLowerCase(),
+    name: name || key || 'Free',
+    expiresAt:
+      typeof payload.expires_at === 'string' || payload.expires_at === null
+        ? payload.expires_at
+        : typeof payload.expiresAt === 'string' || payload.expiresAt === null
+          ? payload.expiresAt
+          : null,
+    availableModels: availableModels
+      .filter((model): model is string => typeof model === 'string' && model.trim().length > 0)
+      .map((model) => model.trim()),
+    updatedAt: Date.now(),
+  }
 }
 
 function toPositiveNumber(value: unknown) {
