@@ -269,8 +269,8 @@ export function quotaFromUser(user?: ScallionUser): ScallionQuota | undefined {
   }
 
   const memberType = typeof user.member_type === 'string' ? user.member_type.trim() : ''
-  const planKey = memberType ? normalizePlanKey(memberType) ?? 'free' : undefined
-  const planName = memberType ? scallionPlanName(memberType) : undefined
+  const planKey = memberType ? normalizePlanKey(memberType) ?? 'free' : 'free'
+  const planName = scallionPlanName(planKey)
 
   const pointsBalance = firstNumber(user.points, user.balance, 0)
 
@@ -295,7 +295,7 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
   const quotaObject = payload.quota && typeof payload.quota === 'object' ? payload.quota : undefined
   const payloadMemberType = typeof payload.member_type === 'string' ? payload.member_type.trim() : ''
   const userMemberType = typeof accountUser?.member_type === 'string' ? accountUser.member_type.trim() : ''
-  const fallbackPlanKey = normalizePlanKey(payloadMemberType || userMemberType)
+  const fallbackPlanKey = normalizePlanKey(payloadMemberType || userMemberType) ?? 'free'
   const pointsBalance = firstNumber(
     payload.points_balance,
     quotaObject?.points_balance,
@@ -334,9 +334,7 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
     unifiedPoints: payload.unified_points ?? quotaObject?.unifiedPoints,
     total,
     planKey: normalizePlanKey(payload.plan?.key) ?? fallbackPlanKey,
-    planName:
-      payload.plan?.name ||
-      (fallbackPlanKey ? scallionPlanName(fallbackPlanKey) : undefined),
+    planName: payload.plan?.name || scallionPlanName(fallbackPlanKey),
     planExpiresAt: payload.plan?.expires_at ?? accountUser?.member_expires_at,
     unit: quotaObject?.unit || '积分',
     isMember: quotaObject?.isMember ?? payload.is_member ?? accountUser?.is_member === true,
