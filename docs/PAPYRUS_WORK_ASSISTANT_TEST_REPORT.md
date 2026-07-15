@@ -6,10 +6,10 @@
 
 | 字段 | 值 |
 | --- | --- |
-| Papyrus commit | `e115a43`（套餐/积分实时同步、全量模型权限展示、取消竞态与 Browser Bridge 生命周期加固） |
-| Desktop CI run | [29399654442](https://github.com/bzm2008/papyrus/actions/runs/29399654442) |
-| Package smoke run | [29398057472](https://github.com/bzm2008/papyrus/actions/runs/29398057472)；Windows `8336049339`、macOS `8336011570`、Linux `8336041656` 均完成 |
-| 报告更新时间 | `2026-07-15（本地取消/审批 hardening 后）` |
+| Papyrus commit | `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea`（套餐/积分实时同步、全量模型权限展示、取消竞态、Browser Bridge 生命周期与跨平台 smoke 加固） |
+| Desktop CI run | [29408046525](https://github.com/bzm2008/papyrus/actions/runs/29408046525) |
+| Package smoke run | [29408076266](https://github.com/bzm2008/papyrus/actions/runs/29408076266)；Windows `8340022939`、macOS `8339989744`、Linux `8340015191` 均完成 |
+| 报告更新时间 | `2026-07-15（远端三平台 CI/package smoke 通过后）` |
 | 发布负责人 | `待填写` |
 | 总体状态 | `pending` |
 
@@ -17,10 +17,10 @@
 
 | 平台 | CI 状态 | 包 smoke 状态 | 产物/日志 |
 | --- | --- | --- | --- |
-| Windows 11 / NSIS | pass | pass | Desktop CI 29399654442；artifact `8336049339` 含 `Papyrus_0.1.2_x64-setup.exe` 和 Browser Bridge ZIP；未完成真实安装验证 |
-| macOS 当前 / app + DMG | pass | pass | Desktop CI 29399654442；artifact `8336011570` 含 ARM64 DMG/app 和 Browser Bridge ZIP；未完成真实设备安装验证 |
+| Windows 11 / NSIS | pass | pass | Desktop CI 29408046525；artifact `8340022939` 含 `Papyrus_0.1.2_x64-setup.exe` 和 Browser Bridge ZIP；未完成真实安装验证 |
+| macOS 当前 / app + DMG | pass | pass | Desktop CI 29408046525；artifact `8339989744` 含 ARM64 DMG/app 和 Browser Bridge ZIP；未完成真实设备安装验证 |
 | macOS 上一主版本 / app + DMG | pending | pending |  |
-| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pass | Desktop CI 29399654442；artifact `8336041656` 含 DEB/AppImage 和 Browser Bridge ZIP；中央目录 262 项，大小写重复 0 |
+| Ubuntu 24.04 GNOME / DEB + AppImage | pass | pass | Desktop CI 29408046525；artifact `8340015191` 含 DEB/AppImage 和 Browser Bridge ZIP；bundle smoke 日志 artifact `8340009947` |
 | 额外 Linux 桌面 / DEB + AppImage | pending | pending |  |
 
 Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包含版本号；smoke 产物不能被标记为已签名生产包。
@@ -42,8 +42,8 @@ Browser Bridge ZIP 必须出现在每个平台 smoke 产物中，文件名应包
 
 | ID | 描述 | 平台 | 修复/回归证据 | 状态 |
 | --- | --- | --- | --- | --- |
-| `REL-CERT-PENDING` | smoke 包真实安装/升级和真实设备矩阵尚未完成；macOS 上一主版本及额外 Linux 未覆盖 | all | Windows 10 补充记录为 blocked；Desktop CI 29399654442、package smoke 29398057472 三平台通过；支持设备记录待补 | open |
-| `REL-PACKAGE-LINUX` | Linux artifact 大小写冲突 | Linux | package smoke 29398057472 / artifact `8336041656`；AppDir 只有 `Papyrus.png`，大小写重复 0 | resolved |
+| `REL-CERT-PENDING` | smoke 包真实安装/升级和真实设备矩阵尚未完成；macOS 上一主版本及额外 Linux 未覆盖 | all | Windows 10 补充记录为 blocked；Desktop CI 29408046525、package smoke 29408076266 三平台通过；支持设备记录待补 | open |
+| `REL-PACKAGE-LINUX` | Linux artifact 大小写冲突 | Linux | package smoke 29408076266 / artifact `8340015191`；bundle smoke artifact `8340009947`；Linux 包 job 通过 | resolved |
 | `REL-GITHUB-SCOPE` | GitHub workflow dispatch 权限 | all | `gh auth status` 已确认含 `workflow`；分支推送与 package smoke dispatch 成功 | resolved |
 
 路径逃逸、过期审批执行、受限页面动作、重复执行、崩溃或数据丢失必须保持为 blocker，不能以 warning 关闭。
@@ -59,11 +59,11 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run lint`：通过。
 - `npm run test:wps`：2 个文件、17 项通过；包含流式 401/403 结构化错误、模型/额度部分成功、stale 保留和套餐权限文案回归。
 - `npx tsc -p tsconfig.app.json --noEmit`：通过。
-- `npm run test:unit`：36 个文件、194 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
+- `npm run test:unit`：36 个文件、200 项通过；包含 review-only 不生成补丁、套餐/积分实时同步、完整模型目录权限标记、canonical run-scope 审批字段/数量边界、取消后不再启动 native preview、浏览器 pre-abort 与审批竞态。
 - `npm run test:browser`：扩展语法/构建、前端桥接测试和 Browser Bridge Vitest 通过；Browser Bridge 原生定向测试为 38 项，包含导航后公共 URL/DNS 复检和私网快照丢弃。
 - `npm run test:browser:e2e`：真实 Chromium 9 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、字段变更 stale、链接 query 变化 stale、凭据链接/可执行文件名阻断和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
-- `npm run ci:desktop`：36 个 TypeScript 文件、194 项通过；portable MSVC Rust 全量门禁 135 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理、导航 origin 重绑定和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
+- `npm run ci:desktop`：36 个 TypeScript 文件、200 项通过；portable MSVC Rust 全量门禁 135 项通过，包含 canonical run-scope approval、浏览器取消/待响应唤醒、取消清理、导航 origin 重绑定和 legacy pairing fail-closed。直接 cargo debug 构建仍可能受本机 `link.exe` LNK1105/错误 1224 文件锁影响。
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - `npm run tauri:check:portable`：Windows MSVC portable check 通过。
 - `npm run browser:package`：生成 5 个运行时文件的 `Papyrus-Browser-Bridge_0.1.2.zip`。
@@ -86,10 +86,12 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 
 以上证据包含 Windows 本地回归和远程三平台 CI。真实安装/升级、macOS 上一主版本以及真实设备矩阵仍标记为 `pending`；不把 unsigned smoke 包标记为生产发布。
 
-## 远程仓库证据（2026-07-14）
+## 远程仓库证据（2026-07-15）
 
 - 远程 `main` 当前为 `ac1f625`；Desktop CI run [29385279029](https://github.com/bzm2008/papyrus/actions/runs/29385279029) 在 Windows、macOS ARM、Ubuntu 24.04 全部通过。
 - Desktop CI run [29398029671](https://github.com/bzm2008/papyrus/actions/runs/29398029671) 在 Windows、macOS ARM、Ubuntu 24.04 全部通过，头部 SHA 为 `0eb3439484ab646105c7ad6602206eda9bcd1f42`。
 - Desktop CI run [29399654442](https://github.com/bzm2008/papyrus/actions/runs/29399654442) 在 Windows、macOS ARM、Ubuntu 24.04 全部通过，头部 SHA 为 `556a40d8d1254dd1b1a8454fb0db62bd6f24dd3e`。
 - Package smoke run [29398057472](https://github.com/bzm2008/papyrus/actions/runs/29398057472) 三 job 全部通过；Windows artifact `8336049339`、macOS artifact `8336011570` 已下载并核对，Linux artifact `8336041656` 通过 ZIP 中央目录核对，包含 DEB/AppImage/Browser Bridge ZIP 且大小写重复为 0。
+- Desktop CI run [29408046525](https://github.com/bzm2008/papyrus/actions/runs/29408046525) 在同一远端提交 `eea8dbf4fa0856d48aaf9ff0fd825d4d545950ea` 上的 Windows、macOS、Ubuntu 24.04 全部通过。
+- Package smoke run [29408076266](https://github.com/bzm2008/papyrus/actions/runs/29408076266) 三 job 全部通过；Windows artifact `8340022939`、macOS artifact `8339989744`、Linux artifact `8340015191` 均上传，另有平台独立 bundle smoke 日志 artifacts `8340021879`、`8339987630`、`8340009947`。
 - 真实设备记录、生产签名/公证和 updater 产物仍未执行，不能关闭 `REL-CERT-PENDING`。
