@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { AssistantApprovalRequest, AssistantToolCall } from '../services/workAssistantProtocol'
+import { approvalChoices } from '../services/workAssistantPolicy'
 import { SecretaryToolStep } from './SecretaryToolStep'
 
 const call = (patch: Partial<AssistantToolCall> = {}): AssistantToolCall => ({
@@ -22,7 +23,7 @@ describe('SecretaryToolStep', () => {
 
   it('renders only the approval choices allowed by risk', () => {
     const onApprove = vi.fn()
-    render(<SecretaryToolStep toolCall={call({ status: 'awaiting_approval' })} approval={approval({ risk: 'high', allowedChoices: ['once', 'deny'] })} onApprove={onApprove} />)
+    render(<SecretaryToolStep toolCall={call({ status: 'awaiting_approval' })} approval={approval({ risk: 'high', allowedChoices: approvalChoices('high') })} onApprove={onApprove} />)
     expect(screen.getByRole('button', { name: '执行一次' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '本轮允许' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '拒绝' }))
@@ -44,5 +45,46 @@ describe('SecretaryToolStep', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开详情' }))
     expect(screen.getAllByText('整理 12 个文件')).toHaveLength(1)
     expect(screen.getByText('移动 12 个文件到分类目录')).toBeInTheDocument()
+  })
+
+  it('shows browser context while redacting sensitive values from copied tool info', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    })
+    const browserApproval = approval({
+      risk: 'high',
+      action: 'submit',
+      origin: 'https://example.com',
+      pageTitle: '申请表',
+      elementName: '提交申请',
+      allowedChoices: approvalChoices('high'),
+    })
+
+    render(
+      <SecretaryToolStep
+        toolCall={call({
+          name: 'browser_submit',
+          status: 'awaiting_approval',
+          arguments: { value: '银行卡 4111 1111 1111 1111', token: 'secret-token', content: 'sensitive body' },
+        })}
+        approval={browserApproval}
+      />,
+    )
+
+    expect(screen.getByText('风险：高风险')).toBeInTheDocument()
+    expect(screen.getByText('来源：https://example.com')).toBeInTheDocument()
+    expect(screen.getByText('页面：申请表')).toBeInTheDocument()
+    expect(screen.getByText('元素：提交申请')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '展开详情' }))
+    fireEvent.click(screen.getByRole('button', { name: '复制工具信息' }))
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+
+    const copied = JSON.parse(writeText.mock.calls[0][0] as string) as { arguments: Record<string, string> }
+    expect(copied.arguments.value).toBe('[已隐藏]')
+    expect(copied.arguments.token).toBe('[已隐藏]')
+    expect(copied.arguments.content).toBe('[已隐藏]')
+    expect(writeText.mock.calls[0][0]).not.toContain('4111 1111')
   })
 })

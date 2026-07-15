@@ -56,7 +56,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run lint`：通过。
 - `npm run test:wps`：2 个文件、17 项通过；包含流式 401/403 结构化错误、模型/额度部分成功、stale 保留和套餐权限文案回归。
 - `npx tsc -p tsconfig.app.json --noEmit`：通过。
-- `npm run test:unit`：35 个文件、166 项通过；包含 `/goal` 取消后不再自动推进回归。
+- `npm run test:unit`：35 个文件、168 项通过；包含 `/goal` 取消后不再自动推进、审批 UI 浏览器上下文和敏感复制脱敏、Windows portable MSVC 探测超时回归。
 - `npm run check:browser`：扩展语法/构建、前端桥接测试和 Rust Browser Bridge/Web Extract 定向测试通过；Rust Browser Bridge 定向为 33 项，包含注入式私网重定向 fixture。
 - `npm run test:browser:e2e`：真实 Chromium 8 项通过，覆盖普通字段、默认 input、contenteditable、下载、表单提交、字段变更 stale、链接 query 变化 stale 和受限页面。
 - `npm run build`：生产构建通过；仅有既有动态导入和大 chunk 提示。
@@ -72,6 +72,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `npm run release:assistant-check`：local/release 两阶段均通过；release 阶段还检查三平台 workflow 的关键命令、手动 dispatch、artifact 上传/保留、commit SHA、签名边界和打包 overlay。
 - Scallion 模型/额度契约：模型目录默认请求 `include_unavailable=1`，套餐外模型只读展示并禁用；余额以 `points_balance` 为准；模型目录按 token 去重并设置超时；不确定的 Scallion 网络结果不会自动切换 Tauri 重发。
 - WPS 模型/额度同步：`/models` 与 `/quota` 独立更新；单通道失败时保留旧目录/积分并显示 `stale`，无旧值时显示 `error`；成功、402、5xx、超时和流中断后会触发额度刷新，取消和认证失效不重复刷新。
+- WPS 套餐降级显示：当 `/quota` 临时失败但 `/models` 返回套餐信息时，插件仍显示套餐类别和到期时间；积分仍只在额度成功响应中使用 `points_balance`，不会用模型目录伪造余额。
 - 跨目标静态检查：本机未安装 Linux/macOS Rust 标准库；对应验证由 Desktop CI 的 Ubuntu/macOS runner 完成。
 
 `npm run ci:desktop`：在停止并发编辑后的稳定工作树上通过；该聚合脚本不包含 Rust、portable MSVC 和真实 Chromium E2E，这些项目已由上面的独立门禁覆盖。`npm run release:assistant-check:local` 与 `npm run release:assistant-check` 均通过。真实用户文件的完整写入/恢复 smoke 尚未执行，不能用临时测试目录替代现场记录。

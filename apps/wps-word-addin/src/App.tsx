@@ -134,8 +134,8 @@ export default function App() {
     { label: session ? '已登录' : '未登录', tone: session ? 'ok' : 'warn' },
     { label: snapshot.cursorAvailable ? contextLabel : '未连接文档', tone: snapshot.cursorAvailable ? 'ok' : 'warn' },
     ...(runtimeDetail ? [{ label: runtimeDetail, tone: 'neutral' as const }] : []),
-    ...(runtimeMetadata?.quota?.planName || runtimeMetadata?.quota?.planKey
-      ? [{ label: runtimeMetadata.quota.planName || runtimeMetadata.quota.planKey || '套餐', tone: 'neutral' as const }]
+    ...(runtimeMetadata?.quota?.planName || runtimeMetadata?.quota?.planKey || runtimeMetadata?.plan?.name || runtimeMetadata?.plan?.key
+      ? [{ label: runtimeMetadata.quota?.planName || runtimeMetadata.quota?.planKey || runtimeMetadata.plan?.name || runtimeMetadata.plan?.key || '套餐', tone: 'neutral' as const }]
       : []),
     ...(runtimeMetadata?.quotaSync
       ? [{
@@ -710,7 +710,8 @@ export default function App() {
       <section className="runtime-strip" aria-label="Scallion 套餐和模型">
         <div className="runtime-account">
           <strong>
-            {runtimeMetadata?.quota?.planName || runtimeMetadata?.quota?.planKey || (session ? '套餐同步中' : '未登录 Scallion')}
+            {runtimeMetadata?.quota?.planName || runtimeMetadata?.quota?.planKey || runtimeMetadata?.plan?.name || runtimeMetadata?.plan?.key || (session ? '套餐同步中' : '未登录 Scallion')}
+            {runtimeMetadata?.plan?.expiresAt ? ` · 到期 ${new Date(runtimeMetadata.plan.expiresAt).toLocaleDateString('zh-CN')}` : ''}
             {runtimeMetadata?.quota && quotaSyncStatus && quotaSyncStatus !== 'ready' ? ' · 可能过期' : ''}
           </strong>
           <span>

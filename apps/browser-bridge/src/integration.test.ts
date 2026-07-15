@@ -52,6 +52,7 @@ function createHarness() {
   const removedStorage: string[][] = []
   const sentToTab: Array<{ tabId: number; message: unknown }> = []
   const intervalCallbacks: Array<() => void> = []
+  let failInjection = false
 
   const chrome = {
     runtime: {
@@ -61,6 +62,7 @@ function createHarness() {
     scripting: {
       executeScript: async (details: Record<string, unknown>) => {
         injected.push(details)
+        if (failInjection) throw new Error('injection blocked')
         return []
       },
     },
@@ -117,6 +119,7 @@ function createHarness() {
     removedStorage,
     sentToTab,
     intervalCallbacks,
+    setFailInjection: (value: boolean) => { failInjection = value },
   }
 }
 
@@ -131,6 +134,46 @@ async function flushAsync() {
 }
 
 describe('Browser Bridge extension protocol', () => {
+  it('rejects a missing active tab before attempting injection', async () => {
+    const harness = createHarness()
+    const listener = findListener(harness)
+    const responses: unknown[] = []
+
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-missing', nonce: 'nonce-missing' }, origin: 'https://example.com' }, {}, (value: unknown) => responses.push(value))
+    await flushAsync()
+
+    expect(responses).toEqual([{ ok: false, message: '当前标签页无效。' }])
+    expect(harness.injected).toHaveLength(0)
+  })
+
+  it('reports injection failures without opening a socket', async () => {
+    const harness = createHarness()
+    harness.setFailInjection(true)
+    const listener = findListener(harness)
+    const responses: unknown[] = []
+
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-inject', nonce: 'nonce-inject' }, tabId: 21, origin: 'https://example.com' }, {}, (value: unknown) => responses.push(value))
+    await flushAsync()
+
+    expect(responses).toEqual([{ ok: false, message: '当前页面不允许注入 Browser Bridge。' }])
+    expect(MockWebSocket.latest).toBeUndefined()
+  })
+
+  it('surfaces a wrong pairing response and keeps the token for a retry', async () => {
+    const harness = createHarness()
+    const listener = findListener(harness)
+    const responses: unknown[] = []
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-wrong', nonce: 'nonce-wrong' }, tabId: 22, origin: 'https://example.com' }, {}, (value: unknown) => responses.push(value))
+    await flushAsync()
+    const socket = MockWebSocket.latest
+    socket?.onopen?.()
+    socket?.emitMessage({ type: 'error', message: 'token mismatch' })
+    await flushAsync()
+
+    expect(responses).toEqual([{ ok: false, message: 'token mismatch' }])
+    expect(harness.removedStorage).toHaveLength(0)
+  })
+
   it('pairs only the requested current tab and forwards bounded requests', async () => {
     const harness = createHarness()
     const listener = findListener(harness)
@@ -221,6 +264,21 @@ describe('Browser Bridge extension protocol', () => {
     listener({ type: 'disconnect' }, {}, (value: unknown) => disconnectResponse.push(value))
     expect(disconnectResponse).toEqual([{ ok: false }])
     expect(responses).toEqual([{ ok: true }])
+  })
+
+  it('closes the bridge when the paired tab is removed', async () => {
+    const harness = createHarness()
+    const listener = findListener(harness)
+    listener({ type: 'connect', config: { wsUrl: 'ws://127.0.0.1:43121/bridge', token: 'token-close', nonce: 'nonce-close' }, tabId: 23, origin: 'https://example.com' }, {}, () => undefined)
+    await flushAsync()
+    const socket = MockWebSocket.latest
+    socket?.onopen?.()
+    socket?.emitMessage({ type: 'paired' })
+    await flushAsync()
+
+    harness.removedListeners[0](23)
+    expect(socket?.readyState).toBe(MockWebSocket.CLOSED)
+    expect(harness.intervalCallbacks).toHaveLength(0)
   })
 
   it('rejects non-loopback bridge endpoints and non-web page origins before injection', async () => {

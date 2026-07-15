@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setWorkAssistantInvokerForTests, resetWorkAssistantInvokerForTests } from './workAssistantClient'
 import { runWorkAssistantAgentLoop } from './workAssistantAgentLoop'
 import { dispatchOrderedWorkAssistantEvent, executeAssistantToolCall, flushAllWorkAssistantDeltas, resetWorkAssistantRuntimeForTests, resolveAssistantApproval } from './workAssistantRuntime'
+import type { WorkAssistantEvent } from './workAssistantProtocol'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 const decision = (value: unknown) => JSON.stringify(value)
@@ -27,6 +28,7 @@ afterEach(() => {
 describe('controlled work assistant integration', () => {
   it('scans, previews, approves, applies, and completes one canonical run', async () => {
     const commands: string[] = []
+    const events: WorkAssistantEvent[] = []
     setWorkAssistantInvokerForTests(async (command) => {
       commands.push(command)
       if (command === 'work_assistant_workspace_scan') return { entries: [{ name: 'a.pdf' }] }
@@ -36,7 +38,18 @@ describe('controlled work assistant integration', () => {
       return undefined
     })
     const scripted = [tool('workspace_scan', { rootId: 'downloads' }), tool('file_plan_batch', { rootId: 'downloads', conflictPolicy: 'rename', operations: [{ kind: 'move', source: 'a.pdf', destination: 'PDF/a.pdf' }] }), tool('file_apply_batch', { previewId: 'preview-1' }), final('整理完成。')]
-    const promise = runWorkAssistantAgentLoop({ runId: 'run-1', prompt: '整理下载目录', toolNames: ['workspace_scan', 'file_plan_batch', 'file_apply_batch'], modelCall: async () => scripted.shift()!, executeTool: (toolCall, signal) => executeAssistantToolCall({ runId: 'run-1', toolCall, signal }), emit: dispatchOrderedWorkAssistantEvent })
+    const emit = (event: WorkAssistantEvent) => {
+      events.push(event)
+      dispatchOrderedWorkAssistantEvent(event)
+    }
+    const promise = runWorkAssistantAgentLoop({
+      runId: 'run-1',
+      prompt: '整理下载目录',
+      toolNames: ['workspace_scan', 'file_plan_batch', 'file_apply_batch'],
+      modelCall: async () => scripted.shift()!,
+      executeTool: (toolCall, signal) => executeAssistantToolCall({ runId: 'run-1', toolCall, signal, emit }),
+      emit,
+    })
     expect(resolveAssistantApproval(await waitForApproval('run-1'), 'once')).toBe(true)
     const result = await promise
     flushAllWorkAssistantDeltas()
@@ -44,6 +57,11 @@ describe('controlled work assistant integration', () => {
     expect(result.response).toBe('整理完成。')
     expect(Object.keys(run.toolCalls)).toHaveLength(3)
     expect(run.status).toBe('completed')
+    expect(events.filter((event) => event.type === 'tool.started').map((event) => event.type === 'tool.started' ? event.toolCall.id : '')).toHaveLength(3)
+    expect(new Set(events.filter((event) => event.type === 'tool.started').map((event) => event.type === 'tool.started' ? event.toolCall.id : '')).size).toBe(3)
+    expect(events.filter((event) => event.type === 'message.delta')).toHaveLength(1)
+    expect(events.filter((event) => event.type === 'run.completed')).toHaveLength(1)
+    expect(run.messageText).toBe('整理完成。')
     expect(commands).toContain('work_assistant_execute')
   })
 

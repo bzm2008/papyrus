@@ -70,6 +70,22 @@ describe('work assistant runtime', () => {
     expect(invoke).not.toHaveBeenCalledWith('work_assistant_desktop_open_url', expect.anything())
   })
 
+  it('derives high-risk approval choices without a run-scoped grant', async () => {
+    const invoke = vi.fn(async () => undefined)
+    setWorkAssistantInvokerForTests(invoke)
+    const events: WorkAssistantEvent[] = []
+    const promise = executeAssistantToolCall({
+      runId: 'run-1',
+      toolCall: call('desktop_open_app', { appId: 'editor' }),
+      emit: (event) => events.push(event),
+    })
+    await Promise.resolve()
+    const approval = events.find((event): event is Extract<WorkAssistantEvent, { type: 'approval.required' }> => event.type === 'approval.required')
+    expect(approval?.request.allowedChoices).toEqual(['once', 'deny'])
+    expect(resolveAssistantApproval(approval?.request.id ?? '', 'deny')).toBe(true)
+    await expect(promise).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
+  })
+
   it('aborts pending approval and invokes native cancellation', async () => {
     const invoke = vi.fn(async () => undefined)
     setWorkAssistantInvokerForTests(invoke)

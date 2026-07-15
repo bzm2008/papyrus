@@ -38,6 +38,7 @@ function startHeartbeat() {
 
 async function connectBridge(config, tabId, origin) {
   if (!isLoopbackBridgeUrl(config?.wsUrl)) return { ok: false, message: '配对地址必须是 Papyrus 提供的本机回环地址。' }
+  if (!Number.isInteger(tabId) || tabId < 0) return { ok: false, message: '当前标签页无效。' }
   try {
     if (!/^https?:$/.test(new URL(origin).protocol)) return { ok: false, message: '仅支持 http(s) 网页。' }
   } catch {
@@ -88,6 +89,9 @@ async function connectBridge(config, tabId, origin) {
           // from the extension session store so a popup cannot replay it.
           chrome.storage.session.remove(['wsUrl', 'token', 'nonce'])
           resolve({ ok: true })
+        } else if (message.type === 'error') {
+          clearTimeout(timer)
+          resolve({ ok: false, message: typeof message.message === 'string' ? message.message.slice(0, 200) : 'Browser Bridge 配对失败。' })
         }
       } catch { /* ignore malformed bridge messages */ }
     }, { once: true })

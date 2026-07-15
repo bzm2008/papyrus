@@ -107,6 +107,12 @@ export type WpsScallionQuota = {
   updatedAt: number
 }
 
+export type WpsScallionPlan = {
+  key?: string
+  name?: string
+  expiresAt?: string | null
+}
+
 export type WpsScallionSyncStatus = 'syncing' | 'ready' | 'stale' | 'error'
 
 export type WpsScallionChannelState = {
@@ -117,6 +123,7 @@ export type WpsScallionChannelState = {
 
 export type WpsScallionRuntimeMetadata = {
   models: WpsScallionModel[]
+  plan?: WpsScallionPlan
   quota?: WpsScallionQuota
   modelsSync: WpsScallionChannelState
   quotaSync: WpsScallionChannelState

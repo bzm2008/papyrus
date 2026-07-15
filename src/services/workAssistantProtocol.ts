@@ -7,7 +7,17 @@ export type AssistantCapabilityStatus = { name: string; toolset: 'workspace' | '
 export type NativePreviewRequest = { runId: string; toolCallId: string; toolName: string; arguments: Record<string, unknown> }
 export type AssistantToolCall = { id: string; runId: string; name: string; intent: string; arguments: Record<string, unknown>; status: AssistantToolStatus; startedAt: number; endedAt?: number; preview?: AssistantToolPreview; progress?: { message: string; completed?: number; total?: number }; result?: AssistantToolResult }
 export type AssistantToolPreview = { id: string; revision: string; risk: AssistantRiskLevel; title: string; targetSummary: string; impactSummary: string; reversible: boolean; expiresAt: number }
-export type AssistantApprovalRequest = AssistantToolPreview & { runId: string; toolCallId: string; reason: string; allowedChoices: AssistantApprovalChoice[] }
+export type AssistantApprovalRequest = AssistantToolPreview & {
+  runId: string
+  toolCallId: string
+  reason: string
+  allowedChoices: AssistantApprovalChoice[]
+  /** Optional browser context; never contains the field value or page body. */
+  action?: string
+  origin?: string
+  pageTitle?: string
+  elementName?: string
+}
 export type AssistantToolResult = { ok: boolean; summary: string; data?: Record<string, unknown>; errorCode?: string; recoverable?: boolean }
 export type AssistantSubagent = { id: string; parentId?: string; goal: string; model?: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'skipped'; currentTool?: string; progress: string[]; startedAt: number; endedAt?: number; summary?: string }
 export type WorkAssistantRun = { id: string; status: 'idle' | 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled'; messageText: string; stage: string; toolCalls: Record<string, AssistantToolCall>; subagents: Record<string, AssistantSubagent>; pendingApprovalId?: string; lastActivityAt: number; error?: string }

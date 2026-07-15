@@ -13,6 +13,22 @@ type Props = {
 }
 
 const choiceLabels: Record<AssistantApprovalChoice, string> = { once: '执行一次', run: '本轮允许', deny: '拒绝' }
+const riskLabels = { read: '只读', reversible: '可撤销', high: '高风险', blocked: '已阻止' } as const
+
+function redactToolValue(value: unknown, key = ''): unknown {
+  if (/(?:password|passcode|secret|token|authorization|cookie|value|content|text)/i.test(key)) return '[已隐藏]'
+  if (Array.isArray(value)) return value.map((item) => redactToolValue(item, key))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, redactToolValue(childValue, childKey)]))
+  }
+  if (typeof value === 'string' && value.length > 500) return `${value.slice(0, 500)}…`
+  return value
+}
+
+function copyToolInfo(toolCall: AssistantToolCall) {
+  const payload = { name: toolCall.name, arguments: redactToolValue(toolCall.arguments) }
+  return navigator.clipboard?.writeText(JSON.stringify(payload))
+}
 
 function targetOf(call: AssistantToolCall, approval?: AssistantApprovalRequest) {
   if (approval?.targetSummary) return approval.targetSummary
@@ -54,6 +70,16 @@ export function SecretaryToolStep({ toolCall, approval, onApprove, onSelect, onR
       {toolCall.result?.summary ? <div className={`mt-2 text-xs ${toolCall.result.ok ? 'text-[#416746]' : 'text-[#9a4338]'}`}>{toolCall.result.summary}</div> : null}
       {count !== undefined ? <div className="mt-1 text-xs text-[#777062]">{count} 项</div> : null}
 
+      {approval ? (
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[#625c50]">
+          <span>风险：{riskLabels[approval.risk]}</span>
+          {approval.origin ? <span>来源：{approval.origin}</span> : null}
+          {approval.pageTitle ? <span>页面：{approval.pageTitle}</span> : null}
+          {approval.elementName ? <span>元素：{approval.elementName}</span> : null}
+          {toolCall.name === 'browser_fill_draft' && typeof toolCall.arguments.value === 'string' ? <span>草稿：已隐藏（{toolCall.arguments.value.length} 字）</span> : null}
+        </div>
+      ) : null}
+
       {approval && toolCall.status === 'awaiting_approval' ? (
         <div className="mt-2 flex flex-wrap gap-2">
           {approval.allowedChoices.map((choice) => <button key={choice} type="button" onClick={() => onApprove?.(choice)} className={choice === 'deny' ? 'rounded-md border border-[#d8cfc0] px-2 py-1 text-xs' : 'rounded-md bg-[#3f6247] px-2 py-1 text-xs text-white'}>{choiceLabels[choice]}</button>)}
@@ -67,7 +93,7 @@ export function SecretaryToolStep({ toolCall, approval, onApprove, onSelect, onR
           {approval?.impactSummary ? <p>{approval.impactSummary}</p> : null}
           {approval?.reason && approval.reason !== approval.impactSummary ? <p className="mt-1">{approval.reason}</p> : null}
           <div className="mt-2 flex gap-2">
-            <button type="button" aria-label="复制工具信息" onClick={() => void navigator.clipboard?.writeText(JSON.stringify({ name: toolCall.name, arguments: toolCall.arguments }))}><Copy size={13} /></button>
+            <button type="button" aria-label="复制工具信息" onClick={() => void copyToolInfo(toolCall)}><Copy size={13} /></button>
             {onDismiss ? <button type="button" aria-label="隐藏工具步骤" onClick={onDismiss}><X size={13} /></button> : null}
           </div>
         </div>

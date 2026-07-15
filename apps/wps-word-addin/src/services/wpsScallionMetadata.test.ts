@@ -70,7 +70,10 @@ describe('WPS Scallion runtime metadata', () => {
         .mockResolvedValueOnce({
           ok: true,
           status: 200,
-          json: async () => ({ data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash' }] }),
+          json: async () => ({
+            data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash' }],
+            plan: { key: 'briefly', name: 'Briefly', expires_at: '2026-08-12T00:00:00.000Z' },
+          }),
         })
         .mockResolvedValueOnce({
           ok: false,
@@ -83,6 +86,11 @@ describe('WPS Scallion runtime metadata', () => {
 
     expect(metadata.models).toHaveLength(1)
     expect(metadata.modelsSync).toMatchObject({ status: 'ready' })
+    expect(metadata.plan).toEqual({
+      key: 'briefly',
+      name: 'Briefly',
+      expiresAt: '2026-08-12T00:00:00.000Z',
+    })
     expect(metadata.quota).toBeUndefined()
     expect(metadata.quotaSync).toMatchObject({ status: 'error', error: expect.any(String) })
   })

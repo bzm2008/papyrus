@@ -1,6 +1,7 @@
 import type {
   WpsScallionChannelState,
   WpsScallionModel,
+  WpsScallionPlan,
   WpsScallionQuota,
   WpsScallionRuntimeMetadata,
 } from '../types'
@@ -73,9 +74,11 @@ export async function fetchWpsScallionRuntimeMetadata(token: string): Promise<Wp
   const quotaReady = Boolean(quotaResponse?.ok)
   const modelsSync = channelState(modelsReady, modelsReady ? undefined : channelError('模型目录', modelsResult))
   const quotaSync = channelState(quotaReady, quotaReady ? undefined : channelError('积分额度', quotaResult))
+  const plan = normalizeWpsPlan(quotaPayload?.plan ?? modelsPayload?.plan)
 
   return {
     models: modelsReady && modelsPayload ? parseWpsModelPayload(modelsPayload) : [],
+    plan,
     quota:
       quotaReady && quotaPayload
         ? normalizeWpsQuota({ ...quotaPayload, plan: quotaPayload.plan ?? modelsPayload?.plan })
@@ -90,6 +93,7 @@ export function beginWpsRuntimeMetadataRefresh(
 ): WpsScallionRuntimeMetadata {
   return {
     models: previous?.models ?? [],
+    plan: previous?.plan,
     quota: previous?.quota,
     modelsSync: { ...(previous?.modelsSync ?? { status: 'error' as const }), status: 'syncing', error: undefined },
     quotaSync: { ...(previous?.quotaSync ?? { status: 'error' as const }), status: 'syncing', error: undefined },
@@ -107,6 +111,7 @@ export function mergeWpsRuntimeMetadata(
 
   return {
     models: next.modelsSync.status === 'ready' ? next.models : previous?.models ?? next.models,
+    plan: next.plan ?? previous?.plan,
     quota: next.quotaSync.status === 'ready' ? next.quota : previous?.quota,
     modelsSync: {
       ...next.modelsSync,
@@ -242,6 +247,22 @@ export function normalizeWpsQuota(payload: QuotaPayload): WpsScallionQuota {
     planName: payload.plan?.name,
     planExpiresAt: payload.plan?.expires_at,
     updatedAt: Date.now(),
+  }
+}
+
+function normalizeWpsPlan(plan?: ModelPayload['plan'] | QuotaPayload['plan']): WpsScallionPlan | undefined {
+  if (!plan) return undefined
+
+  const key = typeof plan.key === 'string' ? plan.key.trim() : ''
+  const name = typeof plan.name === 'string' ? plan.name.trim() : ''
+  const expiresAt = typeof plan.expires_at === 'string' || plan.expires_at === null ? plan.expires_at : undefined
+
+  if (!key && !name && expiresAt === undefined) return undefined
+
+  return {
+    ...(key ? { key } : {}),
+    ...(name ? { name } : {}),
+    ...(expiresAt !== undefined ? { expiresAt } : {}),
   }
 }
 
