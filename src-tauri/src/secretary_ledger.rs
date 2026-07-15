@@ -581,15 +581,16 @@ impl SecretaryLedger {
             id,
             scope: existing.scope,
             project_id: existing.project_id,
-            kind: prior.0,
-            content: prior.1,
-            source: prior.2,
+            kind: normalize_safe_text(prior.0, 64)?,
+            content: normalize_safe_text(prior.1, 16_000)?,
+            source: normalize_safe_text(prior.2, 96)?,
             confidence: prior.3,
-            status: prior.4,
+            status: normalize_safe_text(prior.4, 32)?,
             revision: existing.revision + 1,
             created_at: existing.created_at,
             updated_at: unix_millis(),
         };
+        validate_confidence(restored.confidence)?;
         update_memory_record(&transaction, &restored)?;
         transaction.commit()?;
         Ok(restored)
@@ -2198,11 +2199,13 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecretaryProjec
 
 fn normalize_identifier(value: String) -> Result<String, LedgerError> {
     let value = value.trim().to_string();
+    let uuid_shaped = is_uuid_shaped_identifier(&value);
     if value.is_empty()
         || value.chars().count() > 128
         || !value.chars().all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
         })
+        || (uuid_shaped && !is_canonical_uuid_identifier(&value))
         || (contains_sensitive_input(&value) && !is_canonical_uuid_identifier(&value))
     {
         return Err(LedgerError::InvalidInput);
@@ -2210,17 +2213,20 @@ fn normalize_identifier(value: String) -> Result<String, LedgerError> {
     Ok(value)
 }
 
-fn is_canonical_uuid_identifier(value: &str) -> bool {
+fn is_uuid_shaped_identifier(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.len() != 36
-        || !bytes.iter().enumerate().all(|(index, byte)| {
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| {
             if matches!(index, 8 | 13 | 18 | 23) {
                 *byte == b'-'
             } else {
-                byte.is_ascii_hexdigit()
+                byte.is_ascii_alphanumeric()
             }
         })
-    {
+}
+
+fn is_canonical_uuid_identifier(value: &str) -> bool {
+    if !is_uuid_shaped_identifier(value) {
         return false;
     }
     let Ok(uuid) = Uuid::parse_str(value) else {
@@ -2475,25 +2481,10 @@ fn has_high_entropy_access_token(value: &str) -> bool {
     value
         .split(|character: char| !is_access_token_character(character))
         .any(|candidate| {
-            if candidate.len() < 32 {
-                return false;
-            }
-            let mut distinct = [false; 128];
-            let mut classes = [false; 4];
-            for byte in candidate.bytes() {
-                if byte.is_ascii_lowercase() {
-                    classes[0] = true;
-                } else if byte.is_ascii_uppercase() {
-                    classes[1] = true;
-                } else if byte.is_ascii_digit() {
-                    classes[2] = true;
-                } else {
-                    classes[3] = true;
-                }
-                distinct[byte as usize] = true;
-            }
-            let distinct_count = distinct.iter().filter(|seen| **seen).count();
-            classes.iter().filter(|present| **present).count() >= 2 && distinct_count >= 12
+            candidate.len() >= 32
+                && candidate.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                && candidate.bytes().any(|byte| byte.is_ascii_alphabetic())
+                && candidate.bytes().any(|byte| byte.is_ascii_digit())
         })
 }
 
@@ -3777,6 +3768,7 @@ mod tests {
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWxvbmc",
             "Qm7pK9xR2vL8nS4dF1hJ6wC3aT5yU0bE",
             "4a1f9c2e7b0d8f3c6e5a1b9d0f2c7e4a8b6d3f1c9e0a5b7d2f8c4e6a1b0d9f3c",
+            "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
             "123456",
         ];
 
@@ -3871,6 +3863,8 @@ mod tests {
         let jwt_id = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWxvbmc";
         let hex_id = "4a1f9c2e7b0d8f3c6e5a1b9d0f2c7e4a8b6d3f1c9e0a5b7d2f8c4e6a1b0d9f3c";
         let uuid_shaped_token = "4a1f9c2e-7b0d-8f3c-6e5a-1b9d0f2c7e4a";
+        let nil_uuid_id = "00000000-0000-0000-0000-000000000000";
+        let versionless_uuid_id = "4a1f9c2e-7b0d-0f3c-8e5a-1b9d0f2c7e4a";
         let otp_id = "123456";
 
         for identifier in [
@@ -3879,6 +3873,8 @@ mod tests {
             jwt_id,
             hex_id,
             uuid_shaped_token,
+            nil_uuid_id,
+            versionless_uuid_id,
             otp_id,
         ] {
             assert!(matches!(
@@ -3946,6 +3942,86 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "{table} must not retain a sensitive identifier");
         }
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rollback_rejects_tampered_sensitive_revisions_before_changing_memory_or_fts() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let memory = ledger
+            .create_memory(
+                &project_a,
+                memory_input(MemoryScope::Project, Some("project-a"), "初始安全内容"),
+            )
+            .unwrap();
+        let current = ledger
+            .update_memory(
+                &project_a,
+                &memory.id,
+                UpdateMemoryInput {
+                    kind: None,
+                    content: Some("当前安全内容".into()),
+                    source: None,
+                    confidence: None,
+                    status: None,
+                },
+            )
+            .unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE secretary_memory_revisions SET content = ?3 WHERE memory_id = ?1 AND revision = ?2",
+                params![memory.id, 1, "sk-proj-M5Zt8q2Ln9Rvx4Hy7CwDa1Kb6Pf3Qs"],
+            )
+            .unwrap();
+        let revisions_before: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM secretary_memory_revisions WHERE memory_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fts_before: String = connection
+            .query_row(
+                "SELECT content FROM secretary_fts WHERE entity_type = 'memory' AND record_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            ledger.rollback_memory(&project_a, &memory.id, 1),
+            Err(LedgerError::InvalidInput)
+        ));
+        let after = ledger.get_memory(&project_a, &memory.id).unwrap().unwrap();
+        assert_eq!(after.content, current.content);
+        assert_eq!(after.revision, current.revision);
+
+        let connection = Connection::open(&path).unwrap();
+        let revisions_after: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM secretary_memory_revisions WHERE memory_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fts_after: String = connection
+            .query_row(
+                "SELECT content FROM secretary_fts WHERE entity_type = 'memory' AND record_id = ?1",
+                params![memory.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revisions_after, revisions_before);
+        assert_eq!(fts_after, fts_before);
         drop(connection);
 
         fs::remove_dir_all(directory).unwrap();
