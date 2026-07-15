@@ -2,11 +2,24 @@ import { invoke } from '@tauri-apps/api/core'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { clearGlobalMemory } from '../services/maintenance'
 import type { AgentMemoryRecord, AgentRunRecord } from '../stores/useAppStore'
 import { useAppStore } from '../stores/useAppStore'
 import { MaintenanceConsole } from './MaintenanceConsole'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
+
+vi.mock('../services/maintenance', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/maintenance')>()
+
+  return {
+    ...actual,
+    checkBackendCommunication: vi.fn(async () => ({ status: 'ok', message: '桌面后端正常。' })),
+    checkDefaultModelLatency: vi.fn(async () => ({ status: 'ok', message: '模型正常。' })),
+    checkSqliteStatus: vi.fn(async () => ({ status: 'ok', message: '数据库正常。' })),
+    getMemoryUsage: vi.fn(() => new Promise<never>(() => undefined)),
+  }
+})
 
 vi.mock('../services/scallionAccountService', () => ({
   getScallionQuotaDisplay: vi.fn(() => ({ value: undefined, source: 'none' })),
@@ -69,6 +82,14 @@ afterEach(() => {
 })
 
 describe('MaintenanceConsole browser clear fallback', () => {
+  it('returns a non-executed warning without a usage byte count', async () => {
+    const result = await clearGlobalMemory()
+
+    expect(invoke).toHaveBeenCalledWith('clear_global_memory')
+    expect(result).toMatchObject({ status: 'warning', message: '当前环境未执行本地记忆清理。' })
+    expect(result.bytes).toBeUndefined()
+  })
+
   it('does not clear local agent state when the native maintenance bridge is unavailable', async () => {
     const clearAgentMemory = vi.spyOn(useAppStore.getState(), 'clearAgentMemory')
 
@@ -82,5 +103,6 @@ describe('MaintenanceConsole browser clear fallback', () => {
     expect(clearAgentMemory).not.toHaveBeenCalled()
     expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
     expect(useAppStore.getState().agentRuns).toEqual([run])
+    expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
   })
 })

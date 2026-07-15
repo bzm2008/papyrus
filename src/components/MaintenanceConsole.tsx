@@ -206,13 +206,11 @@ export function MaintenanceConsole() {
     if (confirmAction === 'clear') {
       try {
         const result = await clearGlobalMemory()
-
-        if (typeof result.bytes === 'number') {
-          setMemoryUsageBytes(result.bytes)
-        }
-
         const notice = toMemoryClearNotice(result)
         if (notice.status === 'ok') {
+          if (typeof result.bytes === 'number') {
+            setMemoryUsageBytes(result.bytes)
+          }
           clearAgentMemory()
         }
         setMemoryClearNotice(notice)
@@ -1220,7 +1218,7 @@ function safeMemoryClearMessage(message: string, fallback: string) {
   const normalized = message.replace(/\s+/g, ' ').trim()
   const unsafeDetail = [
     /[a-z]:[\\/]/i,
-    /\/(?:[\w.-]+\/)+[\w.-]+/,
+    /(?:^|[\s"'(])\/[\w.-]+(?:\/[\w.-]+)*/,
     /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
     /\bfile:(?:\/\/|\\\\)/i,
     /\b(?:[\w$]*error|exception|fatal|panic|stack(?:\s+trace)?|traceback|backtrace|unhandled(?:\s+rejection)?|permission denied|access denied|os error|errno)\b/i,

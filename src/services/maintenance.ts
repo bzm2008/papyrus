@@ -102,7 +102,6 @@ export async function clearGlobalMemory() {
   return invokeMaintenance('clear_global_memory', undefined, {
     status: 'warning',
     message: '当前环境未执行本地记忆清理。',
-    bytes: 0,
   })
 }
 

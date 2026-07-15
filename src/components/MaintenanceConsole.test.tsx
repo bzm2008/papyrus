@@ -154,6 +154,8 @@ describe('MaintenanceConsole global memory clearing', () => {
 
   it.each([
     ['Debian absolute path', '/usr/local/share/papyrus/memory.db is locked'],
+    ['single-component /tmp path', '/tmp is locked'],
+    ['single-component /var path', '/var is locked'],
     ['UNC path', '\\\\fileserver\\team-share\\papyrus\\memory.db is locked'],
     ['file URL', 'file:///usr/local/share/papyrus/memory.db is locked'],
     ['stack trace marker', 'Stack trace: at clear_memory (maintenance.rs:42)'],
