@@ -131,4 +131,15 @@ describe('MaintenanceConsole browser clear fallback', () => {
     expect(useAppStore.getState().agentRuns).toEqual([run])
     expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
   })
+
+  it('keeps a browser fallback rebuild warning visible and the confirmation open', async () => {
+    render(<MaintenanceConsole />)
+    fireEvent.click(screen.getByRole('button', { name: /重建项目索引/ }))
+    fireEvent.click(screen.getByRole('button', { name: '确认执行' }))
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('rebuild_project_index'))
+    expect(await screen.findByText('项目索引任务已加入预留队列，真实向量库接入后会执行重建。')).toBeInTheDocument()
+    expect(screen.getByText('重建项目索引？')).toBeInTheDocument()
+    expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
+  })
 })

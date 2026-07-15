@@ -170,10 +170,10 @@ function normalizeNativePayload(payload: NativeMaintenancePayload, command: stri
 
   return {
     status,
-    message: safeMaintenanceMessage(
-      payload.message,
-      status === 'ok' ? '检测已完成。' : maintenanceFailureMessage(command),
-    ),
+    message:
+      status === 'error'
+        ? maintenanceFailureMessage(command)
+        : safeMaintenanceMessage(payload.message, status === 'ok' ? '检测已完成。' : maintenanceFailureMessage(command)),
     latencyMs: payload.latencyMs ?? payload.latency_ms,
     bytes: payload.bytes,
   }
@@ -186,8 +186,9 @@ function isTauriRuntime() {
   )
 }
 
-function errorToMessage(error: unknown, fallback: string) {
-  return safeMaintenanceMessage(error, fallback)
+function errorToMessage(_error: unknown, fallback: string) {
+  // Rejected bridge values are untrusted and can contain upstream or local details.
+  return fallback
 }
 
 export function safeMaintenanceMessage(value: unknown, fallback: string) {

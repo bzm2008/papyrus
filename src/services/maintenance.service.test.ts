@@ -51,6 +51,16 @@ describe('maintenance service safety', () => {
     expect(result).toMatchObject({ status: 'error', message: '桌面后端检测未完成。' })
   })
 
+  it('does not forward a raw string rejected by the native bridge', async () => {
+    setTauriRuntime({})
+    vi.mocked(invoke).mockRejectedValue('tenant=workspace-42; retry later')
+
+    const result = await checkBackendCommunication()
+
+    expect(result).toMatchObject({ status: 'error', message: '桌面后端检测未完成。' })
+    expect(result.message).not.toContain('tenant=workspace-42')
+  })
+
   it('redacts unsafe text supplied in a native maintenance payload', async () => {
     setTauriRuntime({})
     vi.mocked(invoke).mockResolvedValue({

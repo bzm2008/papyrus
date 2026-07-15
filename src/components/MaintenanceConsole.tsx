@@ -18,7 +18,7 @@ import {
   TriangleAlert,
   UserRound,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   checkBackendCommunication,
   checkDefaultModelLatency,
@@ -75,6 +75,10 @@ export function MaintenanceConsole() {
   const [confirmAction, setConfirmAction] = useState<'clear' | 'rebuild' | null>(null)
   const [memoryClearNotice, setMemoryClearNotice] = useState<MemoryClearNotice | null>(null)
   const [memoryUsageNotice, setMemoryUsageNotice] = useState<MemoryClearNotice | null>(null)
+  const checkGenerationsRef = useRef<Record<MaintenanceCheckId, number>>({ tauri: 0, sqlite: 0, llm: 0 })
+  const memoryUsageGenerationRef = useRef(0)
+  const allChecksGenerationRef = useRef(0)
+  const modelTestGenerationRef = useRef(0)
   const maintenanceTab = useAppStore((state) => state.maintenanceTab)
   const setMaintenanceTab = useAppStore((state) => state.setMaintenanceTab)
   const maintenanceChecks = useAppStore((state) => state.maintenanceChecks)
@@ -135,54 +139,101 @@ export function MaintenanceConsole() {
     }
   }, [scallionToken])
 
-  const runAllChecks = async () => {
-    setCheckingAll(true)
-
-    await Promise.all([
-      runSingleCheck('tauri', checkBackendCommunication()),
-      runSingleCheck('sqlite', checkSqliteStatus()),
-      runSingleCheck('llm', checkDefaultModelLatency(activeProvider)),
-      getMemoryUsage().then((result) => {
-        if (result.status === 'ok' && typeof result.bytes === 'number') {
-          setMemoryUsageBytes(result.bytes)
-          setMemoryUsageNotice(null)
-        } else if (result.status !== 'ok') {
-          setMemoryClearNotice((notice) => (notice?.status === 'ok' ? null : notice))
-          setMemoryUsageNotice(toMemoryUsageNotice(result))
-        }
-      }),
-    ])
-
-    setCheckingAll(false)
-  }
-
   const runSingleCheck = async (
     id: MaintenanceCheckId,
-    probe: Promise<{
+    probe: () => Promise<{
       status: MaintenanceCheck['status']
       message: string
       latencyMs?: number
       bytes?: number
     }>,
   ) => {
+    const generation = ++checkGenerationsRef.current[id]
     setMaintenanceCheck(id, { status: 'checking', message: '正在检测...' })
-    const result = await probe
 
-    setMaintenanceCheck(id, {
-      status: result.status,
-      message: safeMaintenanceMessage(result.message, '维护检查未完成。'),
-      latencyMs: result.latencyMs,
-    })
+    try {
+      const result = await probe()
+      if (checkGenerationsRef.current[id] !== generation) {
+        return
+      }
+
+      setMaintenanceCheck(id, {
+        status: result.status,
+        message:
+          result.status === 'error'
+            ? '维护检查未完成。'
+            : safeMaintenanceMessage(result.message, '维护检查未完成。'),
+        latencyMs: result.latencyMs,
+      })
+    } catch {
+      if (checkGenerationsRef.current[id] !== generation) {
+        return
+      }
+
+      setMaintenanceCheck(id, { status: 'error', message: '维护检查未完成。' })
+    }
+  }
+
+  const runMemoryUsageCheck = async () => {
+    const generation = ++memoryUsageGenerationRef.current
+
+    try {
+      const result = await getMemoryUsage()
+      if (memoryUsageGenerationRef.current !== generation) {
+        return
+      }
+
+      if (result.status === 'ok' && typeof result.bytes === 'number') {
+        setMemoryUsageBytes(result.bytes)
+        setMemoryUsageNotice(null)
+      } else if (result.status !== 'ok') {
+        setMemoryClearNotice((notice) => (notice?.status === 'ok' ? null : notice))
+        setMemoryUsageNotice(toMemoryUsageNotice(result))
+      }
+    } catch {
+      if (memoryUsageGenerationRef.current !== generation) {
+        return
+      }
+
+      setMemoryUsageNotice({
+        status: 'error',
+        title: '存储统计失败',
+        message: '未能读取本地记忆占用，已保留当前显示。',
+      })
+    }
+  }
+
+  const runAllChecks = async () => {
+    const generation = ++allChecksGenerationRef.current
+    setCheckingAll(true)
+
+    try {
+      await Promise.all([
+        runSingleCheck('tauri', checkBackendCommunication),
+        runSingleCheck('sqlite', checkSqliteStatus),
+        runSingleCheck('llm', () => checkDefaultModelLatency(activeProvider)),
+        runMemoryUsageCheck(),
+      ])
+    } finally {
+      if (allChecksGenerationRef.current === generation) {
+        setCheckingAll(false)
+      }
+    }
   }
 
   const handleTestProvider = async (providerId: ProviderId) => {
     const provider = useAppStore.getState().providerConfigs[providerId]
+    const checkGeneration = ++checkGenerationsRef.current.llm
+    const modelTestGeneration = ++modelTestGenerationRef.current
 
     setTestingProviderId(providerId)
     setMaintenanceCheck('llm', { status: 'checking', message: '正在测试模型连通性...' })
 
     try {
       const result = await testModelConnection(provider)
+      if (checkGenerationsRef.current.llm !== checkGeneration) {
+        return
+      }
 
       if (result.status === 'ok') {
         updateProviderConfig(providerId, {
@@ -193,16 +244,25 @@ export function MaintenanceConsole() {
 
       setMaintenanceCheck('llm', {
         status: result.status,
-        message: safeMaintenanceMessage(result.message, '模型连通性测试未完成。'),
+        message:
+          result.status === 'error'
+            ? '模型连通性测试未完成。'
+            : safeMaintenanceMessage(result.message, '模型连通性测试未完成。'),
         latencyMs: result.latencyMs,
       })
-    } catch (error) {
+    } catch {
+      if (checkGenerationsRef.current.llm !== checkGeneration) {
+        return
+      }
+
       setMaintenanceCheck('llm', {
         status: 'error',
-        message: safeMaintenanceMessage(error, '模型连通性测试未完成。'),
+        message: '模型连通性测试未完成。',
       })
     } finally {
-      setTestingProviderId(null)
+      if (modelTestGenerationRef.current === modelTestGeneration) {
+        setTestingProviderId(null)
+      }
     }
   }
 
@@ -234,13 +294,24 @@ export function MaintenanceConsole() {
       return
     }
 
-    const result = await rebuildProjectIndex()
+    try {
+      const result = await rebuildProjectIndex()
+      const notice = toProjectIndexRebuildNotice(result)
+      setMemoryClearNotice(notice)
 
-    if (result.status === 'ok' && typeof result.bytes === 'number') {
-      setMemoryUsageBytes(result.bytes)
+      if (result.status === 'ok') {
+        if (typeof result.bytes === 'number') {
+          setMemoryUsageBytes(result.bytes)
+        }
+        setConfirmAction(null)
+      }
+    } catch {
+      setMemoryClearNotice({
+        status: 'error',
+        title: '索引重建失败',
+        message: '项目索引重建未完成，当前资料和记忆已保留。',
+      })
     }
-
-    setConfirmAction(null)
   }
 
   useEffect(() => {
@@ -251,6 +322,22 @@ export function MaintenanceConsole() {
     return () => window.clearTimeout(timer)
     // The first pass should reflect the currently selected provider only once on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const checkGenerations = checkGenerationsRef.current
+    const memoryUsageGeneration = memoryUsageGenerationRef
+    const allChecksGeneration = allChecksGenerationRef
+    const modelTestGeneration = modelTestGenerationRef
+
+    return () => {
+      for (const id of ['tauri', 'sqlite', 'llm'] as const) {
+        checkGenerations[id] += 1
+      }
+      memoryUsageGeneration.current += 1
+      allChecksGeneration.current += 1
+      modelTestGeneration.current += 1
+    }
   }, [])
 
   return (
@@ -318,7 +405,7 @@ export function MaintenanceConsole() {
           <button
             type="button"
             onClick={() => void runAllChecks()}
-            disabled={checkingAll}
+            aria-busy={checkingAll}
             className="inline-flex h-9 items-center gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 text-sm text-[#5f6159] transition hover:text-[#171714] disabled:cursor-wait disabled:opacity-55"
           >
             {checkingAll ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
@@ -371,13 +458,16 @@ export function MaintenanceConsole() {
                 memoryUsageBytes={memoryUsageBytes}
                 agentMemoryRecords={agentMemoryRecords}
                 agentRuns={agentRuns}
-                memoryClearNotice={memoryClearNotice}
+                memoryClearNotice={confirmAction === 'rebuild' ? null : memoryClearNotice}
                 memoryUsageNotice={memoryUsageNotice}
                 onClear={() => {
                   setMemoryClearNotice(null)
                   setConfirmAction('clear')
                 }}
-                onRebuild={() => setConfirmAction('rebuild')}
+                onRebuild={() => {
+                  setMemoryClearNotice(null)
+                  setConfirmAction('rebuild')
+                }}
               />
             ) : null}
           </motion.div>
@@ -386,6 +476,7 @@ export function MaintenanceConsole() {
 
       <ConfirmDangerDialog
         action={confirmAction}
+        notice={confirmAction === 'rebuild' ? memoryClearNotice : null}
         onCancel={() => setConfirmAction(null)}
         onConfirm={handleConfirmDanger}
       />
@@ -417,7 +508,7 @@ function ConnectionsPanel({
       <button
         type="button"
         onClick={() => void onRetest()}
-        disabled={checkingAll}
+        aria-busy={checkingAll}
         className="mt-5 inline-flex h-10 items-center gap-2 rounded-lg bg-[#171714] px-4 text-sm font-medium text-[#fffefa] transition hover:bg-[#3f5845] disabled:cursor-wait disabled:opacity-55"
       >
         {checkingAll ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
@@ -1114,10 +1205,12 @@ function DangerButton({
 
 function ConfirmDangerDialog({
   action,
+  notice,
   onCancel,
   onConfirm,
 }: {
   action: 'clear' | 'rebuild' | null
+  notice: MemoryClearNotice | null
   onCancel: () => void
   onConfirm: () => Promise<void>
 }) {
@@ -1156,6 +1249,7 @@ function ConfirmDangerDialog({
                 <p className="mt-1 text-sm leading-6 text-[#7d7a70]">{copy.body}</p>
               </div>
             </div>
+            {action === 'rebuild' && notice && notice.status !== 'ok' ? <MemoryClearStatus notice={notice} /> : null}
             <div className="mt-5 flex justify-end gap-2">
               <button
                 type="button"
@@ -1223,6 +1317,29 @@ function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice 
         status: 'error',
         title: '清理失败',
         message: safeMaintenanceMessage(result.message, '清理未完成，当前本地记忆和运行记录已保留。'),
+      }
+  }
+}
+
+function toProjectIndexRebuildNotice(result: MaintenanceProbeResult): MemoryClearNotice {
+  switch (result.status) {
+    case 'ok':
+      return {
+        status: 'ok',
+        title: '项目索引已重建',
+        message: safeMaintenanceMessage(result.message, '项目索引已重建。'),
+      }
+    case 'warning':
+      return {
+        status: 'warning',
+        title: '索引重建未完成',
+        message: safeMaintenanceMessage(result.message, '项目索引重建尚未完成，当前资料和记忆已保留。'),
+      }
+    case 'error':
+      return {
+        status: 'error',
+        title: '索引重建失败',
+        message: safeMaintenanceMessage(result.message, '项目索引重建未完成，当前资料和记忆已保留。'),
       }
   }
 }

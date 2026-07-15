@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import * as maintenance from '../services/maintenance'
@@ -31,10 +31,21 @@ vi.mock('../services/scallionAuth', () => ({ startScallionLogin: vi.fn(async () 
 
 const originalState = {
   maintenanceTab: useAppStore.getState().maintenanceTab,
+  maintenanceChecks: useAppStore.getState().maintenanceChecks,
+  isEnvReady: useAppStore.getState().isEnvReady,
   memoryUsageBytes: useAppStore.getState().memoryUsageBytes,
   agentMemoryRecords: useAppStore.getState().agentMemoryRecords,
   agentRuns: useAppStore.getState().agentRuns,
   activeAgentRunId: useAppStore.getState().activeAgentRunId,
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+
+  return { promise, resolve }
 }
 
 const memory: AgentMemoryRecord = {
@@ -92,6 +103,40 @@ async function confirmIndexRebuild() {
 }
 
 describe('MaintenanceConsole global memory clearing', () => {
+  it('does not let an older core success overwrite a newer warning or restore readiness', async () => {
+    const firstBackendCheck = createDeferred<{
+      status: 'ok'
+      message: string
+    }>()
+    vi.mocked(maintenance.checkBackendCommunication)
+      .mockReturnValueOnce(firstBackendCheck.promise)
+      .mockResolvedValueOnce({ status: 'warning', message: '桌面后端暂未就绪。' })
+    vi.mocked(maintenance.checkSqliteStatus).mockResolvedValue({ status: 'ok', message: '数据库正常。' })
+    vi.mocked(maintenance.checkDefaultModelLatency).mockResolvedValue({ status: 'ok', message: '模型正常。' })
+    useAppStore.setState({ maintenanceTab: 'connections', isEnvReady: false })
+
+    const view = render(<MaintenanceConsole />)
+
+    await waitFor(() => expect(maintenance.checkBackendCommunication).toHaveBeenCalledTimes(1))
+    const retestButton = view.getAllByRole('button', { name: '重新检测' })[0]
+    expect(retestButton).toBeEnabled()
+    fireEvent.click(retestButton)
+
+    await waitFor(() => expect(maintenance.checkBackendCommunication).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      expect(useAppStore.getState().maintenanceChecks.find((check) => check.id === 'tauri')?.status).toBe('warning')
+    })
+    expect(view.getByRole('button', { name: '进入 Papyrus' })).toBeDisabled()
+
+    await act(async () => {
+      firstBackendCheck.resolve({ status: 'ok', message: '旧检测已通过。' })
+      await firstBackendCheck.promise
+    })
+
+    expect(useAppStore.getState().maintenanceChecks.find((check) => check.id === 'tauri')?.status).toBe('warning')
+    expect(view.getByRole('button', { name: '进入 Papyrus' })).toBeDisabled()
+  })
+
   it('clears local records only after the native clear succeeds and renders its success message', async () => {
     vi.mocked(maintenance.clearGlobalMemory).mockResolvedValue({
       status: 'ok',

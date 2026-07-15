@@ -57,4 +57,25 @@ describe('MaintenanceConsole native maintenance integration', () => {
     expect(useAppStore.getState().memoryUsageBytes).toBe(4096)
     expect(screen.getByText('4.0 KB')).toBeInTheDocument()
   })
+
+  it('does not render a raw string rejected by the native bridge', async () => {
+    useAppStore.setState({ maintenanceTab: 'connections' })
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      switch (command) {
+        case 'health_check_backend':
+          throw 'tenant=workspace-42; retry later'
+        case 'check_sqlite_status':
+          return { status: 'ok', message: '本地存储检测通过。' }
+        case 'get_memory_usage':
+          return { status: 'ok', message: '记忆占用统计完成。', bytes: 4096 }
+        default:
+          return { status: 'warning', message: '模型未配置。' }
+      }
+    })
+
+    render(<MaintenanceConsole />)
+
+    expect(await screen.findByText('维护检查未完成。')).toBeInTheDocument()
+    expect(screen.queryByText('tenant=workspace-42; retry later')).not.toBeInTheDocument()
+  })
 })
