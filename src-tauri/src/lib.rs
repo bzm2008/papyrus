@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tauri::Manager;
+use uuid::Uuid;
 
 pub mod secretary_ledger;
 mod work_assistant;
@@ -246,22 +247,23 @@ fn get_memory_usage(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> 
 #[tauri::command]
 fn clear_global_memory(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> {
     let memory_dir = memory_dir(&app)?;
-
-    if memory_dir.exists() {
-        fs::remove_dir_all(&memory_dir).map_err(|_| "清空本地记忆失败".to_string())?;
-    }
-
-    fs::create_dir_all(&memory_dir).map_err(|_| "重建本地记忆失败".to_string())?;
-    let ledger_bytes = secretary_ledger::SecretaryLedger::open_for_app(&app)
-        .and_then(|ledger| ledger.clear())
+    let ledger = secretary_ledger::SecretaryLedger::open_for_app(&app)
         .map_err(|error| error.safe_message().to_string())?;
-    let bytes = directory_size(&memory_dir).saturating_add(ledger_bytes);
+    let result = clear_memory_storage(&memory_dir, || ledger.clear())?;
 
     Ok(MaintenanceStatus {
-        status: "ok".into(),
-        message: "全局记忆已清空".into(),
+        status: if result.legacy_cleanup_pending {
+            "warning".into()
+        } else {
+            "ok".into()
+        },
+        message: if result.legacy_cleanup_pending {
+            "秘书账本已清空，旧记忆已隔离但仍待清理".into()
+        } else {
+            "全局记忆已清空".into()
+        },
         latency_ms: None,
-        bytes: Some(bytes),
+        bytes: Some(result.bytes),
     })
 }
 
@@ -544,11 +546,78 @@ fn memory_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("memory"))
 }
 
+struct MemoryStorageClearResult {
+    bytes: u64,
+    legacy_cleanup_pending: bool,
+}
+
+fn clear_memory_storage(
+    memory_dir: &Path,
+    clear_ledger: impl FnOnce() -> Result<u64, secretary_ledger::LedgerError>,
+) -> Result<MemoryStorageClearResult, String> {
+    let parent = memory_dir
+        .parent()
+        .ok_or_else(|| "清空本地记忆失败".to_string())?;
+    fs::create_dir_all(parent).map_err(|_| "清空本地记忆失败".to_string())?;
+
+    let staged_memory_dir = if memory_dir.exists() {
+        let staged = parent.join(format!(".memory-clear-{}", Uuid::new_v4()));
+        fs::rename(memory_dir, &staged).map_err(|_| "隔离旧记忆失败".to_string())?;
+        Some(staged)
+    } else {
+        None
+    };
+    let had_legacy_memory = staged_memory_dir.is_some();
+
+    if fs::create_dir_all(memory_dir).is_err() {
+        let restored = restore_staged_memory_directory(memory_dir, staged_memory_dir.as_deref());
+        return Err(if restored && had_legacy_memory {
+            "重建本地记忆失败，旧记忆已恢复".into()
+        } else if restored {
+            "重建本地记忆失败".into()
+        } else {
+            "重建本地记忆失败，旧记忆恢复失败".into()
+        });
+    }
+
+    let ledger_bytes = match clear_ledger() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let restored =
+                restore_staged_memory_directory(memory_dir, staged_memory_dir.as_deref());
+            return Err(if restored && had_legacy_memory {
+                "清空秘书账本失败，旧记忆已恢复".into()
+            } else if restored {
+                "清空秘书账本失败".into()
+            } else {
+                "清空失败，旧记忆恢复失败".into()
+            });
+        }
+    };
+
+    let legacy_cleanup_pending = staged_memory_dir
+        .as_deref()
+        .is_some_and(|staged| fs::remove_dir_all(staged).is_err());
+    Ok(MemoryStorageClearResult {
+        bytes: directory_size(memory_dir).saturating_add(ledger_bytes),
+        legacy_cleanup_pending,
+    })
+}
+
+fn restore_staged_memory_directory(memory_dir: &Path, staged_memory_dir: Option<&Path>) -> bool {
+    if memory_dir.exists() && fs::remove_dir_all(memory_dir).is_err() {
+        return false;
+    }
+    staged_memory_dir
+        .map(|staged| fs::rename(staged, memory_dir).is_ok())
+        .unwrap_or(true)
+}
+
 fn read_optional_file(path: PathBuf) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
-fn directory_size(path: &PathBuf) -> u64 {
+fn directory_size(path: &Path) -> u64 {
     if !path.exists() {
         return 0;
     }
@@ -576,6 +645,57 @@ fn directory_size(path: &PathBuf) -> u64 {
 
 #[cfg(test)]
 mod security_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn clear_memory_storage_restores_legacy_memory_when_ledger_clear_fails() {
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-clear-memory-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let memory_dir = root.join("memory");
+        fs::create_dir_all(&memory_dir).unwrap();
+        fs::write(memory_dir.join("legacy-memory.json"), "old memory").unwrap();
+
+        let result = clear_memory_storage(&memory_dir, || {
+            Err(secretary_ledger::LedgerError::Unavailable)
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(memory_dir.join("legacy-memory.json")).unwrap(),
+            "old memory"
+        );
+        assert!(fs::read_dir(&root).unwrap().flatten().all(|entry| !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".memory-clear-")));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clear_memory_storage_does_not_claim_to_restore_absent_legacy_memory() {
+        let root = std::env::temp_dir().join(format!(
+            "papyrus-clear-empty-memory-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let memory_dir = root.join("memory");
+
+        let error = match clear_memory_storage(&memory_dir, || {
+            Err(secretary_ledger::LedgerError::Unavailable)
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("ledger clear failure must not report success"),
+        };
+
+        assert_eq!(error, "清空秘书账本失败");
+        assert!(!memory_dir.exists());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn invoke_handler_exposes_only_approved_commands() {
         let source = include_str!("lib.rs");

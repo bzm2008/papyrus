@@ -12,6 +12,7 @@ use uuid::Uuid;
 pub const SECRETARY_LEDGER_SCHEMA_VERSION: i64 = 5;
 const LEGACY_PROJECT_ID: &str = "__papyrus_legacy__";
 const MAX_LIST_RESULTS: u32 = 100;
+const MAX_LEGACY_IMPORT_RECORDS: usize = 100;
 
 #[derive(Clone, Debug)]
 pub struct SecretaryLedger {
@@ -358,6 +359,9 @@ impl SecretaryLedger {
         input: CreateProjectInput,
     ) -> Result<SecretaryProject, LedgerError> {
         let id = normalize_identifier(input.id.unwrap_or_else(|| Uuid::new_v4().to_string()))?;
+        if id == LEGACY_PROJECT_ID {
+            return Err(LedgerError::InvalidInput);
+        }
         let title = normalize_text(input.title, 240)?;
         let kind = normalize_text(input.kind, 64)?;
         let story_project_id = normalize_optional_text(input.story_project_id, 128)?;
@@ -405,14 +409,19 @@ impl SecretaryLedger {
             "
             SELECT id, title, kind, story_project_id, chat_id, created_at, updated_at, archived
             FROM secretary_projects
-            WHERE (?1 = 1 OR archived = 0)
+            WHERE id != ?1
+              AND (?2 = 1 OR archived = 0)
             ORDER BY updated_at DESC, id ASC
-            LIMIT ?2
+            LIMIT ?3
             ",
         )?;
         let projects = statement
             .query_map(
-                params![if include_archived { 1 } else { 0 }, bounded_limit(limit)],
+                params![
+                    LEGACY_PROJECT_ID,
+                    if include_archived { 1 } else { 0 },
+                    bounded_limit(limit),
+                ],
                 project_from_row,
             )?
             .collect::<Result<Vec<_>, _>>()?;
@@ -428,7 +437,7 @@ impl SecretaryLedger {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let access = validate_project_access_in_transaction(&transaction, access)?;
-        authorize_project_owner(&access, memory.project_id.as_deref())?;
+        authorize_project_write(&access, memory.project_id.as_deref())?;
         ensure_memory_owner(&transaction, &memory, false)?;
         insert_memory(&transaction, &memory)?;
         transaction.commit()?;
@@ -445,7 +454,7 @@ impl SecretaryLedger {
         let access = validate_project_access(&connection, access)?;
         let memory = find_memory(&connection, &id)?;
         if let Some(memory) = memory.as_ref() {
-            authorize_project_owner(&access, memory.project_id.as_deref())?;
+            authorize_project_read(&access, memory.project_id.as_deref())?;
         }
         Ok(memory)
     }
@@ -496,7 +505,7 @@ impl SecretaryLedger {
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let existing =
             find_memory_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, existing.project_id.as_deref())?;
+        authorize_project_write(&access, existing.project_id.as_deref())?;
         let updated = SecretaryMemory {
             id,
             scope: existing.scope,
@@ -547,7 +556,7 @@ impl SecretaryLedger {
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let existing =
             find_memory_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, existing.project_id.as_deref())?;
+        authorize_project_write(&access, existing.project_id.as_deref())?;
         let prior = transaction
             .query_row(
                 "
@@ -593,7 +602,7 @@ impl SecretaryLedger {
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let existing =
             find_memory_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, existing.project_id.as_deref())?;
+        authorize_project_write(&access, existing.project_id.as_deref())?;
         transaction.execute(
             "DELETE FROM secretary_fts WHERE entity_type = 'memory' AND record_id = ?1",
             params![id],
@@ -670,7 +679,7 @@ impl SecretaryLedger {
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let access = validate_project_access_in_transaction(&transaction, access)?;
-        authorize_project_owner(&access, Some(&task.project_id))?;
+        authorize_project_write(&access, Some(&task.project_id))?;
         ensure_task_project(&transaction, &task.project_id, false)?;
         insert_task(&transaction, &task)?;
         transaction.commit()?;
@@ -687,7 +696,7 @@ impl SecretaryLedger {
         let access = validate_project_access(&connection, access)?;
         let task = find_task(&connection, &id)?;
         if let Some(task) = task.as_ref() {
-            authorize_project_owner(&access, Some(&task.project_id))?;
+            authorize_project_read(&access, Some(&task.project_id))?;
         }
         Ok(task)
     }
@@ -736,7 +745,7 @@ impl SecretaryLedger {
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let existing =
             find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, Some(&existing.project_id))?;
+        authorize_project_write(&access, Some(&existing.project_id))?;
         let task = SecretaryTask {
             id,
             project_id: existing.project_id,
@@ -788,7 +797,7 @@ impl SecretaryLedger {
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let existing =
             find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, Some(&existing.project_id))?;
+        authorize_project_write(&access, Some(&existing.project_id))?;
         transaction.execute(
             "
             DELETE FROM secretary_fts
@@ -821,7 +830,7 @@ impl SecretaryLedger {
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let task =
             find_task_in_transaction(&transaction, &task_id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, Some(&task.project_id))?;
+        authorize_project_write(&access, Some(&task.project_id))?;
         let event = TaskEvent {
             task_id,
             sequence: next_sequence(&transaction, "secretary_task_events", &task.id)?,
@@ -865,7 +874,7 @@ impl SecretaryLedger {
         let connection = self.connection()?;
         let access = validate_project_access(&connection, access)?;
         let task = find_task(&connection, &task_id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, Some(&task.project_id))?;
+        authorize_project_read(&access, Some(&task.project_id))?;
         let mut statement = connection.prepare(
             "
             SELECT task_id, sequence, event_type, payload, created_at
@@ -895,7 +904,7 @@ impl SecretaryLedger {
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let task =
             find_task_in_transaction(&transaction, &task_id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, Some(&task.project_id))?;
+        authorize_project_write(&access, Some(&task.project_id))?;
         let checkpoint = SecretaryCheckpoint {
             task_id,
             sequence: next_sequence(&transaction, "secretary_task_checkpoints", &task.id)?,
@@ -938,7 +947,7 @@ impl SecretaryLedger {
         let connection = self.connection()?;
         let access = validate_project_access(&connection, access)?;
         let task = find_task(&connection, &task_id)?.ok_or(LedgerError::InvalidInput)?;
-        authorize_project_owner(&access, Some(&task.project_id))?;
+        authorize_project_read(&access, Some(&task.project_id))?;
         Ok(connection
             .query_row(
                 "
@@ -975,9 +984,14 @@ impl SecretaryLedger {
             });
         }
 
+        for project in &prepared.projects {
+            ensure_import_project_is_new(&transaction, &project.id)?;
+        }
+
         let mut projects_imported = 0u32;
         for project in &prepared.projects {
-            projects_imported += insert_project_if_missing(&transaction, project)?;
+            insert_project(&transaction, project)?;
+            projects_imported += 1;
         }
         if prepared.needs_legacy_project {
             projects_imported += insert_project_if_missing(&transaction, &legacy_project())?;
@@ -1026,7 +1040,9 @@ impl SecretaryLedger {
             ",
         )?;
         transaction.commit()?;
-        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+        // The deletion is durable once the transaction commits. Compaction may be blocked by
+        // another reader, but must not turn a completed clear into a reported failure.
+        let _ = connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;");
         drop(connection);
         Ok(ledger_file_size(&self.path))
     }
@@ -1443,6 +1459,18 @@ struct PreparedLegacyBatch {
 }
 
 fn prepare_legacy_batch(batch: LegacyImportBatch) -> Result<PreparedLegacyBatch, LedgerError> {
+    let total_records = batch
+        .projects
+        .len()
+        .saturating_add(batch.memories.len())
+        .saturating_add(batch.tasks.len());
+    if batch.projects.len() > MAX_LEGACY_IMPORT_RECORDS
+        || batch.memories.len() > MAX_LEGACY_IMPORT_RECORDS
+        || batch.tasks.len() > MAX_LEGACY_IMPORT_RECORDS
+        || total_records > MAX_LEGACY_IMPORT_RECORDS
+    {
+        return Err(LedgerError::InvalidInput);
+    }
     let migration_key = normalize_safe_text(batch.migration_key, 128)?;
     let now = unix_millis();
     let mut project_ids = std::collections::HashSet::new();
@@ -1470,7 +1498,15 @@ fn prepare_legacy_batch(batch: LegacyImportBatch) -> Result<PreparedLegacyBatch,
         let project_id = match (&memory.scope, memory.project_id) {
             (MemoryScope::Personal, None) => None,
             (MemoryScope::Personal, Some(_)) => return Err(LedgerError::InvalidInput),
-            (MemoryScope::Project, Some(project_id)) => Some(project_id),
+            (MemoryScope::Project, Some(project_id)) => {
+                let project_id = normalize_identifier(project_id)?;
+                if project_ids.contains(&project_id) {
+                    Some(project_id)
+                } else {
+                    needs_legacy_project = true;
+                    Some(LEGACY_PROJECT_ID.into())
+                }
+            }
             (MemoryScope::Project, None) => {
                 needs_legacy_project = true;
                 Some(LEGACY_PROJECT_ID.into())
@@ -1491,7 +1527,15 @@ fn prepare_legacy_batch(batch: LegacyImportBatch) -> Result<PreparedLegacyBatch,
     let mut tasks = Vec::with_capacity(batch.tasks.len());
     for task in batch.tasks {
         let project_id = match task.project_id {
-            Some(project_id) => project_id,
+            Some(project_id) => {
+                let project_id = normalize_identifier(project_id)?;
+                if project_ids.contains(&project_id) {
+                    project_id
+                } else {
+                    needs_legacy_project = true;
+                    LEGACY_PROJECT_ID.into()
+                }
+            }
             None => {
                 needs_legacy_project = true;
                 LEGACY_PROJECT_ID.into()
@@ -1532,6 +1576,45 @@ fn legacy_project() -> SecretaryProject {
         updated_at: now,
         archived: true,
     }
+}
+
+fn ensure_import_project_is_new(
+    transaction: &Transaction<'_>,
+    project_id: &str,
+) -> Result<(), LedgerError> {
+    let exists = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM secretary_projects WHERE id = ?1)",
+        params![project_id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if exists != 0 {
+        return Err(LedgerError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn insert_project(
+    transaction: &Transaction<'_>,
+    project: &SecretaryProject,
+) -> Result<(), LedgerError> {
+    transaction.execute(
+        "
+        INSERT INTO secretary_projects(
+            id, title, kind, story_project_id, chat_id, created_at, updated_at, archived
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ",
+        params![
+            project.id,
+            project.title,
+            project.kind,
+            project.story_project_id,
+            project.chat_id,
+            project.created_at,
+            project.updated_at,
+            if project.archived { 1 } else { 0 },
+        ],
+    )?;
+    Ok(())
 }
 
 fn insert_project_if_missing(
@@ -1855,7 +1938,7 @@ fn normalize_project_access(access: &ProjectAccess) -> Result<ValidatedProjectAc
     })
 }
 
-fn authorize_project_owner(
+fn authorize_project_read(
     access: &ValidatedProjectAccess,
     owner_project_id: Option<&str>,
 ) -> Result<(), LedgerError> {
@@ -1864,6 +1947,18 @@ fn authorize_project_owner(
         Some(LEGACY_PROJECT_ID) => Err(LedgerError::InvalidInput),
         Some(project_id) if project_id == access.current_project_id => Ok(()),
         Some(_) if access.include_cross_project => Ok(()),
+        Some(_) => Err(LedgerError::InvalidInput),
+    }
+}
+
+fn authorize_project_write(
+    access: &ValidatedProjectAccess,
+    owner_project_id: Option<&str>,
+) -> Result<(), LedgerError> {
+    match owner_project_id {
+        None => Ok(()),
+        Some(LEGACY_PROJECT_ID) => Err(LedgerError::InvalidInput),
+        Some(project_id) if project_id == access.current_project_id => Ok(()),
         Some(_) => Err(LedgerError::InvalidInput),
     }
 }
@@ -2271,6 +2366,10 @@ fn contains_sensitive_input(value: &str) -> bool {
         return true;
     }
 
+    if has_unlabelled_secret_token(value) {
+        return true;
+    }
+
     let financial_markers = [
         "银行卡",
         "信用卡",
@@ -2315,6 +2414,97 @@ fn has_token_assignment(value: &str) -> bool {
                 || value.contains(&format!("{name} :"))
                 || value.contains(&format!("{quoted}:"))
         })
+}
+
+fn has_unlabelled_secret_token(value: &str) -> bool {
+    has_api_key_like_token(value)
+        || has_jwt_like_token(value)
+        || has_high_entropy_access_token(value)
+        || has_standalone_six_digit_otp(value)
+}
+
+fn has_api_key_like_token(value: &str) -> bool {
+    value
+        .split(|character: char| !is_access_token_character(character))
+        .any(|candidate| {
+            let suffix = candidate
+                .strip_prefix("sk-proj-")
+                .or_else(|| candidate.strip_prefix("sk-"));
+            suffix.is_some_and(|suffix| {
+                suffix.len() >= 16 && suffix.chars().all(is_access_token_character)
+            })
+        })
+}
+
+fn has_jwt_like_token(value: &str) -> bool {
+    value
+        .split(|character: char| !(is_base64url_character(character) || character == '.'))
+        .any(|candidate| {
+            let parts = candidate.split('.').collect::<Vec<_>>();
+            parts.len() == 3
+                && parts[0].starts_with("eyJ")
+                && parts
+                    .iter()
+                    .all(|part| part.len() >= 8 && part.chars().all(is_base64url_character))
+        })
+}
+
+fn has_high_entropy_access_token(value: &str) -> bool {
+    value
+        .split(|character: char| !is_access_token_character(character))
+        .any(|candidate| {
+            if candidate.len() < 32 {
+                return false;
+            }
+            let mut distinct = [false; 128];
+            let mut classes = [false; 4];
+            for byte in candidate.bytes() {
+                if byte.is_ascii_lowercase() {
+                    classes[0] = true;
+                } else if byte.is_ascii_uppercase() {
+                    classes[1] = true;
+                } else if byte.is_ascii_digit() {
+                    classes[2] = true;
+                } else {
+                    classes[3] = true;
+                }
+                distinct[byte as usize] = true;
+            }
+            let distinct_count = distinct.iter().filter(|seen| **seen).count();
+            classes.iter().filter(|present| **present).count() >= 3 && distinct_count >= 12
+        })
+}
+
+fn has_standalone_six_digit_otp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if index - start != 6 {
+            continue;
+        }
+        let starts_at_boundary = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let ends_at_boundary = index == bytes.len() || !bytes[index].is_ascii_alphanumeric();
+        if starts_at_boundary && ends_at_boundary {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_access_token_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+}
+
+fn is_base64url_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
 }
 
 fn has_contact_address_or_long_numeric_data(value: &str) -> bool {
@@ -2876,6 +3066,213 @@ mod tests {
         }
     }
 
+    fn legacy_task(project_id: Option<&str>) -> LegacyTaskInput {
+        LegacyTaskInput {
+            id: None,
+            project_id: project_id.map(str::to_string),
+            title: "迁移任务".into(),
+            request: "整理迁移任务的资料".into(),
+            status: Some("queued".into()),
+            priority: Some(3),
+            schedule_at: None,
+            next_step: None,
+            public_plan: None,
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn normal_project_apis_reject_and_hide_the_internal_legacy_project() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+
+        assert!(matches!(
+            ledger.create_project(CreateProjectInput {
+                id: Some(LEGACY_PROJECT_ID.into()),
+                title: "伪造旧记录".into(),
+                kind: "writing".into(),
+                story_project_id: None,
+                chat_id: None,
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+
+        create_project(&ledger, "project-a", "甲项目");
+        ledger
+            .import_legacy_batch(LegacyImportBatch {
+                migration_key: "legacy-hidden-project".into(),
+                projects: Vec::new(),
+                memories: vec![legacy_memory(None, "没有归属的旧记录")],
+                tasks: Vec::new(),
+            })
+            .unwrap();
+
+        for include_archived in [false, true] {
+            assert!(ledger
+                .list_projects(include_archived, 20)
+                .unwrap()
+                .iter()
+                .all(|project| project.id != LEGACY_PROJECT_ID));
+        }
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_import_rejects_existing_project_collisions_without_writes() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-existing", "现有项目");
+
+        assert!(matches!(
+            ledger.import_legacy_batch(LegacyImportBatch {
+                migration_key: "foreign-existing-project".into(),
+                projects: vec![legacy_project("project-existing", "伪造迁移项目")],
+                memories: vec![legacy_memory(Some("project-existing"), "不应写入现有项目")],
+                tasks: vec![legacy_task(Some("project-existing"))],
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+
+        let connection = Connection::open(&path).unwrap();
+        let project_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM secretary_projects", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(project_count, 1);
+        for table in [
+            "secretary_memories",
+            "secretary_tasks",
+            "secretary_legacy_imports",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} should have no import rows");
+        }
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_import_remaps_foreign_record_owners_to_the_hidden_legacy_project() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-existing", "现有项目");
+
+        ledger
+            .import_legacy_batch(LegacyImportBatch {
+                migration_key: "remap-foreign-record-owner".into(),
+                projects: vec![legacy_project("project-imported", "迁移项目")],
+                memories: vec![legacy_memory(Some("project-existing"), "不应归属现有项目")],
+                tasks: vec![legacy_task(Some("project-existing"))],
+            })
+            .unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let memory_owner: String = connection
+            .query_row("SELECT project_id FROM secretary_memories", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let task_owner: String = connection
+            .query_row("SELECT project_id FROM secretary_tasks", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(memory_owner, LEGACY_PROJECT_ID);
+        assert_eq!(task_owner, LEGACY_PROJECT_ID);
+        drop(connection);
+        assert!(ledger
+            .list_projects(true, 20)
+            .unwrap()
+            .iter()
+            .all(|project| project.id != LEGACY_PROJECT_ID));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_import_caps_the_batch_before_any_write() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        let projects = (0..101)
+            .map(|index| legacy_project(&format!("project-{index}"), "过大的迁移项目"))
+            .collect();
+
+        assert!(matches!(
+            ledger.import_legacy_batch(LegacyImportBatch {
+                migration_key: "oversized-legacy-batch".into(),
+                projects,
+                memories: Vec::new(),
+                tasks: Vec::new(),
+            }),
+            Err(LedgerError::InvalidInput)
+        ));
+        let connection = Connection::open(&path).unwrap();
+        for table in [
+            "secretary_projects",
+            "secretary_memories",
+            "secretary_tasks",
+            "secretary_legacy_imports",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} should be empty");
+        }
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_import_rolls_back_after_a_duplicate_memory_insert_attempt() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        let mut first = legacy_memory(Some("project-rollback"), "第一条迁移记录");
+        first.id = Some("duplicate-memory".into());
+        let mut second = legacy_memory(Some("project-rollback"), "第二条迁移记录");
+        second.id = Some("duplicate-memory".into());
+
+        assert!(ledger
+            .import_legacy_batch(LegacyImportBatch {
+                migration_key: "rollback-after-sql-insert".into(),
+                projects: vec![legacy_project("project-rollback", "回滚项目")],
+                memories: vec![first, second],
+                tasks: Vec::new(),
+            })
+            .is_err());
+
+        let connection = Connection::open(&path).unwrap();
+        for table in [
+            "secretary_projects",
+            "secretary_memories",
+            "secretary_tasks",
+            "secretary_legacy_imports",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} should have been rolled back");
+        }
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn imports_a_legacy_batch_once_and_keeps_unowned_records_out_of_project_search() {
         let directory = test_dir();
@@ -2987,6 +3384,26 @@ mod tests {
         let foreign_task = ledger
             .create_task(&project_b, task_input("project-b"))
             .unwrap();
+        ledger
+            .record_event(
+                &project_b,
+                &foreign_task.id,
+                RecordEventInput {
+                    event_type: "receipt".into(),
+                    payload: serde_json::json!({ "summary": "乙项目工具回执" }),
+                },
+            )
+            .unwrap();
+        ledger
+            .save_checkpoint(
+                &project_b,
+                &foreign_task.id,
+                SaveCheckpointInput {
+                    context_snapshot: serde_json::json!({ "summary": "乙项目检查点" }),
+                    next_step: "继续乙项目".into(),
+                },
+            )
+            .unwrap();
 
         assert!(matches!(
             ledger.list_memories(None, 20),
@@ -3024,6 +3441,57 @@ mod tests {
                 .unwrap()
                 .id,
             foreign_memory.id
+        );
+        assert!(ledger
+            .list_memories(Some(&cross_project_a), 20)
+            .unwrap()
+            .iter()
+            .any(|memory| memory.id == foreign_memory.id));
+        assert!(matches!(
+            ledger.create_memory(
+                &cross_project_a,
+                memory_input(MemoryScope::Project, Some("project-b"), "跨项目新增资料"),
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.update_memory(
+                &cross_project_a,
+                &foreign_memory.id,
+                UpdateMemoryInput {
+                    kind: None,
+                    content: Some("跨项目修改".into()),
+                    source: None,
+                    confidence: None,
+                    status: None,
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.rollback_memory(&cross_project_a, &foreign_memory.id, 1),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.delete_memory(&cross_project_a, &foreign_memory.id),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert_eq!(
+            ledger
+                .update_memory(
+                    &cross_project_a,
+                    &personal.id,
+                    UpdateMemoryInput {
+                        kind: None,
+                        content: Some("更新后的个人写作偏好".into()),
+                        source: None,
+                        confidence: None,
+                        status: None,
+                    },
+                )
+                .unwrap()
+                .content,
+            "更新后的个人写作偏好"
         );
 
         assert!(matches!(
@@ -3085,6 +3553,69 @@ mod tests {
             .get_task(&cross_project_a, &foreign_task.id)
             .unwrap()
             .is_some());
+        assert!(ledger
+            .list_tasks(&cross_project_a, 20)
+            .unwrap()
+            .iter()
+            .any(|task| task.id == foreign_task.id));
+        assert_eq!(
+            ledger
+                .list_events(&cross_project_a, &foreign_task.id, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(ledger
+            .load_latest_checkpoint(&cross_project_a, &foreign_task.id)
+            .unwrap()
+            .is_some());
+        assert!(matches!(
+            ledger.create_task(&cross_project_a, task_input("project-b")),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.update_task(
+                &cross_project_a,
+                &foreign_task.id,
+                UpdateTaskInput {
+                    title: None,
+                    request: None,
+                    status: Some("paused".into()),
+                    priority: None,
+                    schedule_at: None,
+                    next_step: None,
+                    public_plan: None,
+                    summary: None,
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.delete_task(&cross_project_a, &foreign_task.id),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.record_event(
+                &cross_project_a,
+                &foreign_task.id,
+                RecordEventInput {
+                    event_type: "receipt".into(),
+                    payload: serde_json::json!({ "summary": "跨项目回执" }),
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.save_checkpoint(
+                &cross_project_a,
+                &foreign_task.id,
+                SaveCheckpointInput {
+                    context_snapshot: serde_json::json!({ "summary": "跨项目检查点" }),
+                    next_step: "越权".into(),
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3206,6 +3737,95 @@ mod tests {
             .unwrap();
         assert_eq!(rejected_memory_fts, 0);
         assert_eq!(accepted_task_fts, 1);
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_unlabelled_sensitive_values_from_every_persistent_record_kind() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let values = [
+            "sk-5rU7mX9qL2vN8cR4yH1dF6pK3sT0wB",
+            "sk-proj-M5Zt8q2Ln9Rvx4Hy7CwDa1Kb6Pf3Qs",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlLWxvbmc",
+            "Qm7pK9xR2vL8nS4dF1hJ6wC3aT5yU0bE",
+            "123456",
+        ];
+
+        for value in values {
+            assert!(matches!(
+                ledger.create_memory(
+                    &project_a,
+                    memory_input(MemoryScope::Project, Some("project-a"), value),
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+            assert!(matches!(
+                ledger.create_task(
+                    &project_a,
+                    CreateTaskInput {
+                        request: value.into(),
+                        ..task_input("project-a")
+                    },
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+        }
+
+        let safe_task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        for value in values {
+            assert!(matches!(
+                ledger.record_event(
+                    &project_a,
+                    &safe_task.id,
+                    RecordEventInput {
+                        event_type: "receipt".into(),
+                        payload: serde_json::json!({ "summary": value }),
+                    },
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+            assert!(matches!(
+                ledger.save_checkpoint(
+                    &project_a,
+                    &safe_task.id,
+                    SaveCheckpointInput {
+                        context_snapshot: serde_json::json!({ "summary": value }),
+                        next_step: "等待确认".into(),
+                    },
+                ),
+                Err(LedgerError::InvalidInput)
+            ));
+        }
+
+        let connection = Connection::open(&path).unwrap();
+        for table in [
+            "secretary_memories",
+            "secretary_task_events",
+            "secretary_task_checkpoints",
+        ] {
+            let rows: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table} must not retain rejected input");
+        }
+        let task_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM secretary_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(task_rows, 1);
+        let fts_rows: i64 = connection
+            .query_row("SELECT COUNT(*) FROM secretary_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fts_rows, 1, "only the safe task may be indexed");
         drop(connection);
 
         fs::remove_dir_all(directory).unwrap();
