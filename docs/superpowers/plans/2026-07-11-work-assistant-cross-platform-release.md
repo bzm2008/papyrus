@@ -494,7 +494,7 @@ Expected: all commands exit 0.
 
 - [x] **Step 2: Trigger Desktop CI after remote-write approval**
 
-The feature branch was pushed and Desktop CI run [29351096131](https://github.com/bzm2008/papyrus/actions/runs/29351096131) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `21b1427176fcee2925263ec141bcbda74c6d353f`. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
+The feature branch was pushed and latest Desktop CI run [29399654442](https://github.com/bzm2008/papyrus/actions/runs/29399654442) passed on Windows, macOS ARM, and Ubuntu 24.04 for remote commit `556a40d8d1254dd1b1a8454fb0db62bd6f24dd3e`. Evidence is recorded in `docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md`.
 
 - [x] **Step 3: Trigger package smoke builds**
 
