@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import * as maintenance from '../services/maintenance'
@@ -103,6 +103,97 @@ async function confirmIndexRebuild() {
 }
 
 describe('MaintenanceConsole global memory clearing', () => {
+  it.each([
+    ['ok', 'tenant=workspace-42; ready', '桌面后端检测通过。'],
+    ['warning', '当前租户将在稍后重新尝试。', '桌面后端检测未完成。'],
+  ] as const)('uses an owned status message for a clean-looking %s probe result', async (status, rawMessage, expectedMessage) => {
+    vi.mocked(maintenance.checkBackendCommunication).mockResolvedValue({ status, message: rawMessage })
+    useAppStore.setState({ maintenanceTab: 'connections' })
+
+    render(<MaintenanceConsole />)
+
+    expect(await screen.findByText(expectedMessage)).toBeInTheDocument()
+    expect(screen.queryByText(rawMessage)).not.toBeInTheDocument()
+  })
+
+  it('issues only one destructive clear while the confirmation is active', async () => {
+    const pendingClear = createDeferred<{
+      status: 'warning'
+      message: string
+    }>()
+    vi.mocked(maintenance.clearGlobalMemory).mockReturnValue(pendingClear.promise)
+    prepareMemoryState()
+
+    render(<MaintenanceConsole />)
+    fireEvent.click(screen.getByRole('button', { name: /清空全局记忆/ }))
+    const confirmButton = screen.getByRole('button', { name: '确认执行' })
+    fireEvent.click(confirmButton)
+
+    expect(confirmButton).toBeDisabled()
+    fireEvent.click(confirmButton)
+    expect(maintenance.clearGlobalMemory).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      pendingClear.resolve({ status: 'warning', message: '清理尚未完成。' })
+      await pendingClear.promise
+    })
+  })
+
+  it('ignores a stale clear completion after its dialog closes and a rebuild dialog opens', async () => {
+    const pendingClear = createDeferred<{
+      status: 'ok'
+      message: string
+      bytes: number
+    }>()
+    vi.mocked(maintenance.clearGlobalMemory).mockReturnValue(pendingClear.promise)
+    prepareMemoryState()
+
+    render(<MaintenanceConsole />)
+    fireEvent.click(screen.getByRole('button', { name: /清空全局记忆/ }))
+    fireEvent.click(screen.getByRole('button', { name: '确认执行' }))
+    await waitFor(() => expect(maintenance.clearGlobalMemory).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    fireEvent.click(screen.getByRole('button', { name: /重建项目索引/ }))
+    expect(screen.getByText('重建项目索引？')).toBeInTheDocument()
+
+    await act(async () => {
+      pendingClear.resolve({ status: 'ok', message: '全局记忆已清空。', bytes: 0 })
+      await pendingClear.promise
+    })
+
+    expect(screen.getByText('重建项目索引？')).toBeInTheDocument()
+    expect(screen.queryByText('全局记忆已清空。')).not.toBeInTheDocument()
+    expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
+    expect(useAppStore.getState().agentRuns).toEqual([run])
+  })
+
+  it('traps confirmation focus and restores it to the trigger after closing', async () => {
+    prepareMemoryState()
+    render(<MaintenanceConsole />)
+    const trigger = screen.getByRole('button', { name: /清空全局记忆/ })
+    trigger.focus()
+    fireEvent.click(trigger)
+
+    const dialog = await screen.findByRole('dialog', { name: '清空全局记忆？' })
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    expect(dialog).toHaveAttribute('aria-describedby')
+
+    const cancelButton = within(dialog).getByRole('button', { name: '取消' })
+    const confirmButton = within(dialog).getByRole('button', { name: '确认执行' })
+    await waitFor(() => expect(cancelButton).toHaveFocus())
+
+    fireEvent.keyDown(cancelButton, { key: 'Tab' })
+    expect(confirmButton).toHaveFocus()
+    fireEvent.keyDown(confirmButton, { key: 'Tab' })
+    expect(cancelButton).toHaveFocus()
+    fireEvent.keyDown(cancelButton, { key: 'Tab', shiftKey: true })
+    expect(confirmButton).toHaveFocus()
+
+    fireEvent.click(cancelButton)
+    await waitFor(() => expect(trigger).toHaveFocus())
+  })
+
   it('does not let an older core success overwrite a newer warning or restore readiness', async () => {
     const firstBackendCheck = createDeferred<{
       status: 'ok'
@@ -167,7 +258,7 @@ describe('MaintenanceConsole global memory clearing', () => {
     render(<MaintenanceConsole />)
     await confirmMemoryClear()
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('秘书账本已清空，旧记忆已隔离但仍待清理。'))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('清理未完整完成，当前本地记忆和运行记录已保留。'))
     expect(clearAgentMemory).not.toHaveBeenCalled()
     expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
     expect(useAppStore.getState().agentRuns).toEqual([run])
@@ -208,7 +299,7 @@ describe('MaintenanceConsole global memory clearing', () => {
     fireEvent.click(screen.getByRole('button', { name: '重新检测' }))
     await waitFor(() => expect(maintenance.getMemoryUsage).toHaveBeenCalledTimes(2))
 
-    expect(screen.getByRole('alert')).toHaveTextContent('最新统计暂不可用。')
+    expect(screen.getByRole('alert')).toHaveTextContent('当前环境未执行本地记忆统计。')
     expect(screen.queryByText('全局记忆已清空。')).not.toBeInTheDocument()
   })
 
@@ -227,7 +318,8 @@ describe('MaintenanceConsole global memory clearing', () => {
 
     render(<MaintenanceConsole />)
 
-    expect((await screen.findAllByText('维护检查未完成。')).length).toBeGreaterThan(0)
+    const expectedMessage = kind.startsWith('model') ? '模型连通性测试未完成。' : '桌面后端检测未完成。'
+    expect(await screen.findByText(expectedMessage)).toBeInTheDocument()
     expect(screen.queryByText(message)).not.toBeInTheDocument()
   })
 
@@ -243,7 +335,7 @@ describe('MaintenanceConsole global memory clearing', () => {
     render(<MaintenanceConsole />)
     await confirmMemoryClear()
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('旧记忆仍在安全隔离区，未删除本地记录。'))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('清理未完成，当前本地记忆和运行记录已保留。'))
     expect(clearAgentMemory).not.toHaveBeenCalled()
     expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
     expect(useAppStore.getState().agentRuns).toEqual([run])

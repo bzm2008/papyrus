@@ -86,15 +86,38 @@ describe('MaintenanceConsole browser clear fallback', () => {
     expect(sqlite.status).toBe('warning')
 
     render(<MaintenanceConsole />)
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('health_check_backend'))
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('check_sqlite_status'))
+    await screen.findByRole('alert')
+    expect(invoke).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: '进入 Papyrus' })).toBeDisabled()
+  })
+
+  it('does not accept a resolving browser bridge shim as readiness or a destructive clear', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      status: 'ok',
+      message: '桌面后端检测通过。',
+      bytes: 0,
+    })
+    const clearAgentMemory = vi.spyOn(useAppStore.getState(), 'clearAgentMemory')
+
+    render(<MaintenanceConsole />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('当前环境未执行本地记忆统计。')
+    expect(invoke).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: '进入 Papyrus' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: /清空全局记忆/ }))
+    fireEvent.click(screen.getByRole('button', { name: '确认执行' }))
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('清理未完整完成，当前本地记忆和运行记录已保留。'))
+    expect(clearAgentMemory).not.toHaveBeenCalled()
+    expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
+    expect(useAppStore.getState().agentRuns).toEqual([run])
   })
 
   it('returns a non-executed memory usage warning without a byte count', async () => {
     const result = await getMemoryUsage()
 
-    expect(invoke).toHaveBeenCalledWith('get_memory_usage')
+    expect(invoke).not.toHaveBeenCalled()
     expect(result).toMatchObject({ status: 'warning', message: '当前环境未执行本地记忆统计。' })
     expect(result.bytes).toBeUndefined()
   })
@@ -102,7 +125,6 @@ describe('MaintenanceConsole browser clear fallback', () => {
   it('keeps persisted usage and renders a safe warning when browser memory usage cannot be read', async () => {
     render(<MaintenanceConsole />)
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('get_memory_usage'))
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('当前环境未执行本地记忆统计。')
     expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
@@ -111,7 +133,7 @@ describe('MaintenanceConsole browser clear fallback', () => {
   it('returns a non-executed warning without a usage byte count', async () => {
     const result = await clearGlobalMemory()
 
-    expect(invoke).toHaveBeenCalledWith('clear_global_memory')
+    expect(invoke).not.toHaveBeenCalled()
     expect(result).toMatchObject({ status: 'warning', message: '当前环境未执行本地记忆清理。' })
     expect(result.bytes).toBeUndefined()
   })
@@ -123,9 +145,8 @@ describe('MaintenanceConsole browser clear fallback', () => {
     fireEvent.click(screen.getByRole('button', { name: /清空全局记忆/ }))
     fireEvent.click(screen.getByRole('button', { name: '确认执行' }))
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('clear_global_memory'))
     const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('当前环境未执行本地记忆清理。')
+    expect(alert).toHaveTextContent('清理未完整完成，当前本地记忆和运行记录已保留。')
     expect(clearAgentMemory).not.toHaveBeenCalled()
     expect(useAppStore.getState().agentMemoryRecords).toEqual([memory])
     expect(useAppStore.getState().agentRuns).toEqual([run])
@@ -137,8 +158,7 @@ describe('MaintenanceConsole browser clear fallback', () => {
     fireEvent.click(screen.getByRole('button', { name: /重建项目索引/ }))
     fireEvent.click(screen.getByRole('button', { name: '确认执行' }))
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('rebuild_project_index'))
-    expect(await screen.findByText('项目索引任务已加入预留队列，真实向量库接入后会执行重建。')).toBeInTheDocument()
+    expect(await screen.findByText('项目索引重建尚未完成，当前资料和记忆已保留。')).toBeInTheDocument()
     expect(screen.getByText('重建项目索引？')).toBeInTheDocument()
     expect(useAppStore.getState().memoryUsageBytes).toBe(1024)
   })

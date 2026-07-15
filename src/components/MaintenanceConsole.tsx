@@ -18,7 +18,7 @@ import {
   TriangleAlert,
   UserRound,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   checkBackendCommunication,
   checkDefaultModelLatency,
@@ -26,7 +26,6 @@ import {
   clearGlobalMemory,
   getMemoryUsage,
   rebuildProjectIndex,
-  safeMaintenanceMessage,
   testModelConnection,
   type MaintenanceProbeResult,
 } from '../services/maintenance'
@@ -69,16 +68,23 @@ type MemoryClearNotice = {
   message: string
 }
 
+type DangerAction = 'clear' | 'rebuild'
+
 export function MaintenanceConsole() {
   const [checkingAll, setCheckingAll] = useState(false)
   const [testingProviderId, setTestingProviderId] = useState<ProviderId | null>(null)
-  const [confirmAction, setConfirmAction] = useState<'clear' | 'rebuild' | null>(null)
+  const [confirmAction, setConfirmAction] = useState<DangerAction | null>(null)
   const [memoryClearNotice, setMemoryClearNotice] = useState<MemoryClearNotice | null>(null)
   const [memoryUsageNotice, setMemoryUsageNotice] = useState<MemoryClearNotice | null>(null)
+  const [activeDangerOperation, setActiveDangerOperation] = useState<DangerAction | null>(null)
   const checkGenerationsRef = useRef<Record<MaintenanceCheckId, number>>({ tauri: 0, sqlite: 0, llm: 0 })
   const memoryUsageGenerationRef = useRef(0)
   const allChecksGenerationRef = useRef(0)
   const modelTestGenerationRef = useRef(0)
+  const dangerDialogGenerationRef = useRef(0)
+  const dangerOperationGenerationRef = useRef(0)
+  const activeDangerOperationRef = useRef(false)
+  const dangerTriggerRef = useRef<HTMLElement | null>(null)
   const maintenanceTab = useAppStore((state) => state.maintenanceTab)
   const setMaintenanceTab = useAppStore((state) => state.setMaintenanceTab)
   const maintenanceChecks = useAppStore((state) => state.maintenanceChecks)
@@ -159,10 +165,7 @@ export function MaintenanceConsole() {
 
       setMaintenanceCheck(id, {
         status: result.status,
-        message:
-          result.status === 'error'
-            ? '维护检查未完成。'
-            : safeMaintenanceMessage(result.message, '维护检查未完成。'),
+        message: maintenanceCheckMessage(id, result.status),
         latencyMs: result.latencyMs,
       })
     } catch {
@@ -244,10 +247,7 @@ export function MaintenanceConsole() {
 
       setMaintenanceCheck('llm', {
         status: result.status,
-        message:
-          result.status === 'error'
-            ? '模型连通性测试未完成。'
-            : safeMaintenanceMessage(result.message, '模型连通性测试未完成。'),
+        message: maintenanceCheckMessage('llm', result.status),
         latencyMs: result.latencyMs,
       })
     } catch {
@@ -266,14 +266,46 @@ export function MaintenanceConsole() {
     }
   }
 
+  const openDangerDialog = (action: DangerAction) => {
+    dangerDialogGenerationRef.current += 1
+    dangerTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setMemoryClearNotice(null)
+    setConfirmAction(action)
+  }
+
+  const closeDangerDialog = () => {
+    const generation = ++dangerDialogGenerationRef.current
+    const trigger = dangerTriggerRef.current
+    setConfirmAction(null)
+
+    window.setTimeout(() => {
+      if (dangerDialogGenerationRef.current === generation && trigger?.isConnected) {
+        trigger.focus()
+      }
+    }, 0)
+  }
+
   const handleConfirmDanger = async () => {
-    if (!confirmAction) {
+    const action = confirmAction
+    if (!action || activeDangerOperationRef.current) {
       return
     }
 
-    if (confirmAction === 'clear') {
-      try {
+    const dialogGeneration = dangerDialogGenerationRef.current
+    const operationGeneration = ++dangerOperationGenerationRef.current
+    activeDangerOperationRef.current = true
+    setActiveDangerOperation(action)
+    const isCurrentOperation = () =>
+      dangerOperationGenerationRef.current === operationGeneration &&
+      dangerDialogGenerationRef.current === dialogGeneration
+
+    try {
+      if (action === 'clear') {
         const result = await clearGlobalMemory()
+        if (!isCurrentOperation()) {
+          return
+        }
+
         const notice = toMemoryClearNotice(result)
         if (notice.status === 'ok') {
           if (typeof result.bytes === 'number') {
@@ -282,20 +314,15 @@ export function MaintenanceConsole() {
           clearAgentMemory()
         }
         setMemoryClearNotice(notice)
-      } catch {
-        setMemoryClearNotice({
-          status: 'error',
-          title: '清理失败',
-          message: '清理未完成，当前本地记忆和运行记录已保留。',
-        })
+        closeDangerDialog()
+        return
       }
 
-      setConfirmAction(null)
-      return
-    }
-
-    try {
       const result = await rebuildProjectIndex()
+      if (!isCurrentOperation()) {
+        return
+      }
+
       const notice = toProjectIndexRebuildNotice(result)
       setMemoryClearNotice(notice)
 
@@ -303,14 +330,33 @@ export function MaintenanceConsole() {
         if (typeof result.bytes === 'number') {
           setMemoryUsageBytes(result.bytes)
         }
-        setConfirmAction(null)
+        closeDangerDialog()
       }
     } catch {
+      if (!isCurrentOperation()) {
+        return
+      }
+
+      if (action === 'clear') {
+        setMemoryClearNotice({
+          status: 'error',
+          title: '清理失败',
+          message: '清理未完成，当前本地记忆和运行记录已保留。',
+        })
+        closeDangerDialog()
+        return
+      }
+
       setMemoryClearNotice({
         status: 'error',
         title: '索引重建失败',
         message: '项目索引重建未完成，当前资料和记忆已保留。',
       })
+    } finally {
+      if (dangerOperationGenerationRef.current === operationGeneration) {
+        activeDangerOperationRef.current = false
+        setActiveDangerOperation(null)
+      }
     }
   }
 
@@ -329,6 +375,9 @@ export function MaintenanceConsole() {
     const memoryUsageGeneration = memoryUsageGenerationRef
     const allChecksGeneration = allChecksGenerationRef
     const modelTestGeneration = modelTestGenerationRef
+    const dangerDialogGeneration = dangerDialogGenerationRef
+    const dangerOperationGeneration = dangerOperationGenerationRef
+    const activeDangerOperation = activeDangerOperationRef
 
     return () => {
       for (const id of ['tauri', 'sqlite', 'llm'] as const) {
@@ -337,6 +386,9 @@ export function MaintenanceConsole() {
       memoryUsageGeneration.current += 1
       allChecksGeneration.current += 1
       modelTestGeneration.current += 1
+      dangerDialogGeneration.current += 1
+      dangerOperationGeneration.current += 1
+      activeDangerOperation.current = false
     }
   }, [])
 
@@ -460,14 +512,8 @@ export function MaintenanceConsole() {
                 agentRuns={agentRuns}
                 memoryClearNotice={confirmAction === 'rebuild' ? null : memoryClearNotice}
                 memoryUsageNotice={memoryUsageNotice}
-                onClear={() => {
-                  setMemoryClearNotice(null)
-                  setConfirmAction('clear')
-                }}
-                onRebuild={() => {
-                  setMemoryClearNotice(null)
-                  setConfirmAction('rebuild')
-                }}
+                onClear={() => openDangerDialog('clear')}
+                onRebuild={() => openDangerDialog('rebuild')}
               />
             ) : null}
           </motion.div>
@@ -477,7 +523,8 @@ export function MaintenanceConsole() {
       <ConfirmDangerDialog
         action={confirmAction}
         notice={confirmAction === 'rebuild' ? memoryClearNotice : null}
-        onCancel={() => setConfirmAction(null)}
+        isOperating={Boolean(activeDangerOperation)}
+        onCancel={closeDangerDialog}
         onConfirm={handleConfirmDanger}
       />
     </div>
@@ -1070,7 +1117,7 @@ function MemoryList({
 
 function StatusRow({ check }: { check: MaintenanceCheck }) {
   const status = statusTheme(check.status)
-  const message = safeMaintenanceMessage(check.message, '维护检查未完成。')
+  const message = maintenanceCheckMessage(check.id, check.status)
 
   return (
     <div className="flex items-center justify-between gap-4 rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_8px_24px_rgba(43,34,19,0.04)]">
@@ -1091,6 +1138,35 @@ function StatusRow({ check }: { check: MaintenanceCheck }) {
       </div>
     </div>
   )
+}
+
+function maintenanceCheckMessage(id: MaintenanceCheckId, status: MaintenanceCheck['status']) {
+  if (status === 'idle') {
+    return '等待检测。'
+  }
+  if (status === 'checking') {
+    return '正在检测...'
+  }
+
+  if (status === 'ok') {
+    switch (id) {
+      case 'tauri':
+        return '桌面后端检测通过。'
+      case 'sqlite':
+        return '本地存储检测通过。'
+      case 'llm':
+        return '模型连通性检测通过。'
+    }
+  }
+
+  switch (id) {
+    case 'tauri':
+      return '桌面后端检测未完成。'
+    case 'sqlite':
+      return '本地存储检测未完成。'
+    case 'llm':
+      return '模型连通性测试未完成。'
+  }
 }
 
 function PanelHeading({
@@ -1206,14 +1282,20 @@ function DangerButton({
 function ConfirmDangerDialog({
   action,
   notice,
+  isOperating,
   onCancel,
   onConfirm,
 }: {
-  action: 'clear' | 'rebuild' | null
+  action: DangerAction | null
   notice: MemoryClearNotice | null
+  isOperating: boolean
   onCancel: () => void
   onConfirm: () => Promise<void>
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const cancelButtonRef = useRef<HTMLButtonElement>(null)
+  const titleId = useId()
+  const descriptionId = useId()
   const copy =
     action === 'clear'
       ? {
@@ -1225,6 +1307,32 @@ function ConfirmDangerDialog({
           body: '系统会重新扫描项目材料，并覆盖旧的索引缓存。',
         }
 
+  useEffect(() => {
+    if (action) {
+      cancelButtonRef.current?.focus()
+    }
+  }, [action])
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') {
+      return
+    }
+
+    const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
+    if (!focusable.length) {
+      return
+    }
+
+    const activeElement = document.activeElement
+    const currentIndex = focusable.indexOf(activeElement as HTMLButtonElement)
+    const nextIndex = event.shiftKey
+      ? currentIndex <= 0 ? focusable.length - 1 : currentIndex - 1
+      : currentIndex < 0 || currentIndex === focusable.length - 1 ? 0 : currentIndex + 1
+
+    event.preventDefault()
+    focusable[nextIndex].focus()
+  }
+
   return (
     <AnimatePresence>
       {action ? (
@@ -1235,6 +1343,14 @@ function ConfirmDangerDialog({
           exit={{ opacity: 0 }}
         >
           <motion.div
+            ref={dialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-busy={isOperating}
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId}
+            tabIndex={-1}
+            onKeyDown={handleKeyDown}
             className="w-full max-w-sm rounded-2xl border border-[#e8ddc7] bg-[#fffefa] p-5 shadow-[0_24px_70px_rgba(43,34,19,0.18)]"
             initial={{ opacity: 0, y: 12, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -1245,13 +1361,14 @@ function ConfirmDangerDialog({
                 <ShieldAlert size={19} />
               </div>
               <div>
-                <div className="text-base font-semibold text-[#171714]">{copy.title}</div>
-                <p className="mt-1 text-sm leading-6 text-[#7d7a70]">{copy.body}</p>
+                <div id={titleId} className="text-base font-semibold text-[#171714]">{copy.title}</div>
+                <p id={descriptionId} className="mt-1 text-sm leading-6 text-[#7d7a70]">{copy.body}</p>
               </div>
             </div>
             {action === 'rebuild' && notice && notice.status !== 'ok' ? <MemoryClearStatus notice={notice} /> : null}
             <div className="mt-5 flex justify-end gap-2">
               <button
+                ref={cancelButtonRef}
                 type="button"
                 onClick={onCancel}
                 className="h-9 rounded-lg border border-[#e8ddc7] bg-[#fffefa] px-3 text-sm text-[#5f6159] transition hover:text-[#171714]"
@@ -1261,9 +1378,10 @@ function ConfirmDangerDialog({
               <button
                 type="button"
                 onClick={() => void onConfirm()}
+                disabled={isOperating}
                 className="h-9 rounded-lg bg-[#a34e38] px-3 text-sm font-medium text-white transition hover:bg-[#8e3f2d]"
               >
-                确认执行
+                {isOperating ? '正在执行' : '确认执行'}
               </button>
             </div>
           </motion.div>
@@ -1304,19 +1422,19 @@ function toMemoryClearNotice(result: MaintenanceProbeResult): MemoryClearNotice 
       return {
         status: 'ok',
         title: '记忆已清空',
-        message: safeMaintenanceMessage(result.message, '全局记忆已清空。'),
+        message: '全局记忆已清空。',
       }
     case 'warning':
       return {
         status: 'warning',
         title: '清理未完成',
-        message: safeMaintenanceMessage(result.message, '清理未完整完成，当前本地记忆和运行记录已保留。'),
+        message: '清理未完整完成，当前本地记忆和运行记录已保留。',
       }
     case 'error':
       return {
         status: 'error',
         title: '清理失败',
-        message: safeMaintenanceMessage(result.message, '清理未完成，当前本地记忆和运行记录已保留。'),
+        message: '清理未完成，当前本地记忆和运行记录已保留。',
       }
   }
 }
@@ -1327,19 +1445,19 @@ function toProjectIndexRebuildNotice(result: MaintenanceProbeResult): MemoryClea
       return {
         status: 'ok',
         title: '项目索引已重建',
-        message: safeMaintenanceMessage(result.message, '项目索引已重建。'),
+        message: '项目索引已重建。',
       }
     case 'warning':
       return {
         status: 'warning',
         title: '索引重建未完成',
-        message: safeMaintenanceMessage(result.message, '项目索引重建尚未完成，当前资料和记忆已保留。'),
+        message: '项目索引重建尚未完成，当前资料和记忆已保留。',
       }
     case 'error':
       return {
         status: 'error',
         title: '索引重建失败',
-        message: safeMaintenanceMessage(result.message, '项目索引重建未完成，当前资料和记忆已保留。'),
+        message: '项目索引重建未完成，当前资料和记忆已保留。',
       }
   }
 }
@@ -1354,7 +1472,7 @@ function toMemoryUsageNotice(result: MaintenanceProbeResult): MemoryClearNotice 
   return {
     status,
     title: status === 'error' ? '存储统计失败' : '存储统计未执行',
-    message: safeMaintenanceMessage(result.message, fallback),
+    message: fallback,
   }
 }
 

@@ -75,7 +75,7 @@ describe('MaintenanceConsole native maintenance integration', () => {
 
     render(<MaintenanceConsole />)
 
-    expect(await screen.findByText('维护检查未完成。')).toBeInTheDocument()
+    expect(await screen.findByText('桌面后端检测未完成。')).toBeInTheDocument()
     expect(screen.queryByText('tenant=workspace-42; retry later')).not.toBeInTheDocument()
   })
 })

@@ -14,13 +14,25 @@ export type MaintenanceProbeResult = {
   bytes?: number
 }
 
-type NativeMaintenancePayload = {
-  status?: MaintenanceProbeResult['status']
-  message?: string
+type NativeMaintenanceCommand =
+  | 'health_check_backend'
+  | 'check_sqlite_status'
+  | 'test_model_connection'
+  | 'get_memory_usage'
+  | 'clear_global_memory'
+  | 'rebuild_project_index'
+
+type NativeMaintenanceStatus = MaintenanceProbeResult['status']
+
+type ValidatedNativeMaintenancePayload = {
+  status: NativeMaintenanceStatus
   latencyMs?: number
-  latency_ms?: number
   bytes?: number
 }
+
+const MAX_NATIVE_LATENCY_MS = 120_000
+const MAX_NATIVE_BYTES = 1_099_511_627_776
+const invalidNumericField = Symbol('invalidNumericField')
 
 const previewResults: Record<MaintenanceCheckId, MaintenanceProbeResult> = {
   tauri: {
@@ -56,10 +68,10 @@ export async function checkDefaultModelLatency(provider: LlmProviderConfig) {
   if (!isTauriRuntime()) {
     try {
       return await testModelConnectionInBrowser(provider)
-    } catch (error) {
+    } catch {
       return {
         status: 'error',
-        message: errorToMessage(error, '浏览器预览模式下模型测试失败。'),
+        message: '浏览器预览模式下模型测试失败。',
       } satisfies MaintenanceProbeResult
     }
   }
@@ -111,28 +123,29 @@ export async function rebuildProjectIndex() {
 }
 
 async function invokeMaintenance(
-  command: string,
+  command: NativeMaintenanceCommand,
   args: Record<string, unknown> | undefined,
   fallback:
     | MaintenanceProbeResult
     | (() => Promise<MaintenanceProbeResult>)
     | (() => MaintenanceProbeResult),
 ) {
+  if (!isTauriRuntime()) {
+    try {
+      return typeof fallback === 'function' ? await fallback() : fallback
+    } catch {
+      return maintenanceFailureResult(command)
+    }
+  }
+
   try {
     const payload = args
-      ? await invoke<NativeMaintenancePayload>(command, args)
-      : await invoke<NativeMaintenancePayload>(command)
+      ? await invoke<unknown>(command, args)
+      : await invoke<unknown>(command)
 
     return normalizeNativePayload(payload, command)
-  } catch (error) {
-    if (!isTauriRuntime()) {
-      return typeof fallback === 'function' ? await fallback() : fallback
-    }
-
-    return {
-      status: 'error',
-      message: errorToMessage(error, maintenanceFailureMessage(command)),
-    } satisfies MaintenanceProbeResult
+  } catch {
+    return maintenanceFailureResult(command)
   }
 }
 
@@ -165,17 +178,17 @@ async function testModelConnectionInBrowser(provider: LlmProviderConfig) {
   } satisfies MaintenanceProbeResult
 }
 
-function normalizeNativePayload(payload: NativeMaintenancePayload, command: string): MaintenanceProbeResult {
-  const status = payload.status ?? 'warning'
+function normalizeNativePayload(payload: unknown, command: NativeMaintenanceCommand): MaintenanceProbeResult {
+  const validated = validateNativeMaintenancePayload(payload)
+  if (!validated) {
+    return maintenanceFailureResult(command)
+  }
 
   return {
-    status,
-    message:
-      status === 'error'
-        ? maintenanceFailureMessage(command)
-        : safeMaintenanceMessage(payload.message, status === 'ok' ? '检测已完成。' : maintenanceFailureMessage(command)),
-    latencyMs: payload.latencyMs ?? payload.latency_ms,
-    bytes: payload.bytes,
+    status: validated.status,
+    message: maintenanceResultMessage(command, validated.status),
+    latencyMs: validated.latencyMs,
+    bytes: validated.bytes,
   }
 }
 
@@ -186,30 +199,87 @@ function isTauriRuntime() {
   )
 }
 
-function errorToMessage(_error: unknown, fallback: string) {
-  // Rejected bridge values are untrusted and can contain upstream or local details.
-  return fallback
+function validateNativeMaintenancePayload(payload: unknown): ValidatedNativeMaintenancePayload | null {
+  if (!isRecord(payload) || !isNativeMaintenanceStatus(payload.status)) {
+    return null
+  }
+
+  const latencyMs = readBoundedNumericField(payload, ['latencyMs', 'latency_ms'], MAX_NATIVE_LATENCY_MS)
+  const bytes = readBoundedNumericField(payload, ['bytes'], MAX_NATIVE_BYTES)
+  if (latencyMs === invalidNumericField || bytes === invalidNumericField) {
+    return null
+  }
+
+  return {
+    status: payload.status,
+    latencyMs,
+    bytes,
+  }
 }
 
-export function safeMaintenanceMessage(value: unknown, fallback: string) {
-  const message = typeof value === 'string' ? value : ''
-  const normalized = message.replace(/\s+/g, ' ').trim()
-
-  return normalized && normalized.length <= 240 && !hasUnsafeMaintenanceDetail(normalized) ? normalized : fallback
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function hasUnsafeMaintenanceDetail(message: string) {
-  return [
-    /(?:^|[^a-z])[a-z]:[\\/]/i,
-    /(?:^|[^\w/]|_)\/[\w.-]+(?:\/[\w.-]+)*/,
-    /\\\\[^\\/\s]+[\\/][^\\/\s]+/,
-    /\bfile:(?:\/\/|\\\\)/i,
-    /\b(?:[\w$]*error|exception|fatal|panic|stack(?:\s+trace)?|traceback|backtrace|unhandled(?:\s+rejection)?|permission denied|access denied|os error|errno)\b/i,
-    /(?:^|\s)at\s+\S+/i,
-  ].some((pattern) => pattern.test(message))
+function isNativeMaintenanceStatus(value: unknown): value is NativeMaintenanceStatus {
+  return value === 'ok' || value === 'warning' || value === 'error'
 }
 
-function maintenanceFailureMessage(command: string) {
+function readBoundedNumericField(
+  payload: Record<string, unknown>,
+  keys: string[],
+  maximum: number,
+): number | undefined | typeof invalidNumericField {
+  const values = keys
+    .filter((key) => Object.prototype.hasOwnProperty.call(payload, key))
+    .map((key) => payload[key])
+    // Rust Option fields are serialized as JSON null when they are absent.
+    .filter((value) => value !== null)
+  if (!values.length) {
+    return undefined
+  }
+
+  if (
+    values.some((value) =>
+      typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > maximum,
+    ) ||
+    (values.length > 1 && values.some((value) => value !== values[0]))
+  ) {
+    return invalidNumericField
+  }
+
+  return values[0] as number
+}
+
+function maintenanceFailureResult(command: NativeMaintenanceCommand): MaintenanceProbeResult {
+  return {
+    status: 'error',
+    message: maintenanceFailureMessage(command),
+  }
+}
+
+function maintenanceResultMessage(command: NativeMaintenanceCommand, status: NativeMaintenanceStatus) {
+  if (status !== 'ok') {
+    return maintenanceFailureMessage(command)
+  }
+
+  switch (command) {
+    case 'health_check_backend':
+      return '桌面后端检测通过。'
+    case 'check_sqlite_status':
+      return '本地存储检测通过。'
+    case 'test_model_connection':
+      return '模型连通性检测通过。'
+    case 'get_memory_usage':
+      return '本地记忆统计完成。'
+    case 'clear_global_memory':
+      return '本地记忆已清理。'
+    case 'rebuild_project_index':
+      return '项目索引已重建。'
+  }
+}
+
+function maintenanceFailureMessage(command: NativeMaintenanceCommand) {
   switch (command) {
     case 'health_check_backend':
       return '桌面后端检测未完成。'

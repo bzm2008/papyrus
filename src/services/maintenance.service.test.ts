@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { checkBackendCommunication, checkSqliteStatus } from './maintenance'
+import { checkBackendCommunication, checkSqliteStatus, getMemoryUsage } from './maintenance'
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
@@ -20,6 +20,26 @@ afterEach(() => {
 })
 
 describe('maintenance service safety', () => {
+  it('does not call a resolving bridge shim outside a Tauri runtime', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      status: 'ok',
+      message: '桌面后端检测通过。',
+      bytes: 0,
+    })
+
+    const [backend, sqlite, memoryUsage] = await Promise.all([
+      checkBackendCommunication(),
+      checkSqliteStatus(),
+      getMemoryUsage(),
+    ])
+
+    expect(invoke).not.toHaveBeenCalled()
+    expect(backend).toMatchObject({ status: 'warning', message: '当前环境未执行桌面后端检测。' })
+    expect(sqlite).toMatchObject({ status: 'warning', message: '当前环境未执行本地存储检测。' })
+    expect(memoryUsage).toMatchObject({ status: 'warning', message: '当前环境未执行本地记忆统计。' })
+    expect(memoryUsage.bytes).toBeUndefined()
+  })
+
   it('does not fabricate native core readiness without a bridge', async () => {
     const [backend, sqlite] = await Promise.all([checkBackendCommunication(), checkSqliteStatus()])
 
@@ -71,5 +91,51 @@ describe('maintenance service safety', () => {
     const result = await checkSqliteStatus()
 
     expect(result).toMatchObject({ status: 'error', message: '本地存储检测未完成。' })
+  })
+
+  it.each([
+    ['ok', 'tenant=workspace-42; retry later', '桌面后端检测通过。'],
+    ['warning', '当前租户的上游维护窗口即将开始。', '桌面后端检测未完成。'],
+  ] as const)('uses an owned message for clean-looking native %s payloads', async (status, rawMessage, expectedMessage) => {
+    setTauriRuntime({})
+    vi.mocked(invoke).mockResolvedValue({ status, message: rawMessage })
+
+    const result = await checkBackendCommunication()
+
+    expect(result).toMatchObject({ status, message: expectedMessage })
+    expect(result.message).not.toContain(rawMessage)
+  })
+
+  it('accepts null optional fields from a native MaintenanceStatus payload', async () => {
+    setTauriRuntime({})
+    vi.mocked(invoke).mockResolvedValue({
+      status: 'ok',
+      message: 'Tauri 后端通信正常',
+      latencyMs: 0,
+      bytes: null,
+    })
+
+    const result = await checkBackendCommunication()
+
+    expect(result).toEqual({
+      status: 'ok',
+      message: '桌面后端检测通过。',
+      latencyMs: 0,
+      bytes: undefined,
+    })
+  })
+
+  it('rejects a native payload with an unbounded numeric field', async () => {
+    setTauriRuntime({})
+    vi.mocked(invoke).mockResolvedValue({
+      status: 'ok',
+      message: '桌面后端检测通过。',
+      latency_ms: Number.POSITIVE_INFINITY,
+    })
+
+    const result = await checkBackendCommunication()
+
+    expect(result).toMatchObject({ status: 'error', message: '桌面后端检测未完成。' })
+    expect(result.latencyMs).toBeUndefined()
   })
 })
