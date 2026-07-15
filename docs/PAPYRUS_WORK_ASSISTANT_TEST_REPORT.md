@@ -64,6 +64,7 @@ Windows 代码签名、macOS 签名与 notarization、Linux 仓库签名以及 T
 - `cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check`：通过。
 - `npm run tauri:check:portable`：Windows MSVC portable check 通过。
 - `npm run browser:package`：生成 5 个运行时文件的 `Papyrus-Browser-Bridge_0.1.2.zip`。
+- 本机 Windows unsigned NSIS smoke：两次隔离 target（含单线程 Cargo）均在 MSVC `link.exe` 关闭临时 DLL/build-script 文件时返回 `LNK1105` / Windows 错误 1224；未生成可验证安装包。GitHub Windows portable CI 对同一提交通过，package smoke 仍以远程 workflow artifact 为准。
 - `npm run test:release-scripts`：11 项通过，覆盖缺失 workflow 语义步骤、checkout SHA/产物命名、脚本 gate、CSP、命令白名单和扩展权限失败场景。
 - `npm run wps:build`：WPS 插件 TypeScript、Vite 生产构建和 legacy 入口准备通过。
 - Browser Bridge security：覆盖私网重定向/注入 DNS、受限字段、隐藏控件、跨源 tab、wrong-tab、stale snapshot、伪造/重放审批、超大消息和 token 单次使用。
