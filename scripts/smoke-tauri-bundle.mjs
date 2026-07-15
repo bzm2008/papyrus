@@ -309,7 +309,7 @@ export async function runBundleSmoke(options) {
     : platform === 'darwin'
       ? smokeMac
       : smokeLinux
-  const result = await smoke(options.bundleDir, options.outputDir, options.graceMs, env)
+  const result = await smoke(options.bundleDir, options.outputDir, options.graceMs)
   const summary = { status: 'pass', platform, bundleDir: options.bundleDir, ...result }
   await fs.writeFile(path.join(options.outputDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`)
   return summary
