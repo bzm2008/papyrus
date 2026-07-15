@@ -190,7 +190,10 @@ async function observeProcess(command, args, options) {
     env: options.env,
     detached: false,
     windowsHide: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // GUI wrappers such as xvfb-run and dbus-run-session can outlive the
+    // application and keep inherited pipes open. The smoke only needs process
+    // liveness, so ignore launch output to guarantee deterministic cleanup.
+    stdio: ['ignore', 'ignore', 'ignore'],
   })
   let stdout = ''
   let stderr = ''
