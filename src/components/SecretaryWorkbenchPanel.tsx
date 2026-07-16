@@ -16,14 +16,17 @@ import {
 import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { formatChangeStat } from '../services/documentChangeStatsService'
+import { getAgentSamplingProfile, type AgentSamplingPhase } from '../services/agentSamplingService'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import {
   type AgentStep,
   type AgentTodo,
   type FlowTrace,
+  type GoalCheckpoint,
   type LlmRunState,
   useAppStore,
 } from '../stores/useAppStore'
+import type { AssistantApprovalChoice, AssistantApprovalRequest, WorkAssistantRun } from '../services/workAssistantProtocol'
 
 export type WorkbenchView = 'run' | 'files' | 'browser' | 'manuscript'
 
@@ -41,6 +44,9 @@ type WorkbenchProps = {
   files: ReactNode
   browser?: ReactNode
   changeStat?: ReturnType<typeof useAppStore.getState>['documentChangeStats'][number]
+  workAssistantRun?: WorkAssistantRun
+  checkpoints?: GoalCheckpoint[]
+  onApprove?: (approvalId: string, choice: AssistantApprovalChoice) => void
 }
 
 type ExecutionReceiptProps = {
@@ -102,11 +108,14 @@ export function SecretaryWorkbenchPanel({
   files,
   browser,
   changeStat,
+  workAssistantRun,
+  checkpoints = [],
+  onApprove,
 }: WorkbenchProps) {
   const snapshot = useWorkbenchSnapshot(todos, steps, traces, changeStat)
   const desktopPlacement = pinned
-    ? 'lg:static lg:inset-auto lg:z-auto lg:h-auto lg:w-[348px] lg:rounded-none lg:border-y-0 lg:border-r-0 lg:shadow-[inset_1px_0_0_rgba(255,255,255,0.72)]'
-    : 'lg:fixed lg:inset-y-3 lg:left-auto lg:right-3 lg:z-40 lg:h-auto lg:w-[348px] lg:rounded-2xl lg:border lg:shadow-[0_24px_80px_rgba(43,34,19,0.18)]'
+    ? 'xl:static xl:inset-auto xl:z-auto xl:h-auto xl:w-[348px] xl:rounded-none xl:border-y-0 xl:border-r-0 xl:shadow-[inset_1px_0_0_rgba(255,255,255,0.72)]'
+    : 'xl:fixed xl:inset-y-3 xl:left-auto xl:right-3 xl:z-40 xl:h-auto xl:w-[348px] xl:rounded-2xl xl:border xl:shadow-[0_24px_80px_rgba(43,34,19,0.18)]'
 
   return (
     <motion.aside
@@ -115,7 +124,7 @@ export function SecretaryWorkbenchPanel({
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 18 }}
       transition={{ type: 'spring', stiffness: 420, damping: 42, mass: 0.8 }}
-      className={`fixed inset-x-3 bottom-3 z-40 h-[70vh] min-h-0 w-[calc(100vw-1.5rem)] shrink-0 overflow-hidden rounded-2xl border border-[#e1dccf] bg-[#fffefa]/86 shadow-[0_24px_80px_rgba(43,34,19,0.18)] backdrop-blur-xl ${desktopPlacement}`}
+      className={`fixed inset-x-3 bottom-3 z-40 h-[70vh] min-h-0 w-[calc(100vw-1.5rem)] shrink-0 overflow-hidden rounded-2xl border border-[#e1dccf] bg-[#fffefa]/86 shadow-[0_24px_80px_rgba(43,34,19,0.18)] backdrop-blur-xl md:inset-x-auto md:inset-y-3 md:right-3 md:h-auto md:w-[348px] ${desktopPlacement}`}
     >
       <div className="flex h-full min-h-0 flex-col">
         <header className="papyrus-toolbar flex h-11 shrink-0 items-center gap-2 border-b px-3">
@@ -176,7 +185,7 @@ export function SecretaryWorkbenchPanel({
             type="button"
             title={pinned ? '任务结束后自动收起' : '固定工作台'}
             onClick={() => onPinnedChange(!pinned)}
-            className={`papyrus-icon-button size-7 rounded-md ${pinned ? 'text-[#315d39]' : ''}`}
+            className={`papyrus-icon-button hidden size-7 rounded-md xl:grid ${pinned ? 'text-[#315d39]' : ''}`}
           >
             {pinned ? <PinOff size={13} /> : <Pin size={13} />}
           </button>
@@ -201,10 +210,15 @@ export function SecretaryWorkbenchPanel({
                 transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
                 className="papyrus-scrollbar flex h-full min-h-0 flex-col overflow-y-auto px-3 py-3 [scrollbar-gutter:stable]"
               >
+                <WorkbenchSafetyPanel
+                  run={workAssistantRun}
+                  checkpoints={checkpoints}
+                  onApprove={onApprove}
+                />
                 <WorkbenchTodoList todos={todos} />
                 <ToolCallCapsules items={snapshot.tools} />
                 <AgentActivityList activities={snapshot.agents} />
-                <ExecutionSummary snapshot={snapshot} runState={runState} />
+                <ExecutionSummary snapshot={snapshot} runState={runState} steps={steps} />
               </motion.div>
             ) : activeView === 'files' ? (
               <motion.div key="files-view" initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -8 }} className="h-full min-h-0">
@@ -646,15 +660,18 @@ function AgentActivityList({ activities, compact = false }: { activities: AgentA
 function ExecutionSummary({
   snapshot,
   runState,
+  steps,
 }: {
   snapshot: ReturnType<typeof useWorkbenchSnapshot>
   runState: LlmRunState
+  steps: AgentStep[]
 }) {
   const contextUsedTokens = useAppStore((state) => state.contextUsedTokens)
   const effectiveContextLimitTokens = useAppStore((state) => state.effectiveContextLimitTokens)
   const activeProviderId = useAppStore((state) => state.activeProviderId)
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
+  const flowThinkingEffort = useAppStore((state) => state.flowThinkingEffort)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const cacheStats = getModelCacheStats()
   const totalChanged = documentChangeStats.reduce((sum, stat) => sum + stat.changedChars, 0)
@@ -666,6 +683,9 @@ function ExecutionSummary({
     modelRoutingMode === 'auto'
       ? 'Auto 调度'
       : providerConfigs[activeProviderId]?.label ?? '未选择'
+  const samplingPhase = resolveSamplingPhase(steps, runState)
+  const sampling = getAgentSamplingProfile(samplingPhase, flowThinkingEffort)
+  const samplingMode = samplingPhase === 'writer' || samplingPhase === 'repair' ? '创作' : '稳定'
 
   return (
     <section className="mt-3 rounded-xl border border-[#e8ddc7]/72 bg-[#fffdf7]/72 p-3">
@@ -686,11 +706,21 @@ function ExecutionSummary({
       <div className="grid grid-cols-2 gap-1.5">
         <SummaryMetric label="耗时" value={formatDuration(snapshot.elapsedMs)} />
         <SummaryMetric label="模型" value={modelLabel} />
+        <SummaryMetric label="采样" value={`${samplingMode} · ${sampling.temperature}`} />
         <SummaryMetric label="上下文" value={`${contextPercent}%`} />
         <SummaryMetric label="缓存" value={`${cacheStats.hitRate}%`} />
         <SummaryMetric label="本轮改字" value={snapshot.changeStat ? String(snapshot.changeStat.changedChars) : '0'} />
         <SummaryMetric label="累计改字" value={formatCompactNumber(totalChanged)} />
       </div>
+      <details className="mt-2 border-t border-[#eee4d3] pt-2 text-[11px] text-[#6f7168]">
+        <summary className="cursor-default list-none font-medium text-[#4f594d]">
+          动态采样 · {samplingMode}阶段
+        </summary>
+        <p className="mt-1 leading-5">
+          温度 {sampling.temperature} · 重复惩罚 {sampling.frequencyPenalty} · 存在惩罚 {sampling.presencePenalty} · 上限 {sampling.maxTokens.toLocaleString()} tokens
+        </p>
+        <p className="mt-1 leading-5 text-[#8f897a]">来源：动态策略 / {flowThinkingEffort}；缓存命中 {cacheStats.hitRate}% 。{sampling.rationale}</p>
+      </details>
       {snapshot.changeStat ? (
         <div className="mt-2 rounded-lg bg-[#edf6eb]/72 px-2 py-1.5 text-[11px] font-medium text-[#315d39]">
           {formatChangeStat(snapshot.changeStat.insertedChars, snapshot.changeStat.deletedChars)}
@@ -698,6 +728,94 @@ function ExecutionSummary({
       ) : null}
     </section>
   )
+}
+
+function WorkbenchSafetyPanel({
+  run,
+  checkpoints,
+  onApprove,
+}: {
+  run?: WorkAssistantRun
+  checkpoints: GoalCheckpoint[]
+  onApprove?: (approvalId: string, choice: AssistantApprovalChoice) => void
+}) {
+  const approvals: AssistantApprovalRequest[] = run
+    ? Object.values(run.toolCalls).flatMap((toolCall) => {
+      const approval = toolCall.preview as AssistantApprovalRequest | undefined
+      return toolCall.status === 'awaiting_approval'
+        && approval
+        && typeof approval.reason === 'string'
+        && Array.isArray(approval.allowedChoices)
+        ? [approval]
+        : []
+    })
+    : []
+  const latestCheckpoint = checkpoints.at(-1)
+
+  if (!run && !latestCheckpoint) return null
+
+  return (
+    <section className="mb-3 overflow-hidden rounded-xl border border-[#e8ddc7]/72 bg-[#fffdf7]/72 p-3 text-xs text-[#6f7168]">
+      <div className="flex items-center justify-between gap-2">
+        <div className="font-semibold text-[#2f2b22]">当前阶段</div>
+        {run ? <span className={`rounded-md px-1.5 py-0.5 text-[10px] ${run.status === 'awaiting_approval' ? 'bg-[#fff1e9] text-[#8b4138]' : 'bg-[#edf6eb] text-[#315d39]'}`}>{run.status === 'awaiting_approval' ? '待确认' : '进行中'}</span> : null}
+      </div>
+      {run ? <p className="mt-1 line-clamp-2 leading-5">{run.stage || '秘书正在推进当前任务。'}</p> : null}
+
+      {approvals.length ? (
+        <div className="mt-3 border-t border-[#eee4d3] pt-3">
+          <div className="mb-2 font-semibold text-[#2f2b22]">待确认操作</div>
+          <div className="space-y-2">
+            {approvals.map((approval) => (
+              <div key={approval.id} className="rounded-lg border border-[#ead7c8] bg-[#fffaf4] p-2">
+                <div className="font-medium text-[#2f2b22]">{approval.title}</div>
+                <p className="mt-1 line-clamp-2 leading-5 text-[#6f7168]">{approval.targetSummary}</p>
+                <p className="mt-1 line-clamp-2 leading-5 text-[#8f897a]">{approval.reason}</p>
+                {approval.modelDataHandling ? (
+                  <p className="mt-1 rounded-md bg-[#fff2de] px-1.5 py-1 text-[10px] leading-4 text-[#6a5428]">
+                    资料最多 {approval.modelDataHandling.maxChars.toLocaleString()} 字符会临时发送给 {approval.modelDataHandling.provider}，仅用于当前任务，不写入秘书账本。
+                  </p>
+                ) : null}
+                <div className="mt-2 flex flex-wrap justify-end gap-1">
+                  {approval.allowedChoices.map((choice) => (
+                    <button
+                      key={choice}
+                      type="button"
+                      title={choice === 'once' ? '本次确认' : choice === 'run' ? '本轮允许' : '拒绝'}
+                      onClick={() => onApprove?.(approval.id, choice)}
+                      className={choice === 'deny'
+                        ? 'papyrus-control h-7 rounded-md px-2 text-[10px] text-[#8b4138]'
+                        : 'papyrus-primary-button h-7 rounded-md px-2 text-[10px]'}
+                    >
+                      {choice === 'once' ? '本次确认' : choice === 'run' ? '本轮允许' : '拒绝'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {latestCheckpoint ? (
+        <div className="mt-3 border-t border-[#eee4d3] pt-3">
+          <div className="font-semibold text-[#2f2b22]">最近检查点</div>
+          <p className="mt-1 line-clamp-2 leading-5">{latestCheckpoint.summary}</p>
+          <p className="mt-1 line-clamp-2 leading-5 text-[#8f897a]">下一步：{latestCheckpoint.judge.nextStep}</p>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function resolveSamplingPhase(steps: AgentStep[], runState: LlmRunState): AgentSamplingPhase {
+  const current = [...steps].reverse().find((step) => step.status === 'running')
+    ?? [...steps].reverse()[0]
+  if (!current) return runState === 'running' ? 'planning' : 'writer'
+  if (current.type === 'generation') return 'writer'
+  if (current.type === 'tool') return 'tool_json'
+  if (current.type === 'sub_agent') return 'research'
+  return 'planning'
 }
 
 function SummaryMetric({ label, value }: { label: string; value: string }) {

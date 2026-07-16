@@ -93,6 +93,50 @@ describe('runWorkAssistantAgentLoop', () => {
     expect(result.response).toBe('已整理 12 个文件。')
   })
 
+  it('keeps sensitive tool data out of final synthesis receipts while retaining safe loop metadata', async () => {
+    const decisions = [
+      toolDecision('terminal_document_to_text', { rootId: 'root', path: 'meeting.docx' }),
+      finalDecision('资料已收集。'),
+    ]
+    let followUpMessages: Array<{ role: string; content: string }> = []
+    let receivedReceipts = ''
+
+    await runWorkAssistantAgentLoop({
+      runId: 'receipt-boundary',
+      prompt: '整理会议资料',
+      toolNames: ['terminal_document_to_text'],
+      modelCall: async (messages) => {
+        followUpMessages = messages
+        return decisions.shift()!
+      },
+      executeTool: async () => ({
+        ok: true,
+        summary: '文档正文已提取。',
+        data: {
+          previewId: 'preview-1',
+          outputChars: 42,
+          text: '会议纪要正文，包含不应进入回执的原文。',
+          body: '任意网页正文',
+          value: '草稿字段值',
+          authorization: 'Bearer hidden-token',
+          accessToken: 'secret-token',
+        },
+      }),
+      finalStream: async (_outline, receipts) => {
+        receivedReceipts = receipts
+        return '资料已收集。'
+      },
+    })
+
+    expect(JSON.stringify(followUpMessages)).toContain('preview-1')
+    expect(receivedReceipts).toContain('preview-1')
+    expect(receivedReceipts).not.toContain('会议纪要正文')
+    expect(receivedReceipts).not.toContain('任意网页正文')
+    expect(receivedReceipts).not.toContain('草稿字段值')
+    expect(receivedReceipts).not.toContain('hidden-token')
+    expect(receivedReceipts).not.toContain('secret-token')
+  })
+
   it('falls back to the verified outline when final streaming is unavailable before any token', async () => {
     const events: Array<{ type: string; delta?: string; response?: string }> = []
     const result = await runWorkAssistantAgentLoop({

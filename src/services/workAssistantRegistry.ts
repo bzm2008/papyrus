@@ -1,7 +1,7 @@
 import type { AssistantRiskLevel, DesktopPlatform } from './workAssistantProtocol'
 
-export type AssistantToolset = 'workspace' | 'desktop' | 'browser' | 'project'
-export type AssistantToolExecutor = 'native' | 'project' | 'browser_bridge'
+export type AssistantToolset = 'workspace' | 'desktop' | 'browser' | 'project' | 'terminal'
+export type AssistantToolExecutor = 'native' | 'project' | 'browser_bridge' | 'terminal'
 
 export type AssistantSchemaNode = {
   type: 'object' | 'array' | 'string'
@@ -67,6 +67,16 @@ const fileSchema = (): AssistantSchemaNode => ({
   required: ['rootId', 'path'],
 })
 
+const terminalDocumentSchema = (): AssistantSchemaNode => ({
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    rootId: { type: 'string', minLength: 1 },
+    path: { type: 'string', minLength: 1 },
+  },
+  required: ['rootId', 'path'],
+})
+
 const previewReferenceSchema = (): AssistantSchemaNode => ({
   type: 'object',
   additionalProperties: false,
@@ -112,6 +122,8 @@ export const WORK_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'desktop_open_url', toolset: 'desktop', executor: 'native', description: 'Open a URL using the system default browser.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: { type: 'object', additionalProperties: false, properties: { url: { type: 'string', minLength: 1 } }, required: ['url'] } },
   { name: 'desktop_open_app', toolset: 'desktop', executor: 'native', description: 'Launch an installed desktop application.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: { type: 'object', additionalProperties: false, properties: { appId: { type: 'string', minLength: 1 } }, required: ['appId'] } },
   { name: 'desktop_reveal_file', toolset: 'desktop', executor: 'native', description: 'Reveal a workspace file in the system file manager.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: fileSchema() },
+  { name: 'terminal_pdf_to_text', toolset: 'terminal', executor: 'terminal', description: 'Preview and run the fixed pdftotext extractor on an authorized PDF. It never opens a shell or writes files.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: terminalDocumentSchema() },
+  { name: 'terminal_document_to_text', toolset: 'terminal', executor: 'terminal', description: 'Preview and run the fixed Pandoc plain-text extractor on an authorized document. It never opens a shell or writes files.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: terminalDocumentSchema() },
 ]
 
 const browserElementSchema = () => ({
@@ -151,7 +163,8 @@ export function enabledToolDefinitions(input: EnabledToolDefinitionsInput): read
     // their exact model-facing name. Do not hide core secretary tools merely
     // because the native registry does not enumerate every wrapper name.
     && (input.availableToolNames === undefined
-      || (tool.toolset !== 'browser' && tool.toolset !== 'project')
+      || tool.toolset === 'workspace'
+      || tool.toolset === 'desktop'
       || input.availableToolNames.includes(tool.name))
   ))
 }

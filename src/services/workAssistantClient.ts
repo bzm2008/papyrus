@@ -43,6 +43,17 @@ const invokeTyped = <T>(command: string, args?: Record<string, unknown>) =>
 function abortError() {
   return new DOMException('Run cancelled', 'AbortError')
 }
+export type TerminalExecutionResult = {
+  ok: boolean
+  summary: string
+  command: string
+  outputChars: number
+  truncated: boolean
+  auditRecorded: boolean
+  errorCode?: string
+  /** Transient active-run work material. It is never persisted by this client. */
+  text?: string
+}
 
 export type DesktopRevealResult = {
   degraded: boolean
@@ -84,6 +95,9 @@ export const scanWorkAssistantDownloads = (rootId: string) =>
 export const previewWorkAssistantAction = (request: NativePreviewRequest) =>
   invokeTyped<AssistantToolPreview>('work_assistant_preview', { request })
 
+export const previewControlledTerminalAction = (request: NativePreviewRequest) =>
+  invokeTyped<AssistantToolPreview>('work_assistant_terminal_preview', { request })
+
 export const approveWorkAssistantAction = (
   previewId: string,
   runId: string,
@@ -92,6 +106,12 @@ export const approveWorkAssistantAction = (
 
 export const cancelWorkAssistantRun = (runId: string) =>
   invokeTyped<void>('work_assistant_cancel_run', { run: runId })
+
+export const approveControlledTerminalAction = (
+  previewId: string,
+  runId: string,
+  choice: AssistantApprovalChoice,
+) => invokeTyped<ApprovalGrant>('work_assistant_terminal_approve', { previewId, runId, choice })
 
 export function executeWorkAssistantAction(
   previewId: string,
@@ -147,6 +167,53 @@ export function executeWorkAssistantAction(
         // Once the native promise has completed, its result is authoritative.
         // A late abort must not turn a completed file operation into a retryable
         // cancellation that could duplicate side effects.
+        resolve(value)
+      },
+      (error) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      },
+    )
+  })
+}
+
+export function executeControlledTerminalAction(
+  previewId: string,
+  approvalToken: string,
+  runId?: string,
+  signal?: AbortSignal,
+) {
+  if (signal?.aborted) {
+    if (runId) void cancelWorkAssistantRun(runId).catch(() => undefined)
+    return Promise.reject<TerminalExecutionResult>(abortError())
+  }
+
+  const pending = invokeTyped<TerminalExecutionResult>('work_assistant_terminal_execute', {
+    previewId,
+    approvalToken,
+  })
+  if (!signal) return pending
+
+  return new Promise<TerminalExecutionResult>((resolve, reject) => {
+    let settled = false
+    let nativeFinished = false
+    const cleanup = () => signal.removeEventListener('abort', onAbort)
+    const onAbort = () => {
+      if (settled || nativeFinished) return
+      settled = true
+      cleanup()
+      if (runId) void cancelWorkAssistantRun(runId).catch(() => undefined)
+      reject(abortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    pending.then(
+      (value) => {
+        nativeFinished = true
+        if (settled) return
+        settled = true
+        cleanup()
         resolve(value)
       },
       (error) => {

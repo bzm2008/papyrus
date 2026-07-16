@@ -3,7 +3,7 @@ export type AssistantRiskLevel = 'read' | 'reversible' | 'high' | 'blocked'
 export type AssistantToolStatus = 'queued' | 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'cancelled'
 export type AssistantApprovalChoice = 'once' | 'run' | 'deny'
 
-export type AssistantCapabilityStatus = { name: string; toolset: 'workspace' | 'desktop' | 'browser' | 'project'; available: boolean; reason?: string; platform: DesktopPlatform }
+export type AssistantCapabilityStatus = { name: string; toolset: 'workspace' | 'desktop' | 'browser' | 'project' | 'terminal'; available: boolean; reason?: string; platform: DesktopPlatform }
 export type NativePreviewRequest = { runId: string; toolCallId: string; toolName: string; arguments: Record<string, unknown> }
 export type AssistantToolCall = { id: string; runId: string; name: string; intent: string; arguments: Record<string, unknown>; status: AssistantToolStatus; startedAt: number; endedAt?: number; preview?: AssistantToolPreview; progress?: { message: string; completed?: number; total?: number }; result?: AssistantToolResult }
 export type AssistantToolPreview = { id: string; revision: string; risk: AssistantRiskLevel; title: string; targetSummary: string; impactSummary: string; reversible: boolean; expiresAt: number; scope?: string[] }
@@ -17,6 +17,11 @@ export type AssistantApprovalRequest = AssistantToolPreview & {
   origin?: string
   pageTitle?: string
   elementName?: string
+  /** Shown only for a user-approved transient document-to-model handoff. */
+  modelDataHandling?: {
+    provider: string
+    maxChars: number
+  }
 }
 export type AssistantToolResult = { ok: boolean; summary: string; data?: Record<string, unknown>; errorCode?: string; recoverable?: boolean }
 export type AssistantSubagent = { id: string; parentId?: string; goal: string; model?: string; status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'skipped'; currentTool?: string; progress: string[]; startedAt: number; endedAt?: number; summary?: string }

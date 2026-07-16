@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { WORK_ASSISTANT_TOOLS, enabledToolDefinitions } from './workAssistantRegistry'
 
 describe('WORK_ASSISTANT_TOOLS', () => {
-  it('contains only the controlled workspace and desktop tools', () => {
+  it('contains only controlled workspace, desktop, and fixed document terminal tools', () => {
     expect(WORK_ASSISTANT_TOOLS.map((tool) => tool.name)).toEqual([
       'workspace_list',
       'workspace_scan',
@@ -17,6 +17,8 @@ describe('WORK_ASSISTANT_TOOLS', () => {
       'desktop_open_url',
       'desktop_open_app',
       'desktop_reveal_file',
+      'terminal_pdf_to_text',
+      'terminal_document_to_text',
     ])
   })
 
@@ -83,6 +85,25 @@ describe('WORK_ASSISTANT_TOOLS', () => {
     })
     expect(tools.map((tool) => tool.name)).toContain('workspace_scan')
     expect(tools.map((tool) => tool.name)).toContain('desktop_status')
+  })
+
+  it('requires exact native availability for the fixed terminal catalog', () => {
+    const unavailable = enabledToolDefinitions({
+      platform: 'linux',
+      enabledToolsets: ['terminal'],
+      availability: { terminal: false },
+      availableToolNames: ['terminal_pdf_to_text'],
+    })
+    expect(unavailable).toEqual([])
+
+    const available = enabledToolDefinitions({
+      platform: 'linux',
+      enabledToolsets: ['terminal'],
+      availability: { terminal: true },
+      availableToolNames: ['terminal_pdf_to_text'],
+    })
+    expect(available.map((tool) => tool.name)).toEqual(['terminal_pdf_to_text'])
+    expect(available[0]).toMatchObject({ executor: 'terminal', previewRequired: true })
   })
 
   it('declares strict object schemas and bounds batch plans', () => {

@@ -1441,7 +1441,9 @@ export const useAppStore = create<AppState>()(
       openLoops: [],
       readerPromises: [],
       isStoryDashboardOpen: false,
-      isUsageCollapsed: false,
+      // The task center is the secretary home. Keep diagnostics available but
+      // compact until the user asks for them, especially on 1040px windows.
+      isUsageCollapsed: true,
       ...calculateTokenSnapshot(initialEditorText, initialFlowMessages, ''),
       setMode: (mode) => set({ mode }),
       setColumnMode: (columnMode) => set({ columnMode }),

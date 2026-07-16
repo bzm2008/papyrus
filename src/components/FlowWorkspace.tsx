@@ -2,7 +2,12 @@
 import {
   Clipboard,
   Copy,
+  BookOpen,
   FileText,
+  FolderKanban,
+  Mail,
+  MonitorCog,
+  PanelLeftOpen,
   MessageSquare,
   PanelRightOpen,
   PenLine,
@@ -27,8 +32,14 @@ import { getModelCacheStats } from '../services/modelCallCacheService'
 import { getScallionQuotaDisplay } from '../services/scallionAccountService'
 import { formatScallionPlanName } from '../services/scallionModelCatalog'
 import { shouldShowSecretaryPartialReply } from '../services/secretaryPartialReply'
-import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
-import { cancelSecretaryRun } from '../services/secretaryRunController'
+import { createSecretaryGoalFromRequest, getSecretaryGoalCyclePolicy, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
+import {
+  buildSecretaryLedgerResumePrompt,
+  loadSecretaryTaskCenterSnapshot,
+  type SecretaryLedgerRecoveryItem,
+} from '../services/secretaryLedgerRuntime'
+import { cancelSecretaryRun, pauseSecretaryRun } from '../services/secretaryRunController'
+import { selectNextAutoStartSecretaryTask } from '../services/secretaryTaskScheduler'
 import { resolveAssistantApproval } from '../services/workAssistantRuntime'
 import type { AssistantApprovalRequest } from '../services/workAssistantProtocol'
 import {
@@ -54,9 +65,11 @@ import {
   type WorkbenchView,
   ThoughtSummaryBlock,
 } from './SecretaryWorkbenchPanel'
+import { SecretaryTaskCenter } from './SecretaryTaskCenter'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
 import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
+import { isSecretaryWorkbenchActive, shouldAutoOpenSecretaryWorkbench } from './secretaryWorkspaceLayout'
 import { SecretaryToolStep } from './SecretaryToolStep'
 import { SecretaryFileWorkbench } from './SecretaryFileWorkbench'
 import { SecretaryBrowserWorkbench } from './SecretaryBrowserWorkbench'
@@ -76,8 +89,10 @@ export function FlowWorkspace() {
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
   const [rightPanelPinned, setRightPanelPinned] = useState(false)
   const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('run')
+  const [taskCenterDrawerOpen, setTaskCenterDrawerOpen] = useState(false)
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
+  const autoStartTaskIdRef = useRef<string | null>(null)
   const autoWorkbenchTimerRef = useRef<number | undefined>(undefined)
   const previousRunStateRef = useRef(useAppStore.getState().llmRunState)
   const receiptRunStateRef = useRef(useAppStore.getState().llmRunState)
@@ -139,17 +154,19 @@ export function FlowWorkspace() {
     latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
       ? latestChangeStat
       : undefined
-  const shouldAutoOpenWorkbench =
-    Boolean(activeSecretaryGoal?.status === 'active') ||
-    flowThinkingEffort === 'ultra_hive' ||
-    agentSteps.length >= 2 ||
-    flowTraces.length >= 2 ||
-    agentTodos.length >= 4
+  const shouldAutoOpenWorkbench = shouldAutoOpenSecretaryWorkbench({
+    activeGoalStatus: activeSecretaryGoal?.status,
+    workAssistantStatus: activeWorkAssistantRun?.status,
+    thinkingEffort: flowThinkingEffort,
+    agentStepCount: agentSteps.length,
+    traceCount: flowTraces.length,
+    todoCount: agentTodos.length,
+  })
 
   useEffect(() => {
     const previousRunState = previousRunStateRef.current
 
-    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
+    const isBusy = isSecretaryWorkbenchActive(llmRunState, activeWorkAssistantRun?.status)
     const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
 
     if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'run') {
@@ -157,10 +174,10 @@ export function FlowWorkspace() {
     }
 
     previousRunStateRef.current = llmRunState
-  }, [llmRunState, rightPanelPinned, rightPanelView])
+  }, [activeWorkAssistantRun?.status, llmRunState, rightPanelPinned, rightPanelView])
 
   useEffect(() => {
-    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
+    const isBusy = isSecretaryWorkbenchActive(llmRunState, activeWorkAssistantRun?.status)
 
     if (
       !isBusy ||
@@ -188,7 +205,7 @@ export function FlowWorkspace() {
         autoWorkbenchTimerRef.current = undefined
       }
     }
-  }, [llmRunState, rightPanelOpen, rightPanelPinned, rightPanelView, shouldAutoOpenWorkbench])
+  }, [activeWorkAssistantRun?.status, llmRunState, rightPanelOpen, rightPanelPinned, rightPanelView, shouldAutoOpenWorkbench])
 
   useEffect(() => {
     const previousRunState = receiptRunStateRef.current
@@ -223,14 +240,14 @@ export function FlowWorkspace() {
     queuedInputId?: string,
   ) => {
     const startedAt = Date.now()
-    const maxRounds = flowThinkingEffort === 'ultra_hive' ? 8 : flowThinkingEffort === 'high' ? 6 : 4
-    const maxMs = flowThinkingEffort === 'ultra_hive' ? 16 * 60 * 1000 : 9 * 60 * 1000
+    const cyclePolicy = getSecretaryGoalCyclePolicy(flowThinkingEffort)
+    const { maxRounds, maxDurationMs } = cyclePolicy
     let round = 0
     let currentRequest = request
     let currentDisplay = displayPrompt
     let currentQueuedInputId = queuedInputId
 
-    while (round < maxRounds && Date.now() - startedAt < maxMs) {
+    while (round < maxRounds && Date.now() - startedAt < maxDurationMs) {
       const latestGoal = useAppStore.getState().activeSecretaryGoal
 
       if (!latestGoal || latestGoal.id !== goal.id || latestGoal.status !== 'active') {
@@ -240,7 +257,7 @@ export function FlowWorkspace() {
       round += 1
       const runOutcome = await sendFlowMessage(currentRequest, {
         displayPrompt: currentDisplay,
-        thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
+        thinkingEffort: cyclePolicy.executionEffort,
         goalId: goal.id,
         queuedInputId: currentQueuedInputId,
       })
@@ -268,7 +285,10 @@ export function FlowWorkspace() {
     }
   }, [flowThinkingEffort, updateSecretaryGoal])
 
-  const dispatchPrompt = useCallback(async (rawPrompt: string, options: { queuedInputId?: string } = {}) => {
+  const dispatchPrompt = useCallback(async (
+    rawPrompt: string,
+    options: { queuedInputId?: string; ledgerTaskId?: string; displayPrompt?: string } = {},
+  ) => {
     const cleanPrompt = rawPrompt.trim()
 
     if (!cleanPrompt) {
@@ -303,12 +323,54 @@ export function FlowWorkspace() {
     }
 
     await sendFlowMessage(resolved.executionPrompt, {
-      displayPrompt: resolved.displayPrompt,
+      displayPrompt: options.displayPrompt ?? resolved.displayPrompt,
       thinkingEffort: flowThinkingEffort,
       goalId: activeSecretaryGoal?.status === 'active' ? activeSecretaryGoal.id : undefined,
       queuedInputId: options.queuedInputId,
+      ledgerTaskId: options.ledgerTaskId,
     })
   }, [activeSecretaryGoal, flowThinkingEffort, runGoalCycle, secretaryPlanDraft])
+
+  const startPersistentTask = useCallback((task: { id: string; request: string }, recovery?: SecretaryLedgerRecoveryItem) => {
+    if (llmRunState === 'running' || llmRunState === 'reconnecting') {
+      setPrompt(`继续任务：${task.request}`)
+      return
+    }
+
+    setTaskCenterDrawerOpen(false)
+    const executionPrompt = recovery ? buildSecretaryLedgerResumePrompt(recovery) : task.request
+    void dispatchPrompt(executionPrompt, { ledgerTaskId: task.id })
+  }, [dispatchPrompt, llmRunState])
+
+  useEffect(() => {
+    const checkScheduledTask = async () => {
+      if (
+        llmRunState === 'running'
+        || llmRunState === 'reconnecting'
+        || autoStartTaskIdRef.current
+      ) {
+        return
+      }
+
+      const snapshot = await loadSecretaryTaskCenterSnapshot()
+      const task = selectNextAutoStartSecretaryTask(snapshot.tasks)
+      if (!task) return
+
+      autoStartTaskIdRef.current = task.id
+      try {
+        await dispatchPrompt(task.request, {
+          displayPrompt: `定时任务：${task.title}`,
+          ledgerTaskId: task.id,
+        })
+      } finally {
+        autoStartTaskIdRef.current = null
+      }
+    }
+
+    void checkScheduledTask()
+    const timer = window.setInterval(() => void checkScheduledTask(), 30_000)
+    return () => window.clearInterval(timer)
+  }, [dispatchPrompt, llmRunState])
 
   useEffect(() => {
     if (llmRunState !== 'idle' || processingQueuedIdRef.current) {
@@ -420,16 +482,36 @@ export function FlowWorkspace() {
 
   return (
     <section className="flex h-full min-h-0 bg-transparent">
+      <div className="hidden min-h-0 xl:flex">
+        <SecretaryTaskCenter
+          onStartTask={startPersistentTask}
+          onPauseActiveTask={() => pauseSecretaryRun()}
+          onCancelActiveTask={() => cancelSecretaryRun()}
+          onOpenMaterials={() => {
+            setRightPanelOpen(true)
+            setRightPanelView('files')
+          }}
+        />
+      </div>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="papyrus-toolbar flex h-11 shrink-0 items-center justify-between border-b px-4">
           <div className="flex min-w-0 items-center gap-2.5">
+            <button
+              type="button"
+              title="打开项目现场"
+              aria-label="打开项目现场"
+              onClick={() => setTaskCenterDrawerOpen(true)}
+              className="papyrus-icon-button size-7 shrink-0 rounded-md xl:hidden"
+            >
+              <PanelLeftOpen size={14} />
+            </button>
             <div className="grid size-7 place-items-center rounded-md bg-[#20201d] text-[#fffefa]">
               <PenLine size={14} />
             </div>
             <div className="min-w-0 leading-tight">
-              <div className="truncate text-[13px] font-semibold text-[#20201d]">秘书模式</div>
+              <div className="truncate text-[13px] font-semibold text-[#20201d]">文科秘书</div>
               <div className="truncate text-[11px] text-[#6f7168]">
-                规划、检索、写作和校对在同一条执行线上推进
+                写作、研究、沟通、整理与受控电脑协助
               </div>
             </div>
           </div>
@@ -490,6 +572,12 @@ export function FlowWorkspace() {
 
             <div className="flex-1 space-y-3">
               <AnimatePresence initial={false}>
+                {!visibleMessages.length && llmRunState === 'idle' ? (
+                  <SecretaryTaskStarters
+                    key="secretary-task-starters"
+                    onChoose={(request) => void dispatchPrompt(request)}
+                  />
+                ) : null}
                 {visibleMessages.map((message) => {
                   const isLatest = message.id === latestAssistantId
                   const receiptSnapshot = receiptSnapshots[message.id]
@@ -611,6 +699,53 @@ export function FlowWorkspace() {
         </div>
       </div>
 
+      {rightPanelOpen ? (
+        <button
+          type="button"
+          aria-label="关闭工作台"
+          onClick={() => {
+            setRightPanelOpen(false)
+            setRightPanelPinned(false)
+          }}
+          className="fixed inset-0 z-30 cursor-default bg-[#201f1a]/18 xl:hidden"
+        />
+      ) : null}
+
+      <AnimatePresence initial={false}>
+        {taskCenterDrawerOpen ? (
+          <motion.div
+            key="secretary-task-center-drawer"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-[#201f1a]/18 p-3 pt-14 xl:hidden"
+            onMouseDown={() => setTaskCenterDrawerOpen(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, x: -18 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -18 }}
+              transition={{ type: 'spring', stiffness: 440, damping: 42, mass: 0.75 }}
+              className="h-full max-w-[360px] overflow-hidden rounded-lg border border-[#e1dccf] bg-[#fffefa] shadow-[0_24px_80px_rgba(43,34,19,0.18)]"
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <SecretaryTaskCenter
+                compact
+                onStartTask={startPersistentTask}
+                onPauseActiveTask={() => pauseSecretaryRun()}
+                onCancelActiveTask={() => cancelSecretaryRun()}
+                onOpenMaterials={() => {
+                  setRightPanelOpen(true)
+                  setRightPanelView('files')
+                  setTaskCenterDrawerOpen(false)
+                }}
+                onClose={() => setTaskCenterDrawerOpen(false)}
+              />
+            </motion.div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
       <AnimatePresence initial={false}>
         {rightPanelOpen ? (
           <SecretaryWorkbenchPanel
@@ -627,6 +762,9 @@ export function FlowWorkspace() {
               setRightPanelPinned(false)
             }}
             changeStat={latestRunChangeStat}
+            workAssistantRun={activeWorkAssistantRun}
+            checkpoints={activeGoalCheckpoints}
+            onApprove={(approvalId, choice) => resolveAssistantApproval(approvalId, choice)}
             manuscript={<EditorPane />}
             files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
             browser={<SecretaryBrowserWorkbench />}
@@ -634,6 +772,73 @@ export function FlowWorkspace() {
         ) : null}
       </AnimatePresence>
     </section>
+  )
+}
+
+function SecretaryTaskStarters({ onChoose }: { onChoose: (request: string) => void }) {
+  const starters = [
+    {
+      label: '写作',
+      detail: '起草、润色或续写',
+      icon: PenLine,
+      request: '请根据当前项目资料，判断最适合推进的写作工作，并交付一份可修改的第一版。',
+    },
+    {
+      label: '研究',
+      detail: '梳理问题与资料',
+      icon: BookOpen,
+      request: '请围绕当前项目梳理需要核实的问题，制定研究提纲并说明下一步。',
+    },
+    {
+      label: '沟通',
+      detail: '邮件、通知与回复',
+      icon: Mail,
+      request: '请根据当前项目上下文起草一封清楚、得体的工作邮件，并标出需要我确认的信息。',
+    },
+    {
+      label: '整理',
+      detail: '归纳资料与待办',
+      icon: FolderKanban,
+      request: '请整理当前项目的资料、待办与已知结论，给出一份便于继续工作的摘要。',
+    },
+    {
+      label: '电脑协助',
+      detail: '先预览，再确认',
+      icon: MonitorCog,
+      request: '请检查已授权工作区和下载资料，先生成一份可确认的整理计划。',
+    },
+  ] as const
+
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -6 }}
+      className="mx-auto w-full max-w-[920px] pt-5"
+    >
+      <div className="mb-4 max-w-[580px]">
+        <h1 className="text-[22px] font-semibold leading-8 text-[#20201d]">今天先推进哪件事？</h1>
+        <p className="mt-1 text-sm leading-6 text-[#6f7168]">从一个具体目标开始，秘书会保留项目语境、资料线索与可恢复的任务进度。</p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {starters.map(({ label, detail, icon: Icon, request }) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() => onChoose(request)}
+            className="group flex min-h-[72px] items-center gap-3 border-b border-[#e8ddc7] bg-transparent px-2 py-3 text-left hover:bg-[#fffdf7]"
+          >
+            <span className="grid size-8 shrink-0 place-items-center rounded-md border border-[#e8ddc7] bg-[#fffefa] text-[#6f7f68] group-hover:border-[#b9c9b4] group-hover:text-[#315d39]">
+              <Icon size={15} />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-[#2f2b22]">{label}</span>
+              <span className="mt-0.5 block truncate text-[11px] text-[#8f897a]">{detail}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </motion.section>
   )
 }
 

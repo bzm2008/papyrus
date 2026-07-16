@@ -1,21 +1,31 @@
 import {
   bootstrapSecretaryLedger,
+  claimSecretaryLedgerTask,
+  createSecretaryLedgerMemory,
   createSecretaryLedgerProject,
   createSecretaryLedgerTask,
+  deleteSecretaryLedgerMemory,
   importSecretaryLedgerLegacyBatch,
   isSecretaryLedgerRuntimeAvailable,
   listSecretaryLedgerMemories,
   listSecretaryLedgerProjects,
   listSecretaryLedgerTasks,
   loadLatestSecretaryLedgerCheckpoint,
+  persistSecretaryLedgerTaskProgress,
   recordSecretaryLedgerEvent,
-  saveSecretaryLedgerCheckpoint,
-  updateSecretaryLedgerTask,
+  rollbackSecretaryLedgerMemory,
+  startSecretaryLedgerTask,
+  updateSecretaryLedgerMemory,
   type SecretaryLedgerLegacyImportBatch,
+  type SecretaryLedgerMemory,
   type SecretaryLedgerProjectAccess,
+  type SecretaryLedgerResult,
   type SecretaryLedgerTask,
   type SecretaryLedgerTaskStatus,
+  type PersistSecretaryLedgerTaskProgressInput,
+  type RecordSecretaryLedgerEventInput,
 } from './secretaryLedgerClient'
+import type { WorkAssistantEvent } from './workAssistantProtocol'
 import {
   type ChatSession,
   type ProjectWritingMemory,
@@ -27,6 +37,16 @@ import {
 const LEGACY_MIGRATION_KEY = 'secretary-ledger-v1'
 const MAX_LEGACY_RECORDS = 100
 const MAX_MEMORY_CONTEXT_ITEMS = 12
+const SAFE_TOOL_RECEIPT_KEYS = new Set(['toolName', 'ok', 'errorCode'])
+const SAFE_TOOL_RECEIPT_ERROR_CODES = [
+  'cancelled',
+  'invalid_input',
+  'not_found',
+  'permission_denied',
+  'timeout',
+  'unavailable',
+  'unknown',
+] as const
 
 type LedgerProjectDescriptor = {
   id: string
@@ -50,6 +70,15 @@ export type SecretaryLedgerRun = {
   memoryContext: string
 }
 
+export type SecretaryLedgerToolReceiptInput = {
+  toolName: string
+  ok: boolean
+  errorCode?: string
+}
+
+type SafeToolReceiptTool = 'browser' | 'file' | 'search' | 'terminal' | 'other'
+type SafeToolReceiptErrorCode = typeof SAFE_TOOL_RECEIPT_ERROR_CODES[number]
+
 export type SecretaryLedgerRecoveryItem = {
   task: SecretaryLedgerTask
   checkpoint?: {
@@ -57,6 +86,25 @@ export type SecretaryLedgerRecoveryItem = {
     nextStep: string
     createdAt: number
   }
+}
+
+export type SecretaryTaskCenterSnapshot = {
+  state: SecretaryLedgerRuntimeState
+  project?: {
+    id: string
+    title: string
+    kind: LedgerProjectDescriptor['kind']
+  }
+  projects: Array<{
+    id: string
+    title: string
+    kind: string
+    storyProjectId?: string | null
+    chatId?: string | null
+  }>
+  memories: SecretaryLedgerMemory[]
+  tasks: SecretaryLedgerTask[]
+  recovery: SecretaryLedgerRecoveryItem[]
 }
 
 let runtimeState: SecretaryLedgerRuntimeState = {
@@ -105,6 +153,7 @@ export async function beginSecretaryLedgerRun(input: {
   runId: string
   prompt: string
   title: string
+  taskId?: string
 }): Promise<SecretaryLedgerRun | undefined> {
   const state = await initializeSecretaryLedgerRuntime()
   if (!state.available) return undefined
@@ -114,33 +163,46 @@ export async function beginSecretaryLedgerRun(input: {
 
   const access: SecretaryLedgerProjectAccess = { currentProjectId: project.id }
   const memories = await listSecretaryLedgerMemories(access, MAX_MEMORY_CONTEXT_ITEMS)
-  const memoryContext = memories.ok ? formatVerifiedMemoryContext(memories.value.map((memory) => memory.content)) : ''
-  const task = await createSecretaryLedgerTask(access, {
+  const memoryContext = memories.ok
+    ? formatVerifiedMemoryContext(
+        memories.value
+          .filter((memory) => memory.status === 'verified' && memory.confidence >= 0.6)
+          .map((memory) => memory.content),
+      )
+    : ''
+  const startedSummary = safeTaskText(input.title, '秘书任务已开始。')
+  const startedProgress = buildTaskProgressInput({
+    phase: 'started',
+    summary: startedSummary,
+    nextStep: '准备公开计划并开始整理任务。',
+    status: 'running',
     projectId: project.id,
-    title: safeTaskText(input.title, '秘书任务'),
-    request: safeTaskText(input.prompt, '已收到秘书任务，原始内容未保存。'),
-    status: 'queued',
-    priority: 3,
   })
+  const started = input.taskId
+    ? await claimSecretaryLedgerTask(access, input.taskId, startedProgress)
+    : await startSecretaryLedgerTask(access, {
+        task: {
+          projectId: project.id,
+          title: safeTaskText(input.title, '秘书任务'),
+          request: safeTaskText(input.prompt, '已收到秘书任务，原始内容未保存。'),
+          status: 'queued',
+          priority: 3,
+        },
+        events: startedProgress.events,
+        checkpoint: startedProgress.checkpoint,
+      })
 
-  if (!task.ok) throw new Error('无法建立当前秘书任务的持久记录。')
+  if (!started.ok) throw new Error(`无法建立当前秘书任务的持久记录：${started.message}`)
+  if (!started.value) throw new Error('该任务已由其他调度器开始，请刷新任务队列后重试。')
+  const task = started.value.task
 
   const run: SecretaryLedgerRun = {
     runId: input.runId,
-    taskId: task.value.id,
+    taskId: task.id,
     projectId: project.id,
     access,
     memoryContext,
   }
-
-  await updateSecretaryLedgerTask(access, task.value.id, { status: 'running' })
-  await recordSecretaryLedgerEvent(access, task.value.id, {
-    eventType: 'started',
-    payload: {
-      phase: 'started',
-      summary: safeTaskText(input.title, '秘书任务已开始。'),
-    },
-  })
 
   activeRuns.set(run.runId, run)
 
@@ -155,6 +217,7 @@ export async function checkpointSecretaryLedgerRun(
     nextStep: string
     status?: SecretaryLedgerTaskStatus
     publicPlan?: string
+    events?: RecordSecretaryLedgerEventInput[]
   },
 ) {
   if (!run) return
@@ -163,20 +226,81 @@ export async function checkpointSecretaryLedgerRun(
   const summary = safeTaskText(input.summary, '本阶段已完成，未保存原始敏感内容。')
   const nextStep = safeTaskText(input.nextStep, '等待下一步。')
 
-  await recordSecretaryLedgerEvent(run.access, run.taskId, {
-    eventType: phase,
-    payload: { phase, summary },
+  const persisted = await persistSecretaryLedgerTaskProgress(
+    run.access,
+    run.taskId,
+    buildTaskProgressInput({
+      phase,
+      summary,
+      nextStep,
+      status: input.status,
+      publicPlan: input.publicPlan,
+      projectId: run.projectId,
+      events: input.events,
+    }),
+  )
+  return requireLedgerWrite(persisted, '保存秘书任务检查点')
+}
+
+export async function checkpointSecretaryLedgerAwaitingApproval(run: SecretaryLedgerRun | undefined) {
+  await checkpointSecretaryLedgerRun(run, {
+    phase: 'awaiting_approval',
+    summary: '操作已暂停，等待用户确认。',
+    nextStep: '等待用户确认后继续。',
+    status: 'awaiting_approval',
   })
-  await saveSecretaryLedgerCheckpoint(run.access, run.taskId, {
-    contextSnapshot: { phase, summary, projectId: run.projectId },
-    nextStep,
-  })
-  await updateSecretaryLedgerTask(run.access, run.taskId, {
-    ...(input.status ? { status: input.status } : {}),
-    ...(input.publicPlan ? { publicPlan: safeTaskText(input.publicPlan, '公开计划已更新。') } : {}),
-    summary,
-    nextStep,
-  })
+}
+
+export async function recordSecretaryLedgerToolReceipt(
+  run: SecretaryLedgerRun | undefined,
+  input: SecretaryLedgerToolReceiptInput,
+) {
+  if (!run) return
+  const receipt = normalizeToolReceipt(input)
+  if (!receipt) return
+
+  const event = buildToolReceiptEvent(receipt)
+  const recorded = await recordSecretaryLedgerEvent(run.access, run.taskId, event)
+  return requireLedgerWrite(recorded, '记录受控工具回执')
+}
+
+/**
+ * Keeps approval state and tool receipts durable without allowing the event
+ * payload itself to become ledger data. The runtime has already projected the
+ * event for UI use; this handler reads only the fixed receipt fields.
+ */
+export function createSecretaryLedgerToolEventHandler(
+  run: SecretaryLedgerRun | undefined,
+  toolName: string,
+  dispatch: (event: WorkAssistantEvent) => void,
+) {
+  return async (event: WorkAssistantEvent) => {
+    if (event.type === 'approval.required') {
+      await checkpointSecretaryLedgerAwaitingApproval(run)
+    } else if (event.type === 'tool.progress') {
+      await checkpointSecretaryLedgerRun(run, {
+        phase: 'tool_progress',
+        summary: '受控工具正在执行。',
+        nextStep: '等待受控工具返回结果。',
+        status: 'running',
+      })
+    } else if (event.type === 'tool.completed') {
+      const receipt = normalizeToolReceipt({
+        toolName,
+        ok: event.result.ok,
+        ...(event.result.errorCode ? { errorCode: event.result.errorCode } : {}),
+      })
+      await checkpointSecretaryLedgerRun(run, {
+        phase: 'tool_result',
+        summary: '受控工具结果已记录。',
+        nextStep: '继续秘书任务。',
+        status: 'running',
+        ...(receipt ? { events: [buildToolReceiptEvent(receipt)] } : {}),
+      })
+    }
+
+    dispatch(event)
+  }
 }
 
 export async function finishSecretaryLedgerRun(
@@ -238,6 +362,179 @@ export async function loadSecretaryLedgerRecovery(): Promise<SecretaryLedgerReco
   }))
 
   return recovered
+}
+
+/**
+ * The task center never broadens its default scope: it loads the active
+ * project and global preferences only. Cross-project history is available
+ * through the explicit search control in the UI.
+ */
+export async function loadSecretaryTaskCenterSnapshot(): Promise<SecretaryTaskCenterSnapshot> {
+  const state = await initializeSecretaryLedgerRuntime()
+  if (!state.available) return { state, projects: [], memories: [], tasks: [], recovery: [] }
+
+  const project = await ensureActiveSecretaryLedgerProject()
+  if (!project) return { state, projects: [], memories: [], tasks: [], recovery: [] }
+
+  const access: SecretaryLedgerProjectAccess = { currentProjectId: project.id }
+  const [projects, memories, tasks, recovery] = await Promise.all([
+    listSecretaryLedgerProjects({ includeArchived: false, limit: MAX_LEGACY_RECORDS }),
+    listSecretaryLedgerMemories(access, MAX_LEGACY_RECORDS),
+    listSecretaryLedgerTasks(access, MAX_LEGACY_RECORDS),
+    loadSecretaryLedgerRecovery(),
+  ])
+
+  return {
+    state,
+    project: { id: project.id, title: project.title, kind: project.kind },
+    projects: projects.ok
+      ? projects.value.map((item) => ({
+          id: item.id,
+          title: item.title,
+          kind: item.kind,
+          storyProjectId: item.storyProjectId,
+          chatId: item.chatId,
+        }))
+      : [],
+    memories: memories.ok ? memories.value : [],
+    tasks: tasks.ok ? tasks.value : [],
+    recovery,
+  }
+}
+
+export async function createSecretaryTaskCenterMemory(input: {
+  content: string
+  scope?: 'personal' | 'project'
+  kind?: string
+  confidence?: number
+}): Promise<SecretaryLedgerResult<SecretaryLedgerMemory>> {
+  const context = await resolveTaskCenterContext()
+  if (!context) return runtimeUnavailableResult()
+  const scope = input.scope ?? 'project'
+  return createSecretaryLedgerMemory(context.access, {
+    scope,
+    projectId: scope === 'project' ? context.project.id : null,
+    kind: safeTaskText(input.kind ?? 'preference', 'preference').slice(0, 64),
+    content: safeTaskText(input.content, ''),
+    source: 'user_confirmed',
+    confidence: clampConfidence(input.confidence ?? 1),
+    status: 'verified',
+  })
+}
+
+export async function updateSecretaryTaskCenterMemory(
+  id: string,
+  content: string,
+): Promise<SecretaryLedgerResult<SecretaryLedgerMemory>> {
+  const context = await resolveTaskCenterContext()
+  if (!context) return runtimeUnavailableResult()
+  return updateSecretaryLedgerMemory(context.access, id, {
+    content: safeTaskText(content, ''),
+    source: 'user_confirmed',
+    status: 'verified',
+  })
+}
+
+export async function rollbackSecretaryTaskCenterMemory(
+  id: string,
+  revision: number,
+): Promise<SecretaryLedgerResult<SecretaryLedgerMemory>> {
+  const context = await resolveTaskCenterContext()
+  if (!context) return runtimeUnavailableResult()
+  return rollbackSecretaryLedgerMemory(context.access, id, revision)
+}
+
+export async function deleteSecretaryTaskCenterMemory(id: string): Promise<SecretaryLedgerResult<void>> {
+  const context = await resolveTaskCenterContext()
+  if (!context) return runtimeUnavailableResult()
+  return deleteSecretaryLedgerMemory(context.access, id)
+}
+
+export async function queueSecretaryLedgerTask(input: {
+  title: string
+  request: string
+  scheduleAt?: number | null
+  priority?: number
+}): Promise<SecretaryLedgerResult<SecretaryLedgerTask>> {
+  const context = await resolveTaskCenterContext()
+  if (!context) return runtimeUnavailableResult()
+  const queued = await createSecretaryLedgerTask(context.access, {
+    projectId: context.project.id,
+    title: safeTaskText(input.title, '秘书任务'),
+    request: safeTaskText(input.request, ''),
+    status: 'queued',
+    priority: Math.max(1, Math.min(5, Math.round(input.priority ?? 3))),
+    scheduleAt: input.scheduleAt ?? null,
+    nextStep: input.scheduleAt ? '等待定时开始。' : '等待用户开始。',
+  })
+  if (!queued.ok) return queued
+
+  const recorded = await recordSecretaryLedgerEvent(context.access, queued.value.id, {
+    eventType: input.scheduleAt ? 'scheduled' : 'queued',
+    payload: {
+      summary: input.scheduleAt ? '用户已明确安排定时秘书任务。' : '用户已加入秘书任务队列。',
+    },
+  })
+  if (!recorded.ok) {
+    return { ok: false, code: recorded.code, message: recorded.message }
+  }
+  return queued
+}
+
+export async function updateSecretaryTaskCenterStatus(
+  id: string,
+  status: Extract<SecretaryLedgerTaskStatus, 'queued' | 'paused' | 'cancelled'>,
+): Promise<SecretaryLedgerResult<SecretaryLedgerTask>> {
+  const context = await resolveTaskCenterContext()
+  if (!context) return runtimeUnavailableResult()
+  const nextStep = terminalNextStep(status)
+  const persisted = await persistSecretaryLedgerTaskProgress(
+    context.access,
+    id,
+    buildTaskProgressInput({
+      phase: status,
+      summary: nextStep,
+      nextStep,
+      status,
+      projectId: context.project.id,
+    }),
+  )
+  if (!persisted.ok) return { ok: false, code: persisted.code, message: persisted.message }
+  return { ok: true, value: persisted.value.task }
+}
+
+export function buildSecretaryLedgerResumePrompt(item: SecretaryLedgerRecoveryItem | SecretaryLedgerTask) {
+  const task = 'task' in item ? item.task : item
+  const checkpoint = 'task' in item ? item.checkpoint : undefined
+  const nextStep = checkpoint?.nextStep ?? task.nextStep
+  return [
+    '继续此前已保存的秘书任务。',
+    `原始目标：${task.request}`,
+    nextStep ? `已保存的下一步：${nextStep}` : '',
+    '请先核对当前项目资料和已验证记忆，再继续，不要把内部记忆直接复述给用户。',
+  ].filter(Boolean).join('\n')
+}
+
+async function resolveTaskCenterContext(): Promise<{
+  project: LedgerProjectDescriptor
+  access: SecretaryLedgerProjectAccess
+} | undefined> {
+  const state = await initializeSecretaryLedgerRuntime()
+  if (!state.available) return undefined
+  const project = await ensureActiveSecretaryLedgerProject()
+  return project ? { project, access: { currentProjectId: project.id } } : undefined
+}
+
+function runtimeUnavailableResult<T>(): SecretaryLedgerResult<T> {
+  return {
+    ok: false,
+    code: 'runtime_unavailable',
+    message: '秘书账本当前不可用，未写入新的持久记录。',
+  }
+}
+
+function clampConfidence(value: number) {
+  return Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 1
 }
 
 async function initializeRuntime(): Promise<SecretaryLedgerRuntimeState> {
@@ -361,7 +658,10 @@ function buildLegacyMigrationBatch(): SecretaryLedgerLegacyImportBatch {
         content,
         source: 'legacy_migration',
         confidence: 0.75,
-        status: 'active',
+        // Scoped legacy writing memory is user-authored project context. Mark
+        // it as verified so it can participate in the new explicit memory
+        // boundary; unscoped legacy history remains isolated by the importer.
+        status: 'verified',
       })
     })
 
@@ -438,6 +738,99 @@ function safeTaskText(value: string, fallback: string) {
   return safeLegacyText(value) ?? fallback
 }
 
+function buildTaskProgressInput(input: {
+  phase: string
+  summary: string
+  nextStep: string
+  projectId: string
+  status?: SecretaryLedgerTaskStatus
+  publicPlan?: string
+  events?: RecordSecretaryLedgerEventInput[]
+}): PersistSecretaryLedgerTaskProgressInput {
+  const phase = safeTaskText(input.phase, 'progress').slice(0, 64)
+  const summary = safeTaskText(input.summary, '本阶段已完成，未保存原始敏感内容。')
+  const nextStep = safeTaskText(input.nextStep, '等待下一步。')
+  const publicPlan = input.publicPlan
+    ? safeTaskText(input.publicPlan, '公开计划已更新。')
+    : undefined
+  return {
+    task: {
+      ...(input.status ? { status: input.status } : {}),
+      ...(publicPlan ? { publicPlan } : {}),
+      summary,
+      nextStep,
+    },
+    events: [
+      { eventType: phase, payload: { phase, summary } },
+      ...(input.events ?? []),
+    ],
+    checkpoint: {
+      contextSnapshot: { phase, summary, projectId: input.projectId },
+      nextStep,
+    },
+  }
+}
+
+function buildToolReceiptEvent(receipt: {
+  tool: SafeToolReceiptTool
+  ok: boolean
+  errorCode?: SafeToolReceiptErrorCode
+}): RecordSecretaryLedgerEventInput {
+  return {
+    eventType: 'tool_receipt',
+    payload: {
+      tool: receipt.tool,
+      ok: receipt.ok,
+      outcome: receipt.ok ? 'succeeded' : 'failed',
+      ...(receipt.errorCode ? { errorCode: receipt.errorCode } : {}),
+    },
+  }
+}
+
+function requireLedgerWrite<T>(result: SecretaryLedgerResult<T>, action: string): T {
+  if (!result.ok) throw new Error(`${action}失败：${result.message}`)
+  return result.value
+}
+
+function normalizeToolReceipt(input: unknown): {
+  tool: SafeToolReceiptTool
+  ok: boolean
+  errorCode?: SafeToolReceiptErrorCode
+} | undefined {
+  if (
+    !isRecord(input) ||
+    Object.keys(input).some((key) => !SAFE_TOOL_RECEIPT_KEYS.has(key)) ||
+    !Object.prototype.hasOwnProperty.call(input, 'toolName') ||
+    !Object.prototype.hasOwnProperty.call(input, 'ok') ||
+    typeof input.ok !== 'boolean' ||
+    (Object.prototype.hasOwnProperty.call(input, 'errorCode') && typeof input.errorCode !== 'string')
+  ) {
+    return undefined
+  }
+
+  const tool = normalizeToolReceiptTool(input.toolName)
+  const errorCode = input.ok ? undefined : normalizeToolReceiptErrorCode(input.errorCode)
+  return { tool, ok: input.ok, ...(errorCode ? { errorCode } : {}) }
+}
+
+function normalizeToolReceiptTool(value: unknown): SafeToolReceiptTool {
+  if (typeof value !== 'string') return 'other'
+  const normalized = value.trim().toLowerCase()
+  if (/^(terminal|shell)(?:[._\s-]|$)/.test(normalized)) return 'terminal'
+  if (/^(browser|web)(?:[._\s-]|$)/.test(normalized)) return 'browser'
+  if (/^(file|filesystem|document)(?:[._\s-]|$)/.test(normalized)) return 'file'
+  if (/^(search|lookup)(?:[._\s-]|$)/.test(normalized)) return 'search'
+  return 'other'
+}
+
+function normalizeToolReceiptErrorCode(value: unknown): SafeToolReceiptErrorCode {
+  if (typeof value !== 'string') return 'unknown'
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_')
+  return (SAFE_TOOL_RECEIPT_ERROR_CODES as readonly string[]).includes(normalized)
+    ? normalized as SafeToolReceiptErrorCode
+    : 'unknown'
+}
+
 function safeLegacyText(value: string) {
   const normalized = value.trim().replace(/\s+/g, ' ')
   if (!normalized || Array.from(normalized).length > 16_000 || isSensitiveLedgerText(normalized)) return undefined
@@ -469,6 +862,9 @@ function stableHash(value: string) {
 }
 
 function terminalNextStep(status: SecretaryLedgerTaskStatus) {
+  if (status === 'queued') return '任务已加入队列，等待开始。'
+  if (status === 'running') return '任务正在推进。'
+  if (status === 'awaiting_approval') return '等待用户确认后继续。'
   if (status === 'completed') return '任务已完成。'
   if (status === 'cancelled') return '任务已取消，可按需要重新开始。'
   if (status === 'paused') return '任务已暂停，等待用户继续。'

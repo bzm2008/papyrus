@@ -1,6 +1,8 @@
 import {
   approveWorkAssistantAction,
+  approveControlledTerminalAction,
   cancelWorkAssistantRun,
+  executeControlledTerminalAction,
   executeWorkAssistantAction,
   getWorkAssistantDesktopStatus,
   inspectWorkAssistantFile,
@@ -9,6 +11,7 @@ import {
   openWorkAssistantFile,
   openWorkAssistantUrl,
   previewWorkAssistantAction,
+  previewControlledTerminalAction,
   revealWorkAssistantFile,
   scanWorkAssistantDownloads,
   scanWorkAssistantRoot,
@@ -28,6 +31,11 @@ import { applyWebArchive, createWebArchivePreview, type WebArchivePreview } from
 import { extractPublicWebPage } from './webExtractService'
 import { approvalChoices, effectiveRisk } from './workAssistantPolicy'
 import { ALL_WORK_ASSISTANT_TOOLS } from './workAssistantRegistry'
+import {
+  toPublicAssistantApprovalRequest,
+  toPublicAssistantToolCall,
+  toPublicAssistantToolResult,
+} from './workAssistantReceipt'
 import type {
   AssistantApprovalChoice,
   AssistantApprovalRequest,
@@ -49,7 +57,14 @@ type ExecuteToolInput = {
   runId: string
   toolCall: AssistantToolCall
   signal?: AbortSignal
-  emit?: (event: WorkAssistantEvent) => void
+  // Existing consumers often use `events.push(event)` as an expression body.
+  // Keep that callback shape valid while still awaiting asynchronous ledger
+  // handlers before crossing an approval boundary.
+  emit?: (event: WorkAssistantEvent) => unknown
+  terminalModelDataHandling?: {
+    provider: string
+    maxChars: number
+  }
 }
 
 type CachedRunApprovalGrant = {
@@ -66,6 +81,7 @@ const webArchivePreviewCache = new Map<string, { result: WebExtractResult; previ
 const webArchivePreviewRunIds = new Map<string, string>()
 const workspaceRunIds = new Set<string>()
 const browserRunIds = new Set<string>()
+const terminalRunIds = new Set<string>()
 const failureCounts = new Map<string, number>()
 const MAX_CANCELLED_RUNS = 256
 const cancelledRuns = new Set<string>()
@@ -195,7 +211,7 @@ function markRunEnded(runId: string) {
 }
 
 async function cancelRunScopedState(runId: string): Promise<string[]> {
-  const cancelWorkspace = workspaceRunIds.has(runId)
+  const cancelWorkspace = workspaceRunIds.has(runId) || terminalRunIds.has(runId)
   const cancelBrowser = browserRunIds.has(runId)
   markRunCancelled(runId)
   clearRunLocalState(runId)
@@ -211,6 +227,7 @@ async function cancelRunScopedState(runId: string): Promise<string[]> {
   }
   workspaceRunIds.delete(runId)
   browserRunIds.delete(runId)
+  terminalRunIds.delete(runId)
   return failures
 }
 
@@ -283,6 +300,17 @@ function sanitizedToolData(toolName: string, value: unknown): Record<string, unk
       memoryUsedBytes: status.memoryUsedBytes,
       disks,
       capabilities: status.capabilities,
+    }
+  }
+  if (toolName === 'terminal_pdf_to_text' || toolName === 'terminal_document_to_text') {
+    const result = value as Record<string, unknown>
+    return {
+      command: result.command,
+      outputChars: result.outputChars,
+      truncated: result.truncated === true,
+      // The extractor text remains transient in the active run so the model
+      // can prepare an answer. Tool UI and audit receipts never render it.
+      text: typeof result.text === 'string' ? result.text.slice(0, 48_000) : undefined,
     }
   }
   return Array.isArray(value) ? { items: value } : value as Record<string, unknown>
@@ -431,17 +459,33 @@ function syntheticPreview(call: AssistantToolCall, risk: AssistantToolPreview['r
 }
 
 export async function executeAssistantToolCall(input: ExecuteToolInput): Promise<AssistantToolResult> {
-  const emit = input.emit ?? dispatch
+  const rawEmit = input.emit ?? dispatch
   const call = { ...input.toolCall, runId: input.runId }
+  const emit = async (event: WorkAssistantEvent) => {
+    if (event.type === 'tool.started') {
+      await rawEmit({ ...event, toolCall: toPublicAssistantToolCall(event.toolCall) })
+      return
+    }
+    if (event.type === 'tool.completed') {
+      await rawEmit({ ...event, result: toPublicAssistantToolResult(call.name, event.result) })
+      return
+    }
+    if (event.type === 'approval.required') {
+      await rawEmit({ ...event, request: toPublicAssistantApprovalRequest(event.request, call.name) })
+      return
+    }
+    await rawEmit(event)
+  }
   const initialManifest = ALL_WORK_ASSISTANT_TOOLS.find((item) => item.name === call.name)
   if (initialManifest?.executor === 'browser_bridge') browserRunIds.add(input.runId)
   if (initialManifest?.executor === 'native') workspaceRunIds.add(input.runId)
+  if (initialManifest?.executor === 'terminal') terminalRunIds.add(input.runId)
   const key = failureKey(call)
-  emit({ type: 'tool.started', runId: input.runId, toolCall: call, at: now() })
+  await emit({ type: 'tool.started', runId: input.runId, toolCall: call, at: now() })
 
   if ((failureCounts.get(key) ?? 0) >= 2) {
     const guarded = { ok: false, summary: '相同工具请求连续失败，已停止自动重试。', errorCode: 'loop_guard', recoverable: true }
-    emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: guarded, at: now() })
+    await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: guarded, at: now() })
     return guarded
   }
 
@@ -452,7 +496,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
 
     if (call.name === 'file_plan_batch') {
       workspaceRunIds.add(input.runId)
-      emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '正在生成安全预览', at: now() })
+      await emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '正在生成安全预览', at: now() })
       preview = await previewWorkAssistantAction({
         runId: input.runId,
         toolCallId: call.id,
@@ -463,7 +507,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       previewCache.set(preview.id, preview)
       previewRunIds.set(preview.id, input.runId)
       const result = { ok: true, summary: '文件操作预览已生成。', data: { previewId: preview.id, preview } }
-      emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+      await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
       return result
     }
 
@@ -481,6 +525,16 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       preview = archivePreview
       webArchivePreviewCache.set(archivePreview.id, { result: archiveInput.result, preview: archivePreview })
       webArchivePreviewRunIds.set(archivePreview.id, input.runId)
+    } else if (manifest.executor === 'terminal') {
+      terminalRunIds.add(input.runId)
+      await emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '正在生成受控文档工具预览', at: now() })
+      preview = await previewControlledTerminalAction({
+        runId: input.runId,
+        toolCallId: call.id,
+        toolName: call.name,
+        arguments: call.arguments,
+      })
+      throwIfRunCancelled(input.runId, input.signal)
     } else if (manifest.executor === 'browser_bridge' && manifest.defaultRisk !== 'read') {
       browserRunIds.add(input.runId)
       preview = await previewBrowserBridgeAction(call, input.signal)
@@ -491,6 +545,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     if (preview) {
       if (manifest.executor === 'browser_bridge') browserRunIds.add(input.runId)
       if (manifest.executor === 'native') workspaceRunIds.add(input.runId)
+      if (manifest.executor === 'terminal') terminalRunIds.add(input.runId)
       const risk = effectiveRisk(manifest.defaultRisk, preview.risk)
       const approvalKey =
         call.name === 'file_apply_batch' && Array.isArray(preview.scope) && preview.scope.length
@@ -517,9 +572,12 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
           runId: input.runId,
           toolCallId: call.id,
           reason: preview.impactSummary,
-          allowedChoices: approvalChoices(risk),
+          allowedChoices: manifest.executor === 'terminal' ? ['once', 'deny'] : approvalChoices(risk),
+          ...(manifest.executor === 'terminal' && input.terminalModelDataHandling
+            ? { modelDataHandling: input.terminalModelDataHandling }
+            : {}),
         }
-        emit({ type: 'approval.required', runId: input.runId, request, at: now() })
+        await emit({ type: 'approval.required', runId: input.runId, request, at: now() })
         choice = await waitForApproval(request, input.signal)
       }
       if (choice === 'deny') {
@@ -527,12 +585,38 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
           await rejectBrowserAction(preview.id, input.runId).catch(() => undefined)
         }
         const denied = { ok: false, summary: '用户已拒绝该操作。', errorCode: 'cancelled', recoverable: true }
-        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: denied, at: now() })
+        await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: denied, at: now() })
         return denied
       }
 
       throwIfRunCancelled(input.runId, input.signal)
-      emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '审批通过，正在执行', at: now() })
+      await emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '审批通过，正在执行', at: now() })
+      if (manifest.executor === 'terminal') {
+        terminalRunIds.add(input.runId)
+        const grant = await approveControlledTerminalAction(preview.id, input.runId, choice)
+        throwIfRunCancelled(input.runId, input.signal)
+        const data = await executeControlledTerminalAction(preview.id, grant.token, input.runId, input.signal)
+        const cancellationRequested = input.signal?.aborted || cancelledRuns.has(input.runId)
+        const result = cancellationRequested && data.ok
+          ? {
+              ok: false as const,
+              summary: '受控文档工具可能已完成，但取消请求到达时结果未确认；请检查交付物后再决定是否重试。',
+              errorCode: 'request_uncertain' as const,
+              recoverable: true,
+              data: sanitizedToolData(call.name, data),
+            }
+          : data.ok
+            ? { ok: true as const, summary: data.summary, data: sanitizedToolData(call.name, data) }
+            : {
+                ok: false as const,
+                summary: data.summary,
+                errorCode: data.errorCode ?? 'terminal_failed',
+                recoverable: data.errorCode !== 'terminal_failed',
+                data: sanitizedToolData(call.name, data),
+              }
+        await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        return result
+      }
       if (call.name === 'file_apply_batch') {
         workspaceRunIds.add(input.runId)
         nativeGrant ??= await approveWorkAssistantAction(preview.id, input.runId, choice)
@@ -566,7 +650,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         if (!result.ok && approvalKey && (result.errorCode === 'stale_preview' || result.errorCode === 'blocked')) {
           runApprovalGrants.delete(approvalKey)
         }
-        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
       }
       if (manifest.executor === 'project') {
@@ -575,7 +659,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         const result = applyWebArchive(pending.result, pending.preview)
         webArchivePreviewCache.delete(preview.id)
         webArchivePreviewRunIds.delete(preview.id)
-        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
       }
       if (manifest.executor === 'browser_bridge') {
@@ -599,7 +683,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
               errorCode: 'request_uncertain' as const,
               recoverable: true,
             }
-            emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: uncertain, at: now() })
+            await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: uncertain, at: now() })
             return uncertain
           }
           throw error
@@ -623,7 +707,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
               data: sanitizedToolData(call.name, data),
             }
           : { ok: true as const, summary: resultSummary(data), data: sanitizedToolData(call.name, data) }
-        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
       }
     }
@@ -643,13 +727,13 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         }
       : { ok: true as const, summary: resultSummary(data), data: sanitizedToolData(call.name, data) }
     failureCounts.delete(key)
-    emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+    await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
     return result
   } catch (error) {
     if (activeApprovalKey) runApprovalGrants.delete(activeApprovalKey)
     if (error instanceof RunEndedError) {
       const ended = { ok: false, summary: '运行已结束，已忽略待处理审批。', errorCode: 'run_ended', recoverable: false }
-      emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: ended, at: now() })
+      await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: ended, at: now() })
       return ended
     }
     if (error instanceof DOMException && error.name === 'AbortError') {
@@ -657,12 +741,12 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       const cancelled = cancellationFailures.length > 0
         ? { ok: false, summary: '运行已取消，但部分本地操作未能确认停止，请检查工作助手状态。', errorCode: 'cancel_failed', recoverable: true }
         : { ok: false, summary: '运行已取消。', errorCode: 'cancelled', recoverable: true }
-      emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: cancelled, at: now() })
+      await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: cancelled, at: now() })
       return cancelled
     }
     failureCounts.set(key, (failureCounts.get(key) ?? 0) + 1)
     const failed = safeToolFailure(error)
-    emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: failed, at: now() })
+    await emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: failed, at: now() })
     return failed
   }
 }
@@ -738,6 +822,7 @@ export function dispatchOrderedWorkAssistantEvent(event: WorkAssistantEvent) {
       clearRunLocalState(event.runId, 'ended')
       workspaceRunIds.delete(event.runId)
       browserRunIds.delete(event.runId)
+      terminalRunIds.delete(event.runId)
       // Keep a cancelled run marked until bounded eviction; a late terminal
       // event must not reopen its browser capability window.
     }
@@ -757,6 +842,7 @@ export function resetWorkAssistantRuntimeForTests() {
   webArchivePreviewRunIds.clear()
   workspaceRunIds.clear()
   browserRunIds.clear()
+  terminalRunIds.clear()
   failureCounts.clear()
   cancelledRuns.clear()
   endedRuns.clear()

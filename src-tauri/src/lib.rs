@@ -22,6 +22,7 @@ pub fn run() {
         .setup(|app| {
             desktop_lifecycle::install(app)?;
             app.manage(work_assistant::init_state(&app.handle())?);
+            app.manage(work_assistant::init_controlled_terminal_state());
             app.manage(work_assistant::browser_bridge::init_browser_bridge_state());
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -57,6 +58,9 @@ pub fn run() {
             secretary_ledger::secretary_ledger_delete_memory,
             secretary_ledger::secretary_ledger_search,
             secretary_ledger::secretary_ledger_create_task,
+            secretary_ledger::secretary_ledger_start_task,
+            secretary_ledger::secretary_ledger_claim_task,
+            secretary_ledger::secretary_ledger_persist_task_progress,
             secretary_ledger::secretary_ledger_get_task,
             secretary_ledger::secretary_ledger_list_tasks,
             secretary_ledger::secretary_ledger_update_task,
@@ -91,6 +95,9 @@ pub fn run() {
             work_assistant::work_assistant_preview,
             work_assistant::work_assistant_approve,
             work_assistant::work_assistant_execute,
+            work_assistant::work_assistant_terminal_preview,
+            work_assistant::work_assistant_terminal_approve,
+            work_assistant::work_assistant_terminal_execute,
             work_assistant::work_assistant_doctor,
             work_assistant::browser_bridge_status,
             work_assistant::browser_bridge_start_pairing,
@@ -1145,6 +1152,9 @@ mod security_tests {
                 "secretary_ledger::secretary_ledger_delete_memory",
                 "secretary_ledger::secretary_ledger_search",
                 "secretary_ledger::secretary_ledger_create_task",
+                "secretary_ledger::secretary_ledger_start_task",
+                "secretary_ledger::secretary_ledger_claim_task",
+                "secretary_ledger::secretary_ledger_persist_task_progress",
                 "secretary_ledger::secretary_ledger_get_task",
                 "secretary_ledger::secretary_ledger_list_tasks",
                 "secretary_ledger::secretary_ledger_update_task",
@@ -1154,6 +1164,7 @@ mod security_tests {
                 "secretary_ledger::secretary_ledger_save_checkpoint",
                 "secretary_ledger::secretary_ledger_load_latest_checkpoint",
                 "secretary_ledger::secretary_ledger_import_legacy_batch",
+                "desktop_lifecycle::complete_explicit_exit",
                 "work_assistant::work_assistant_capabilities",
                 "work_assistant::work_assistant_list_roots",
                 "work_assistant::work_assistant_add_root",
@@ -1178,6 +1189,9 @@ mod security_tests {
                 "work_assistant::work_assistant_preview",
                 "work_assistant::work_assistant_approve",
                 "work_assistant::work_assistant_execute",
+                "work_assistant::work_assistant_terminal_preview",
+                "work_assistant::work_assistant_terminal_approve",
+                "work_assistant::work_assistant_terminal_execute",
                 "work_assistant::work_assistant_doctor",
                 "work_assistant::browser_bridge_status",
                 "work_assistant::browser_bridge_start_pairing",
@@ -1231,6 +1245,9 @@ mod security_tests {
             "secretary_ledger::secretary_ledger_create_memory",
             "secretary_ledger::secretary_ledger_search",
             "secretary_ledger::secretary_ledger_create_task",
+            "secretary_ledger::secretary_ledger_start_task",
+            "secretary_ledger::secretary_ledger_claim_task",
+            "secretary_ledger::secretary_ledger_persist_task_progress",
             "secretary_ledger::secretary_ledger_record_event",
             "secretary_ledger::secretary_ledger_save_checkpoint",
             "secretary_ledger::secretary_ledger_import_legacy_batch",

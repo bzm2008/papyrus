@@ -10,30 +10,60 @@ async function fixture() {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-release-check-'))
   await fs.mkdir(path.join(rootDir, 'src-tauri'), { recursive: true })
   await fs.mkdir(path.join(rootDir, 'src-tauri', 'src'), { recursive: true })
+  await fs.mkdir(path.join(rootDir, 'apps', 'browser-bridge'), { recursive: true })
+  await fs.mkdir(path.join(rootDir, 'apps', 'wps-word-addin', 'installer'), { recursive: true })
   await fs.mkdir(path.join(rootDir, 'dist-browser-bridge'), { recursive: true })
   await fs.mkdir(path.join(rootDir, 'docs', 'testing'), { recursive: true })
+  await fs.mkdir(path.join(rootDir, 'scripts', 'ci'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'scripts', 'ci', 'debian13-container.sh'), '#!/usr/bin/env bash\n')
+  await fs.writeFile(path.join(rootDir, 'scripts', 'package-wps-addin-release.ps1'), `
+    $canonicalVersion = [string]$packageJson.version
+    if ($Version -and $Version -ne $canonicalVersion) { throw 'version mismatch' }
+    & node $versionChecker --check
+  `)
+  await fs.writeFile(path.join(rootDir, 'apps', 'wps-word-addin', 'installer', 'update.ps1'), `
+    function Assert-OfficialManifestUrl {}
+    function Assert-OfficialPackageUrl {}
+    function Assert-ExtractedRelease {}
+    function Compare-StableVersion {}
+  `)
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), JSON.stringify({
+    version: '1.0.0',
     app: { security: { csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob: https:; font-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" } },
   }))
+  await fs.writeFile(path.join(rootDir, 'src-tauri', 'Cargo.toml'), '[package]\nname = "papyrus"\nversion = "1.0.0"\nedition = "2021"\n')
+  await fs.writeFile(path.join(rootDir, 'src-tauri', 'Cargo.lock'), 'version = 4\n\n[[package]]\nname = "papyrus"\nversion = "1.0.0"\n')
+  await fs.writeFile(path.join(rootDir, 'apps', 'browser-bridge', 'manifest.json'), JSON.stringify({ manifest_version: 3, version: '1.0.0' }))
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'src', 'lib.rs'), REQUIRED_COMMANDS.map((command) => `work_assistant::${command},`).join('\n'))
   await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'manifest.json'), JSON.stringify({
     manifest_version: 3,
-    version: '0.1.2',
+    version: '1.0.0',
     permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
     host_permissions: ['http://127.0.0.1/*'],
   }))
   await fs.writeFile(path.join(rootDir, 'README.md'), 'Papyrus Work Assistant and Browser Bridge release notes')
   await fs.writeFile(path.join(rootDir, 'package.json'), JSON.stringify({
-    version: '0.1.2',
+    version: '1.0.0',
     scripts: {
+      'version:sync': 'node scripts/lib/release-version.mjs',
+      'version:check': 'node scripts/lib/release-version.mjs --check',
+      'test:release-scripts': 'node --test scripts/lib/release-checks.test.mjs scripts/lib/release-version.test.mjs',
       'ci:desktop': 'npm run lint && npm run release:assistant-check',
       'browser:package': 'npm run browser:build && node scripts/package-browser-bridge.mjs',
       'check:browser': 'npm run test:browser && npm run browser:build && cargo test --manifest-path src-tauri/Cargo.toml --locked browser_bridge && cargo test --manifest-path src-tauri/Cargo.toml --locked web_extract',
     },
   }))
+  await fs.writeFile(path.join(rootDir, 'package-lock.json'), JSON.stringify({
+    name: 'papyrus',
+    version: '1.0.0',
+    lockfileVersion: 3,
+    packages: { '': { name: 'papyrus', version: '1.0.0' } },
+  }))
   for (const relativePath of ['docs/BROWSER_BRIDGE.md', 'docs/testing/WORK_ASSISTANT_PLATFORM_MATRIX.md', 'docs/testing/WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md']) {
     await fs.writeFile(path.join(rootDir, relativePath), '# release evidence')
   }
+  await fs.writeFile(path.join(rootDir, 'docs', 'PAPYRUS_1.0.0_RELEASE.md'), '# Papyrus 1.0.0 release')
+  await fs.writeFile(path.join(rootDir, 'docs', 'testing', 'DEBIAN_13_VALIDATION.md'), '# Debian 13 validation')
   await fs.mkdir(path.join(rootDir, '.github', 'workflows'), { recursive: true })
   const desktopWorkflow = `
     on:
@@ -49,6 +79,10 @@ async function fixture() {
     - run: npx playwright install --with-deps chromium
     - run: npx playwright install chromium
     - run: npm run test:browser:e2e
+  debian13:
+    name: Debian 13 container validation
+    runs-on: ubuntu-24.04
+    - run: docker run --rm debian:13 bash /workspace/scripts/ci/debian13-container.sh
   `
   const packageWorkflow = `
     on: { workflow_dispatch: }
@@ -162,6 +196,20 @@ test('extension output version must match the application package version', asyn
   }
 })
 
+test('release checks reject source version drift before packaging', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), JSON.stringify({
+      version: '0.1.2',
+      app: { security: { csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob: https:; font-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" } },
+    }))
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('src-tauri/tauri.conf.json version must match package.json.version')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
 test('null CSP fails closed', async () => {
   const rootDir = await fixture()
   try {
@@ -198,6 +246,19 @@ test('release phase requires all platform workflow entries and overlays', async 
   }
 })
 
+test('release phase requires a Debian 13 container validation job', async () => {
+  const rootDir = await fixture()
+  try {
+    const workflowPath = path.join(rootDir, '.github', 'workflows', 'desktop-ci.yml')
+    const workflow = await fs.readFile(workflowPath, 'utf8')
+    await fs.writeFile(workflowPath, workflow.replace('debian:13', 'debian:12'))
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('Debian 13 container validation')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
 test('release phase fails when a workflow has runners but misses required release steps', async () => {
   const rootDir = await fixture()
   try {
@@ -216,6 +277,53 @@ test('release phase fails when the aggregate script bypasses the release checker
     await fs.writeFile(path.join(rootDir, 'package.json'), JSON.stringify({ scripts: { 'ci:desktop': 'npm run lint', 'browser:package': 'node scripts/package-browser-bridge.mjs' } }))
     const report = await runReleaseChecks({ rootDir, phase: 'release' })
     assert.ok(report.failures.some((failure) => failure.includes('ci:desktop must invoke the release-phase assistant checker')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release phase requires canonical release-version scripts', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'package.json'), JSON.stringify({
+      version: '1.0.0',
+      scripts: {
+        'ci:desktop': 'npm run lint && npm run release:assistant-check',
+        'browser:package': 'node scripts/package-browser-bridge.mjs',
+        'check:browser': 'cargo test --manifest-path src-tauri/Cargo.toml --locked browser_bridge && cargo test --manifest-path src-tauri/Cargo.toml --locked web_extract',
+      },
+    }))
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('version:sync must invoke the canonical release-version synchronizer')))
+    assert.ok(report.failures.some((failure) => failure.includes('version:check must fail closed on release metadata drift')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release phase runs release-version tests through the aggregate script', async () => {
+  const rootDir = await fixture()
+  try {
+    const packagePath = path.join(rootDir, 'package.json')
+    const packageJson = JSON.parse(await fs.readFile(packagePath, 'utf8'))
+    packageJson.scripts['test:release-scripts'] = 'node --test scripts/lib/release-checks.test.mjs'
+    await fs.writeFile(packagePath, JSON.stringify(packageJson))
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('test:release-scripts must run release-version consistency tests')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release phase requires the WPS packager and updater to enforce the canonical release boundary', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'scripts', 'package-wps-addin-release.ps1'), '$Version = "9.9.9"\n')
+    await fs.writeFile(path.join(rootDir, 'apps', 'wps-word-addin', 'installer', 'update.ps1'), 'function Update-PublishFile {}\n')
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+
+    assert.ok(report.failures.some((failure) => failure.includes('WPS packager must reject a version that differs from package.json')))
+    assert.ok(report.failures.some((failure) => failure.includes('WPS updater must validate the official package URL and extracted release metadata')))
   } finally {
     await cleanup(rootDir)
   }
@@ -262,6 +370,19 @@ test('missing documentation and unknown phase are reported', async () => {
     assert.ok(missingDocs.failures.some((failure) => failure.includes('docs/BROWSER_BRIDGE.md')))
     const unknown = await runReleaseChecks({ rootDir, phase: 'preview' })
     assert.deepEqual(unknown.failures, ['unknown release check phase: preview'])
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release checks require the 1.0.0 release and Debian 13 validation documents', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.rm(path.join(rootDir, 'docs', 'PAPYRUS_1.0.0_RELEASE.md'))
+    await fs.rm(path.join(rootDir, 'docs', 'testing', 'DEBIAN_13_VALIDATION.md'))
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('docs/PAPYRUS_1.0.0_RELEASE.md')))
+    assert.ok(report.failures.some((failure) => failure.includes('docs/testing/DEBIAN_13_VALIDATION.md')))
   } finally {
     await cleanup(rootDir)
   }

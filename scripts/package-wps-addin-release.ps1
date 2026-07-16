@@ -8,11 +8,29 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $distDir = Join-Path $repoRoot "dist-wps-addin"
 $installerDir = Join-Path $repoRoot "apps\wps-word-addin\installer"
-$packageJson = Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json
+$packageJsonPath = Join-Path $repoRoot "package.json"
+$versionChecker = Join-Path $PSScriptRoot "lib\release-version.mjs"
+$packageJson = Get-Content -LiteralPath $packageJsonPath -Raw | ConvertFrom-Json
+$canonicalVersion = [string]$packageJson.version
 
-if (-not $Version) {
-  $Version = [string]$packageJson.version
+if (-not $canonicalVersion) {
+  throw "package.json must define the canonical WPS release version."
 }
+
+if (-not (Test-Path -LiteralPath $versionChecker)) {
+  throw "Missing canonical release-version checker."
+}
+
+if ($Version -and $Version -ne $canonicalVersion) {
+  throw "WPS package Version $Version does not match package.json version $canonicalVersion."
+}
+
+& node $versionChecker --check
+if ($LASTEXITCODE -ne 0) {
+  throw "Local release metadata must match package.json before packaging the WPS add-in."
+}
+
+$Version = $canonicalVersion
 
 if (-not (Test-Path $distDir)) {
   throw "dist-wps-addin not found. Run npm run wps:build first."

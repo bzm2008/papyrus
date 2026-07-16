@@ -4,13 +4,13 @@
 
 ## 支持环境
 
-| 平台 | 必测环境 | 浏览器 | 包类型 |
-| --- | --- | --- | --- |
-| Windows | Windows 11 当前稳定版，x64 | Edge 或 Chrome 当前稳定版 | NSIS |
-| macOS | 当前主版本及上一主版本，Apple Silicon 或 Intel | Chrome 当前稳定版 | `.app`、DMG |
-| Linux | Ubuntu 24.04 GNOME；另一个常见 Linux 桌面（例如 Fedora KDE） | Chromium 或 Chrome 当前稳定版 | DEB、AppImage |
+| 平台 | 必测环境 | 浏览器 | 包类型 | 发布等级 |
+| --- | --- | --- | --- | --- |
+| Windows | Windows 10 22H2 与 Windows 11 当前稳定版，x64 | Edge 或 Chrome 当前稳定版 | NSIS | 功能认证硬门 |
+| Debian | Debian 13 常用桌面环境，x64 | Chromium 或 Chrome 当前稳定版 | DEB、AppImage | 功能认证硬门 |
+| macOS | 三平台 CI 包构建、启动与核心兼容 smoke | Chrome 当前稳定版 | `.app`、DMG | 兼容门 |
 
-每份记录至少包含：OS 版本、架构、Papyrus commit、包类型、桌面环境、浏览器版本、测试日期、测试者、结果、日志/截图路径。
+每份记录至少包含：OS 版本、架构、Papyrus commit、包类型、桌面环境、浏览器版本、测试日期、测试者、结果、日志/截图路径。Windows 10、Windows 11 和 Debian 13 必须分别留存真实设备记录；GitHub Hosted Runner 或 Debian 容器不能替代这些记录。
 
 ## 原生电脑助手案例
 
@@ -45,15 +45,16 @@
 2. 取消含部分回复时不重复消息、不创建待应用补丁；迟到事件被丢弃。
 3. 简单任务只创建单 Agent；复杂任务显示子 Agent 树和聚合结果。
 4. 右侧工作区按任务自动打开；手动关闭后在同一次运行中保持关闭。
-5. 1040x680、1360x860 和窄 WebView 宽度下无文字重叠、按钮出界或不可滚动区域。
+5. 关闭主窗口后可从托盘恢复；显式退出前保存安全检查点，重启后不会重复高风险动作。
+6. 1040x680、1360x860 和窄 WebView 宽度下无文字重叠、按钮出界或不可滚动区域。
 
 ## 结果规则
 
 - 每个必测案例必须填写 `pass`、`fail` 或 `blocked`，并附证据。
-- Linux 文件管理器只能打开父目录时可记录 warning，不阻断发布。
+- Debian 文件管理器只能打开父目录时可记录 warning，不阻断发布。
 - 任一路径逃逸、过期审批执行、受限页面动作、重复执行、崩溃或数据丢失都是 release blocker。
 - smoke 包未签名只用于安装/启动验证；生产签名、 notarization、Linux 仓库签名和 updater 签名必须在受保护凭据工作流中完成。
 
 ## 记录索引
 
-使用 [WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md](./WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md) 为每台真实设备建立记录，并在 [PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md](../PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md) 汇总。
+使用 [WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md](./WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md) 为每台真实设备建立记录，并在 [PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md](../PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md) 汇总。Debian 13 的容器和实机范围见 [DEBIAN_13_VALIDATION.md](./DEBIAN_13_VALIDATION.md)。

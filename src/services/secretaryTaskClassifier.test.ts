@@ -8,6 +8,7 @@ describe('classifySecretaryTask domain routing', () => {
     expect(classifySecretaryTask('整理下载目录里的 PDF').domain).toBe('work_assistant')
     expect(classifySecretaryTask('打开 VS Code 应用').domain).toBe('work_assistant')
     expect(classifySecretaryTask('查看电脑 CPU 和内存状态').domain).toBe('work_assistant')
+    expect(classifySecretaryTask('从项目 PDF 提取正文').domain).toBe('work_assistant')
   })
 
   it('routes collection plus writing to the mixed pipeline', () => {

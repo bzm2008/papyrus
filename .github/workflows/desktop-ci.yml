@@ -64,3 +64,20 @@ jobs:
 
       - name: Run real Chromium browser tests
         run: npm run test:browser:e2e
+
+  debian13:
+    name: Debian 13 container validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and validate the Debian 13 package surfaces
+        env:
+          CI: true
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            --env CI \
+            debian:13 \
+            bash scripts/ci/debian13-container.sh

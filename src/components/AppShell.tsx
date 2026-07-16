@@ -20,6 +20,7 @@ import { RightPanel } from './RightPanel'
 import { SettingsPanel } from './SettingsPanel'
 import { StatusBar } from './StatusBar'
 import { StoryDashboard } from './StoryDashboard'
+import { shouldShowLegacyLeftSidebar } from './secretaryWorkspaceLayout'
 
 export function AppShell() {
   const isFirstLaunch = useAppStore((state) => state.isFirstLaunch)
@@ -122,7 +123,7 @@ function MainWorkbench() {
   useEffect(() => installDesktopLifecycleHandlers(), [])
 
   const isFlowMode = mode === 'flow'
-  const showLeft = columnMode === 3
+  const showLeft = shouldShowLegacyLeftSidebar(mode, columnMode)
   const showRight = !isFlowMode && columnMode >= 2
 
   return (

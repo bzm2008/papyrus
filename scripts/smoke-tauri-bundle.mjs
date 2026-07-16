@@ -10,6 +10,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const DEFAULT_GRACE_MS = 10_000
 const MAX_OUTPUT = 128 * 1024
 const OUTPUT_MARKER = '.papyrus-bundle-smoke'
+const STABLE_RELEASE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
 
 export function isPathWithin(parentPath, childPath) {
   const parent = path.resolve(parentPath)
@@ -210,27 +211,50 @@ async function walkDirectories(rootDir) {
   return result
 }
 
-export async function findBundleArtifacts(bundleDir, platform = process.platform) {
+function selectVersionedFiles(files, expectedVersion) {
+  if (expectedVersion === undefined) return files
+  return files.filter((file) => {
+    const name = path.basename(file)
+    return name.includes('_' + expectedVersion + '_') || name.includes('-' + expectedVersion + '-')
+  })
+}
+
+export async function findBundleArtifacts(bundleDir, platform = process.platform, expectedVersion) {
   const files = await walkFiles(bundleDir)
+  const versionedFiles = selectVersionedFiles(files, expectedVersion)
   const byName = (name) => files.find((file) => path.basename(file).toLowerCase() === name)
   if (platform === 'win32') {
     return {
-      installer: files.find((file) => /\\nsis\\[^\\]+-setup\.exe$/i.test(file)) ||
-        files.find((file) => /-setup\.exe$/i.test(file)),
+      installer: versionedFiles.find((file) => /\\nsis\\[^\\]+-setup\.exe$/i.test(file)) ||
+        versionedFiles.find((file) => /-setup\.exe$/i.test(file)),
     }
   }
   if (platform === 'darwin') {
     const directories = await walkDirectories(bundleDir)
     return {
-      dmg: files.find((file) => file.toLowerCase().endsWith('.dmg')),
+      dmg: versionedFiles.find((file) => file.toLowerCase().endsWith('.dmg')),
       app: directories.find((directory) => directory.toLowerCase().endsWith('.app')),
     }
   }
   return {
-    appImage: files.find((file) => file.toLowerCase().endsWith('.appimage')),
-    deb: files.find((file) => file.toLowerCase().endsWith('.deb')),
+    appImage: versionedFiles.find((file) => file.toLowerCase().endsWith('.appimage')),
+    deb: versionedFiles.find((file) => file.toLowerCase().endsWith('.deb')),
     binary: byName('papyrus'),
   }
+}
+
+export async function readProjectReleaseVersion(rootDir = ROOT) {
+  const packagePath = path.join(rootDir, 'package.json')
+  let value
+  try {
+    value = JSON.parse(await fs.readFile(packagePath, 'utf8'))
+  } catch (error) {
+    throw new Error('could not read package.json release version: ' + (error instanceof Error ? error.message : String(error)))
+  }
+  if (typeof value?.version !== 'string' || !STABLE_RELEASE_VERSION.test(value.version)) {
+    throw new Error('package.json version must be a stable numeric release version for bundle smoke')
+  }
+  return value.version
 }
 
 export function requireBundleArtifacts(artifacts, platform) {
@@ -431,8 +455,8 @@ async function findNamedFile(rootDir, name) {
   return files.find((file) => path.basename(file).toLowerCase() === name.toLowerCase())
 }
 
-async function smokeWindows(bundleDir, outputDir, graceMs) {
-  const artifacts = await findBundleArtifacts(bundleDir, 'win32')
+async function smokeWindows(bundleDir, outputDir, graceMs, releaseVersion) {
+  const artifacts = await findBundleArtifacts(bundleDir, 'win32', releaseVersion)
   requireBundleArtifacts(artifacts, 'win32')
   const installDir = path.join(outputDir, 'windows-install')
   await fs.mkdir(installDir, { recursive: true })
@@ -469,8 +493,8 @@ async function smokeWindows(bundleDir, outputDir, graceMs) {
   }
 }
 
-async function smokeMac(bundleDir, outputDir, graceMs) {
-  const artifacts = await findBundleArtifacts(bundleDir, 'darwin')
+async function smokeMac(bundleDir, outputDir, graceMs, releaseVersion) {
+  const artifacts = await findBundleArtifacts(bundleDir, 'darwin', releaseVersion)
   requireBundleArtifacts(artifacts, 'darwin')
   const appExecutable = await findNamedFile(path.join(artifacts.app, 'Contents', 'MacOS'), 'papyrus')
   if (!appExecutable) throw new Error('Papyrus.app executable was not found')
@@ -526,8 +550,8 @@ async function smokeMac(bundleDir, outputDir, graceMs) {
   }
 }
 
-async function smokeLinux(bundleDir, outputDir, graceMs) {
-  const artifacts = await findBundleArtifacts(bundleDir, 'linux')
+async function smokeLinux(bundleDir, outputDir, graceMs, releaseVersion) {
+  const artifacts = await findBundleArtifacts(bundleDir, 'linux', releaseVersion)
   requireBundleArtifacts(artifacts, 'linux')
   const extractDir = path.join(outputDir, 'linux-deb')
   let debInfo
@@ -569,13 +593,14 @@ async function smokeLinux(bundleDir, outputDir, graceMs) {
 export async function runBundleSmoke(options) {
   const outputDir = await prepareOutputDirectory(options.outputDir, options.bundleDir)
   const platform = process.platform
+  const releaseVersion = await readProjectReleaseVersion()
   const smoke = platform === 'win32'
     ? smokeWindows
     : platform === 'darwin'
       ? smokeMac
       : smokeLinux
-  const result = await smoke(options.bundleDir, outputDir, options.graceMs)
-  const summary = { status: 'pass', platform, bundleDir: options.bundleDir, outputDir, ...result }
+  const result = await smoke(options.bundleDir, outputDir, options.graceMs, releaseVersion)
+  const summary = { status: 'pass', platform, releaseVersion, bundleDir: options.bundleDir, outputDir, ...result }
   await fs.writeFile(path.join(outputDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`)
   return summary
 }

@@ -11,10 +11,19 @@ import {
   parseArgs,
   processGroupTarget,
   processSpawnOptions,
+  readProjectReleaseVersion,
   requireBundleArtifacts,
   requireExecutableMetadata,
   validateOutputDirectory,
 } from './smoke-tauri-bundle.mjs'
+
+const CURRENT_RELEASE_VERSION = JSON.parse(
+  await fs.readFile(path.join(process.cwd(), 'package.json'), 'utf8'),
+).version
+
+test('bundle smoke reads the canonical package release version', async () => {
+  assert.equal(await readProjectReleaseVersion(), CURRENT_RELEASE_VERSION)
+})
 
 test('bundle smoke argument parsing is explicit and bounded', () => {
   const options = parseArgs(['--bundle-dir', 'build/bundle', '--output', 'tmp/smoke', '--grace-ms', '1500'])
@@ -28,17 +37,17 @@ test('bundle artifact discovery ignores symlinks and selects platform packages',
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-bundle-artifacts-'))
   try {
     await fs.mkdir(path.join(root, 'nsis'), { recursive: true })
-    await fs.writeFile(path.join(root, 'nsis', 'Papyrus_0.1.2_x64-setup.exe'), '')
+    await fs.writeFile(path.join(root, 'nsis', 'Papyrus_' + CURRENT_RELEASE_VERSION + '_x64-setup.exe'), '')
     await fs.mkdir(path.join(root, 'macos', 'Papyrus.app', 'Contents', 'MacOS'), { recursive: true })
     await fs.writeFile(path.join(root, 'macos', 'Papyrus.app', 'Contents', 'MacOS', 'papyrus'), '')
     await fs.mkdir(path.join(root, 'dmg'), { recursive: true })
-    await fs.writeFile(path.join(root, 'dmg', 'Papyrus_0.1.2_aarch64.dmg'), '')
+    await fs.writeFile(path.join(root, 'dmg', 'Papyrus_' + CURRENT_RELEASE_VERSION + '_aarch64.dmg'), '')
     await fs.mkdir(path.join(root, 'appimage'), { recursive: true })
-    await fs.writeFile(path.join(root, 'appimage', 'Papyrus_0.1.2_amd64.AppImage'), '')
+    await fs.writeFile(path.join(root, 'appimage', 'Papyrus_' + CURRENT_RELEASE_VERSION + '_amd64.AppImage'), '')
     await fs.mkdir(path.join(root, 'deb'), { recursive: true })
-    await fs.writeFile(path.join(root, 'deb', 'Papyrus_0.1.2_amd64.deb'), '')
+    await fs.writeFile(path.join(root, 'deb', 'Papyrus_' + CURRENT_RELEASE_VERSION + '_amd64.deb'), '')
     try {
-      await fs.symlink(path.join(root, 'nsis', 'Papyrus_0.1.2_x64-setup.exe'), path.join(root, 'symlink-setup.exe'))
+      await fs.symlink(path.join(root, 'nsis', 'Papyrus_' + CURRENT_RELEASE_VERSION + '_x64-setup.exe'), path.join(root, 'symlink-setup.exe'))
     } catch {
       // Windows test hosts without symlink privileges still exercise regular discovery below.
     }
@@ -50,6 +59,32 @@ test('bundle artifact discovery ignores symlinks and selects platform packages',
     assert.match(mac.app, /Papyrus\.app$/i)
     assert.match(linux.appImage, /\.appimage$/i)
     assert.match(linux.deb, /\.deb$/i)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('bundle artifact discovery rejects stale versioned packages', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-bundle-version-'))
+  try {
+    await fs.mkdir(path.join(root, 'nsis'), { recursive: true })
+    await fs.mkdir(path.join(root, 'appimage'), { recursive: true })
+    await fs.mkdir(path.join(root, 'deb'), { recursive: true })
+    await fs.writeFile(path.join(root, 'nsis', 'Papyrus_0.1.2_x64-setup.exe'), '')
+    await fs.writeFile(path.join(root, 'nsis', 'Papyrus_1.0.0_x64-setup.exe'), '')
+    await fs.writeFile(path.join(root, 'appimage', 'Papyrus_0.1.2_amd64.AppImage'), '')
+    await fs.writeFile(path.join(root, 'appimage', 'Papyrus_1.0.0_amd64.AppImage'), '')
+    await fs.writeFile(path.join(root, 'deb', 'Papyrus_0.1.2_amd64.deb'), '')
+    await fs.writeFile(path.join(root, 'deb', 'Papyrus_1.0.0_amd64.deb'), '')
+
+    const windows = await findBundleArtifacts(root, 'win32', '1.0.0')
+    const linux = await findBundleArtifacts(root, 'linux', '1.0.0')
+    const missing = await findBundleArtifacts(root, 'win32', '2.0.0')
+
+    assert.match(windows.installer, /Papyrus_1\.0\.0_x64-setup\.exe$/)
+    assert.match(linux.appImage, /Papyrus_1\.0\.0_amd64\.AppImage$/)
+    assert.match(linux.deb, /Papyrus_1\.0\.0_amd64\.deb$/)
+    assert.equal(missing.installer, undefined)
   } finally {
     await fs.rm(root, { recursive: true, force: true })
   }

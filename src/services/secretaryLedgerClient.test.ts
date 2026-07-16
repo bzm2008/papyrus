@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   bootstrapSecretaryLedger,
+  claimSecretaryLedgerTask,
   createSecretaryLedgerMemory,
   createSecretaryLedgerProject,
   createSecretaryLedgerTask,
@@ -11,12 +12,14 @@ import {
   listSecretaryLedgerMemories,
   listSecretaryLedgerProjects,
   loadLatestSecretaryLedgerCheckpoint,
+  persistSecretaryLedgerTaskProgress,
   recordSecretaryLedgerEvent,
   resetSecretaryLedgerInvokerForTests,
   rollbackSecretaryLedgerMemory,
   saveSecretaryLedgerCheckpoint,
   searchSecretaryLedger,
   setSecretaryLedgerInvokerForTests,
+  startSecretaryLedgerTask,
   updateSecretaryLedgerMemory,
   updateSecretaryLedgerTask,
 } from './secretaryLedgerClient'
@@ -66,6 +69,12 @@ const task = {
 }
 
 const access = { currentProjectId: 'project-1', includeCrossProject: true }
+
+const taskProgress = {
+  task: { ...task, status: 'running' as const },
+  events: [{ taskId: task.id, sequence: 1, eventType: 'started', payload: { phase: 'started' }, createdAt: 3 }],
+  checkpoint: { taskId: task.id, sequence: 1, contextSnapshot: { phase: 'started' }, nextStep: '继续整理。', createdAt: 4 },
+}
 
 beforeEach(() => setTauriRuntime({}))
 
@@ -273,6 +282,56 @@ describe('secretaryLedgerClient', () => {
     expect(invoke).toHaveBeenNthCalledWith(4, 'secretary_ledger_load_latest_checkpoint', { access, taskId: 'task-1' })
   })
 
+  it('maps atomic task start, claim, and progress persistence through the bounded native bridge', async () => {
+    const invoke = vi.fn(async () => taskProgress)
+    setSecretaryLedgerInvokerForTests(invoke)
+    const progress = {
+      task: { status: 'running' as const, scheduleAt: null },
+      events: [{ eventType: 'started', payload: { phase: 'started' } }],
+      checkpoint: { contextSnapshot: { phase: 'started' }, nextStep: '继续整理。' },
+    }
+
+    await expect(startSecretaryLedgerTask(access, {
+      task: { projectId: 'project-1', title: '整理调研摘要', request: '将材料整理为摘要。', status: 'queued' },
+      events: progress.events,
+      checkpoint: progress.checkpoint,
+    })).resolves.toMatchObject({ ok: true, value: taskProgress })
+    await expect(claimSecretaryLedgerTask(access, 'task-1', progress)).resolves.toMatchObject({ ok: true, value: taskProgress })
+    await expect(persistSecretaryLedgerTaskProgress(access, 'task-1', progress)).resolves.toMatchObject({ ok: true, value: taskProgress })
+
+    expect(invoke).toHaveBeenNthCalledWith(1, 'secretary_ledger_start_task', {
+      access,
+      input: {
+        task: { projectId: 'project-1', title: '整理调研摘要', request: '将材料整理为摘要。', status: 'queued' },
+        events: [{ eventType: 'started', payload: { phase: 'started' } }],
+        checkpoint: { contextSnapshot: { phase: 'started' }, nextStep: '继续整理。' },
+      },
+    })
+    expect(invoke).toHaveBeenNthCalledWith(2, 'secretary_ledger_claim_task', {
+      access,
+      id: 'task-1',
+      input: progress,
+    })
+    expect(invoke).toHaveBeenNthCalledWith(3, 'secretary_ledger_persist_task_progress', {
+      access,
+      id: 'task-1',
+      input: progress,
+    })
+  })
+
+  it('rejects transactional task progress without an event before invoking native code', async () => {
+    const invoke = vi.fn(async () => taskProgress)
+    setSecretaryLedgerInvokerForTests(invoke)
+
+    await expect(persistSecretaryLedgerTaskProgress(access, 'task-1', {
+      task: { status: 'paused' },
+      events: [],
+      checkpoint: { contextSnapshot: { phase: 'paused' }, nextStep: '等待继续。' },
+    })).resolves.toMatchObject({ ok: false, code: 'invalid_input' })
+
+    expect(invoke).not.toHaveBeenCalled()
+  })
+
   it('rejects task schedule timestamps outside the native acknowledgement range before invoking', async () => {
     const invoke = vi.fn(async () => task)
     setSecretaryLedgerInvokerForTests(invoke)
@@ -288,6 +347,25 @@ describe('secretaryLedgerClient', () => {
     })).resolves.toMatchObject({ ok: false, code: 'invalid_input' })
 
     expect(invoke).not.toHaveBeenCalled()
+  })
+
+  it('preserves explicit null task patches for native clear semantics', async () => {
+    const invoke = vi.fn(async () => task)
+    setSecretaryLedgerInvokerForTests(invoke)
+    const input = {
+      scheduleAt: null,
+      nextStep: null,
+      publicPlan: null,
+      summary: null,
+    }
+
+    await expect(updateSecretaryLedgerTask(access, 'task-1', input)).resolves.toMatchObject({ ok: true })
+
+    expect(invoke).toHaveBeenCalledWith('secretary_ledger_update_task', {
+      access,
+      id: 'task-1',
+      input,
+    })
   })
 
   it('rejects event and checkpoint JSON that native must not commit without a parseable acknowledgement', async () => {

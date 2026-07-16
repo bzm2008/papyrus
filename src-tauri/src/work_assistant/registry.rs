@@ -1,6 +1,9 @@
+#[cfg(test)]
+use crate::work_assistant::{activate_controlled_terminal_run, init_controlled_terminal_state};
 use crate::work_assistant::{
-    clear_audit_entries, persist_roots, read_audit_entries_page, validate_authorized_root,
-    AssistantErrorPayload, AuditEntry, AuthorizedRoot, AuthorizedRootKind, CapabilityStatus,
+    cancel_controlled_terminal_run, clear_audit_entries, controlled_terminal_run_is_active,
+    persist_roots, read_audit_entries_page, validate_authorized_root, AssistantErrorPayload,
+    AuditEntry, AuthorizedRoot, AuthorizedRootKind, CapabilityStatus, ControlledTerminalState,
     WorkAssistantError, WorkAssistantState,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +27,7 @@ pub fn capability_statuses() -> Vec<CapabilityStatus> {
         .collect();
     capabilities.extend(file_operation_capabilities(&platform));
     capabilities.extend(desktop_capabilities(&platform));
+    capabilities.extend(crate::work_assistant::terminal_capabilities(&platform));
     capabilities.extend(browser_capabilities(&platform, false));
     capabilities
 }
@@ -319,12 +323,17 @@ pub fn work_assistant_clear_audit(
 #[tauri::command]
 pub fn work_assistant_cancel_run(
     state: State<'_, WorkAssistantState>,
+    terminal: State<'_, ControlledTerminalState>,
     run: String,
 ) -> Result<(), AssistantErrorPayload> {
-    record_cancelled_run(&state, run).map_err(Into::into)
+    record_cancelled_run(&state, &terminal, run).map_err(Into::into)
 }
 
-fn record_cancelled_run(state: &WorkAssistantState, run: String) -> Result<(), WorkAssistantError> {
+fn record_cancelled_run(
+    state: &WorkAssistantState,
+    terminal: &ControlledTerminalState,
+    run: String,
+) -> Result<(), WorkAssistantError> {
     if run.trim().is_empty() {
         return Err(WorkAssistantError::blocked("run id is required"));
     }
@@ -336,15 +345,24 @@ fn record_cancelled_run(state: &WorkAssistantState, run: String) -> Result<(), W
         .lock()
         .map_err(|_| WorkAssistantError::protocol("cancelled runs lock is unavailable"))?;
     if !runs.contains(&run) && runs.len() >= MAX_CANCELLED_RUNS {
-        // Cancellation markers are a bounded replay-prevention cache. Evict
-        // one old marker instead of rejecting a valid user cancellation once
-        // the process has handled many runs.
-        if let Some(oldest) = runs.iter().next().cloned() {
-            runs.remove(&oldest);
+        let mut evictable = None;
+        for candidate in runs.iter() {
+            if !controlled_terminal_run_is_active(terminal, candidate)? {
+                evictable = Some(candidate.clone());
+                break;
+            }
         }
+        let evictable = evictable.ok_or_else(|| {
+            WorkAssistantError::blocked(
+                "too many active cancelled runs; wait for a running terminal command to stop",
+            )
+        })?;
+        runs.remove(&evictable);
     }
     runs.insert(run.clone());
     drop(runs);
+
+    cancel_controlled_terminal_run(terminal, &run)?;
 
     // A run-scoped approval is valid only for the live run. Cancellation must
     // invalidate it even when the native executor has not observed the cancel
@@ -401,7 +419,7 @@ mod tests {
         assert!(capabilities.iter().all(|capability| {
             matches!(
                 capability.toolset.as_str(),
-                "workspace" | "desktop" | "browser" | "project"
+                "workspace" | "desktop" | "browser" | "project" | "terminal"
             )
         }));
         for name in ["root_management", "audit_log", "run_cancellation"] {
@@ -476,16 +494,18 @@ mod tests {
     fn cancellation_rejects_blank_and_oversized_run_ids() {
         let state = test_state();
 
-        let blank = record_cancelled_run(&state, " \t\n ".into()).unwrap_err();
+        let terminal = init_controlled_terminal_state();
+        let blank = record_cancelled_run(&state, &terminal, " \t\n ".into()).unwrap_err();
         assert_eq!(blank.code, "blocked");
 
-        let oversized = record_cancelled_run(&state, "a".repeat(129)).unwrap_err();
+        let oversized = record_cancelled_run(&state, &terminal, "a".repeat(129)).unwrap_err();
         assert_eq!(oversized.code, "blocked");
     }
 
     #[test]
     fn cancellation_invalidates_run_scoped_approvals() {
         let state = test_state();
+        let terminal = init_controlled_terminal_state();
         state.approvals.lock().unwrap().insert(
             "token-run".into(),
             StoredApproval {
@@ -502,7 +522,7 @@ mod tests {
             },
         );
 
-        record_cancelled_run(&state, "cancel-me".into()).unwrap();
+        record_cancelled_run(&state, &terminal, "cancel-me".into()).unwrap();
 
         assert!(state.approvals.lock().unwrap().is_empty());
     }
@@ -510,16 +530,42 @@ mod tests {
     #[test]
     fn cancellation_evicts_old_markers_when_full() {
         let state = test_state();
+        let terminal = init_controlled_terminal_state();
         for index in 0..256 {
-            record_cancelled_run(&state, format!("run-{index}")).unwrap();
+            record_cancelled_run(&state, &terminal, format!("run-{index}")).unwrap();
         }
 
-        record_cancelled_run(&state, "run-0".into()).unwrap();
-        record_cancelled_run(&state, "overflow".into()).unwrap();
+        record_cancelled_run(&state, &terminal, "run-0".into()).unwrap();
+        record_cancelled_run(&state, &terminal, "overflow".into()).unwrap();
 
         let runs = state.cancelled_runs.lock().unwrap();
         assert_eq!(runs.len(), 256);
         assert!(runs.contains("overflow"));
+    }
+
+    #[test]
+    fn cancellation_cache_never_evicts_an_active_terminal_run() {
+        let state = test_state();
+        let terminal = init_controlled_terminal_state();
+        let active_runs: Vec<_> = (0..MAX_CANCELLED_RUNS)
+            .map(|index| activate_controlled_terminal_run(&terminal, &format!("run-{index}")))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        {
+            let mut runs = state.cancelled_runs.lock().unwrap();
+            for index in 0..MAX_CANCELLED_RUNS {
+                runs.insert(format!("run-{index}"));
+            }
+        }
+
+        let error = record_cancelled_run(&state, &terminal, "overflow".into()).unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        let runs = state.cancelled_runs.lock().unwrap();
+        assert_eq!(runs.len(), MAX_CANCELLED_RUNS);
+        assert!(!runs.contains("overflow"));
+        assert!(controlled_terminal_run_is_active(&terminal, "run-0").unwrap());
+        drop(active_runs);
     }
 
     #[test]

@@ -17,6 +17,14 @@ const effortLabels: Record<FlowThinkingEffort, string> = {
   ultra_hive: 'ultra+hive',
 }
 
+export function getSecretaryGoalCyclePolicy(effort: FlowThinkingEffort) {
+  return {
+    executionEffort: effort,
+    maxRounds: effort === 'ultra_hive' ? 8 : effort === 'high' ? 6 : 4,
+    maxDurationMs: effort === 'ultra_hive' ? 16 * 60 * 1000 : 9 * 60 * 1000,
+  }
+}
+
 export function createSecretaryGoalFromRequest(request: string): SecretaryGoal {
   const cleanRequest = request.trim() || '完成一个长程写作任务'
   const title = inferGoalTitle(cleanRequest)

@@ -62,6 +62,8 @@ Papyrus 保留 Scallion 主站授权和内置模型代理。客户端不保存�
 - [设计语言](docs/DESIGN.md)
 - [Browser Bridge 安装与安全边界](docs/BROWSER_BRIDGE.md)
 - [Work Assistant 跨平台认证矩阵](docs/testing/WORK_ASSISTANT_PLATFORM_MATRIX.md)
+- [Papyrus 1.0.0 发布指南](docs/PAPYRUS_1.0.0_RELEASE.md)
+- [Debian 13 发布验证](docs/testing/DEBIAN_13_VALIDATION.md)
 - [发布测试报告骨架](docs/PAPYRUS_WORK_ASSISTANT_TEST_REPORT.md)
 
 ## 发布注意

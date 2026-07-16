@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 
+import { inspectReleaseVersion } from './release-version.mjs'
+
 /**
  * Commands that form the native work-assistant boundary.  Keep this list in one place so the
  * release gate and CI cannot silently drift apart when a command is added to the application.
@@ -44,7 +46,9 @@ const EXPECTED_CSP_DIRECTIVES = [
 ]
 
 const DEFAULT_DOCS = [
+  'docs/PAPYRUS_1.0.0_RELEASE.md',
   'docs/BROWSER_BRIDGE.md',
+  'docs/testing/DEBIAN_13_VALIDATION.md',
   'docs/testing/WORK_ASSISTANT_PLATFORM_MATRIX.md',
   'docs/testing/WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md',
 ]
@@ -76,6 +80,8 @@ const WORKFLOW_SEMANTIC_MARKERS = {
     ['run the real Chromium browser tests', 'npm run test:browser:e2e'],
     ['run the Windows portable check', 'npm run tauri:check:portable'],
     ['install the Linux native dependencies', 'sudo apt-get install -y libwebkit2gtk-4.1-dev'],
+    ['run Debian 13 container validation', 'debian:13'],
+    ['invoke the Debian 13 validation script', 'scripts/ci/debian13-container.sh'],
   ],
   '.github/workflows/desktop-packages.yml': [
     ['be manually dispatchable', 'workflow_dispatch:'],
@@ -254,6 +260,10 @@ async function checkCsp(rootDir) {
   return failures
 }
 
+async function checkReleaseVersion(rootDir) {
+  return (await inspectReleaseVersion({ rootDir })).failures
+}
+
 async function checkCommands(rootDir) {
   const text = await readText(rootDir, 'src-tauri/src/lib.rs')
   if (text === null) return ['missing src-tauri/src/lib.rs command registration']
@@ -301,6 +311,30 @@ async function checkReleaseScripts(rootDir) {
   const scripts = value.scripts
   if (!isObject(scripts)) return ['package.json must define npm scripts for release checks']
   const failures = []
+  if (
+    typeof scripts['version:sync'] !== 'string' ||
+    !scripts['version:sync'].includes('scripts/lib/release-version.mjs') ||
+    scripts['version:sync'].includes('--check')
+  ) {
+    failures.push('package.json version:sync must invoke the canonical release-version synchronizer')
+  }
+  if (
+    typeof scripts['version:check'] !== 'string' ||
+    !scripts['version:check'].includes('scripts/lib/release-version.mjs') ||
+    !scripts['version:check'].includes('--check')
+  ) {
+    failures.push('package.json version:check must fail closed on release metadata drift')
+  }
+  if (
+    typeof scripts['test:release-scripts'] !== 'string' ||
+    !scripts['test:release-scripts'].includes('scripts/lib/release-checks.test.mjs') ||
+    !scripts['test:release-scripts'].includes('scripts/lib/release-version.test.mjs')
+  ) {
+    failures.push('package.json test:release-scripts must run release-version consistency tests')
+  }
+  if (!(await pathExists(rootDir, 'scripts/ci/debian13-container.sh'))) {
+    failures.push('missing Debian 13 container validation script: scripts/ci/debian13-container.sh')
+  }
   if (typeof scripts['ci:desktop'] !== 'string' || !scripts['ci:desktop'].includes('npm run release:assistant-check')) {
     failures.push('package.json ci:desktop must invoke the release-phase assistant checker')
   }
@@ -313,6 +347,25 @@ async function checkReleaseScripts(rootDir) {
     !scripts['check:browser'].includes('web_extract')
   ) {
     failures.push('package.json check:browser must run separate browser_bridge and web_extract Rust tests')
+  }
+  const wpsPackager = await readText(rootDir, 'scripts/package-wps-addin-release.ps1')
+  if (
+    wpsPackager === null ||
+    !wpsPackager.includes('$canonicalVersion = [string]$packageJson.version') ||
+    !wpsPackager.includes('$Version -and $Version -ne $canonicalVersion') ||
+    !wpsPackager.includes('$versionChecker --check')
+  ) {
+    failures.push('WPS packager must reject a version that differs from package.json and verify canonical release metadata')
+  }
+  const wpsUpdater = await readText(rootDir, 'apps/wps-word-addin/installer/update.ps1')
+  if (
+    wpsUpdater === null ||
+    !wpsUpdater.includes('Assert-OfficialManifestUrl') ||
+    !wpsUpdater.includes('Assert-OfficialPackageUrl') ||
+    !wpsUpdater.includes('Assert-ExtractedRelease') ||
+    !wpsUpdater.includes('Compare-StableVersion')
+  ) {
+    failures.push('WPS updater must validate the official package URL and extracted release metadata before installation')
   }
   return failures
 }
@@ -359,6 +412,7 @@ export async function runReleaseChecks({ rootDir = process.cwd(), phase = 'local
     return { phase, failures: [`unknown release check phase: ${phase}`] }
   }
   const failures = []
+  failures.push(...await checkReleaseVersion(rootDir))
   failures.push(...await checkCsp(rootDir))
   failures.push(...await checkCommands(rootDir))
   failures.push(...await checkExtensionOutput(rootDir))
@@ -369,6 +423,7 @@ export async function runReleaseChecks({ rootDir = process.cwd(), phase = 'local
 
 export const _internal = {
   checkManifestPermissions,
+  checkReleaseVersion,
   flattenManifestPermissions,
   checkCsp,
   checkCommands,

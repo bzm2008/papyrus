@@ -9,13 +9,17 @@ import {
   resetWorkAssistantRuntimeForTests,
   resolveAssistantApproval,
 } from './workAssistantRuntime'
-import type { AssistantToolCall, WorkAssistantEvent } from './workAssistantProtocol'
+import type { AssistantApprovalChoice, AssistantToolCall, WorkAssistantEvent } from './workAssistantProtocol'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 import { useAppStore } from '../stores/useAppStore'
 
 const call = (name: string, args: Record<string, unknown> = {}, id = `call-${name}`): AssistantToolCall => ({
   id, runId: 'run-1', name, intent: name, arguments: args, status: 'queued', startedAt: 1,
 })
+
+async function resolveApprovalWhenReady(id: string, choice: AssistantApprovalChoice) {
+  await vi.waitFor(() => expect(resolveAssistantApproval(id, choice)).toBe(true))
+}
 
 afterEach(() => {
   vi.useRealTimers()
@@ -49,13 +53,100 @@ describe('work assistant runtime', () => {
     await executeAssistantToolCall({ runId: 'run-1', toolCall: call('file_plan_batch', { rootId: 'downloads', operations: [], conflictPolicy: 'skip' }) })
 
     const promise = executeAssistantToolCall({ runId: 'run-1', toolCall: call('file_apply_batch', { previewId: 'preview-1' }) })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('preview-1', 'once')).toBe(true)
+    await resolveApprovalWhenReady('preview-1', 'once')
     const result = await promise
 
     expect(result.ok).toBe(true)
     expect(invoke.mock.calls.map(([command]) => command)).toContain('work_assistant_approve')
     expect(invoke.mock.calls.map(([command]) => command)).toContain('work_assistant_execute')
+  })
+
+  it('keeps fixed terminal extraction behind a fresh single-use approval', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_terminal_preview') {
+        return {
+          id: 'terminal-preview-1', revision: 'terminal:1', risk: 'read', title: '提取 PDF 正文',
+          targetSummary: 'sources/meeting.pdf', impactSummary: '将以固定的只读文档工具提取有限正文；不会写入文件或启动 shell。',
+          reversible: true, expiresAt: Date.now() + 60_000, scope: ['terminal:root:terminal_pdf_to_text'],
+        }
+      }
+      if (command === 'work_assistant_terminal_approve') {
+        return { token: 'terminal-token-1', previewId: 'terminal-preview-1', expires: Date.now() + 60_000 }
+      }
+      if (command === 'work_assistant_terminal_execute') {
+        return {
+          ok: true, summary: '文档正文已提取。', command: 'terminal_pdf_to_text', outputChars: 8,
+          truncated: false, auditRecorded: true, text: '会议纪要正文',
+        }
+      }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const events: WorkAssistantEvent[] = []
+    const promise = executeAssistantToolCall({
+      runId: 'run-terminal',
+      toolCall: call('terminal_pdf_to_text', { rootId: 'root', path: 'sources/meeting.pdf' }, 'terminal-call'),
+      terminalModelDataHandling: { provider: 'scallion-agnes', maxChars: 48_000 },
+      emit: (event) => events.push(event),
+    })
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'approval.required')).toBe(true))
+    const approval = events.find((event): event is Extract<WorkAssistantEvent, { type: 'approval.required' }> => event.type === 'approval.required')
+    expect(approval?.request.allowedChoices).toEqual(['once', 'deny'])
+    expect(approval?.request.modelDataHandling).toEqual({ provider: 'scallion-agnes', maxChars: 48_000 })
+    await resolveApprovalWhenReady(approval?.request.id ?? '', 'once')
+
+    const result = await promise
+    expect(result).toMatchObject({ ok: true, summary: '文档正文已提取。' })
+    expect(result.data).toMatchObject({ command: 'terminal_pdf_to_text', outputChars: 8, truncated: false })
+    expect(result.data).toMatchObject({ text: '会议纪要正文' })
+    const completed = events.find((event): event is Extract<WorkAssistantEvent, { type: 'tool.completed' }> => event.type === 'tool.completed')
+    expect(JSON.stringify(completed)).not.toContain('会议纪要正文')
+    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+      'work_assistant_terminal_preview',
+      'work_assistant_terminal_approve',
+      'work_assistant_terminal_execute',
+    ])
+  })
+
+  it('waits for an async approval event handler before opening the approval gate', async () => {
+    let releaseApprovalEvent: (() => void) | undefined
+    let approvalEventSeen: (() => void) | undefined
+    const approvalEventFinished = new Promise<void>((resolve) => { releaseApprovalEvent = resolve })
+    const approvalEventStarted = new Promise<void>((resolve) => { approvalEventSeen = resolve })
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_terminal_preview') {
+        return {
+          id: 'terminal-preview-await', revision: 'terminal:1', risk: 'read', title: '提取 PDF 正文',
+          targetSummary: 'sources/meeting.pdf', impactSummary: '将以固定的只读文档工具提取有限正文；不会写入文件或启动 shell。',
+          reversible: true, expiresAt: Date.now() + 60_000,
+        }
+      }
+      if (command === 'work_assistant_terminal_approve') {
+        return { token: 'terminal-token-await', previewId: 'terminal-preview-await', expires: Date.now() + 60_000 }
+      }
+      if (command === 'work_assistant_terminal_execute') {
+        return { ok: true, summary: '文档正文已提取。', command: 'terminal_pdf_to_text', outputChars: 0, truncated: false }
+      }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+
+    const pending = executeAssistantToolCall({
+      runId: 'run-await-approval-event',
+      toolCall: call('terminal_pdf_to_text', { rootId: 'root', path: 'sources/meeting.pdf' }, 'terminal-await-call'),
+      emit: async (event) => {
+        if (event.type !== 'approval.required') return
+        approvalEventSeen?.()
+        await approvalEventFinished
+      },
+    })
+
+    await approvalEventStarted
+    expect(resolveAssistantApproval('terminal-preview-await', 'once')).toBe(false)
+
+    releaseApprovalEvent?.()
+    await resolveApprovalWhenReady('terminal-preview-await', 'once')
+    await expect(pending).resolves.toMatchObject({ ok: true })
   })
 
   it('reuses a reversible run approval for the same file scope without prompting again', async () => {
@@ -74,8 +165,7 @@ describe('work assistant runtime', () => {
 
     await executeAssistantToolCall({ runId: 'run-scope', toolCall: call('file_plan_batch', args, 'plan-1') })
     const firstApply = executeAssistantToolCall({ runId: 'run-scope', toolCall: call('file_apply_batch', { previewId: 'preview-1' }, 'apply-1') })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('preview-1', 'run')).toBe(true)
+    await resolveApprovalWhenReady('preview-1', 'run')
     await expect(firstApply).resolves.toMatchObject({ ok: true })
 
     await executeAssistantToolCall({ runId: 'run-scope', toolCall: call('file_plan_batch', args, 'plan-2') })
@@ -103,8 +193,7 @@ describe('work assistant runtime', () => {
 
     await executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_plan_batch', args, 'cancel-plan-1') })
     const firstApply = executeAssistantToolCall({ runId: 'run-cancel-scope', toolCall: call('file_apply_batch', { previewId: 'cancel-preview-1' }, 'cancel-apply-1') })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('cancel-preview-1', 'run')).toBe(true)
+    await resolveApprovalWhenReady('cancel-preview-1', 'run')
     await expect(firstApply).resolves.toMatchObject({ ok: true })
 
     dispatchOrderedWorkAssistantEvent({ type: 'run.cancelled', runId: 'run-cancel-scope', at: Date.now() })
@@ -161,8 +250,7 @@ describe('work assistant runtime', () => {
 
     await executeAssistantToolCall({ runId: 'run-in-flight', toolCall: call('file_plan_batch', args, 'in-flight-plan') })
     const pending = executeAssistantToolCall({ runId: 'run-in-flight', toolCall: call('file_apply_batch', { previewId: 'in-flight-preview' }, 'in-flight-apply'), signal: controller.signal })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('in-flight-preview', 'once')).toBe(true)
+    await resolveApprovalWhenReady('in-flight-preview', 'once')
     await executeStarted
 
     controller.abort()
@@ -190,8 +278,7 @@ describe('work assistant runtime', () => {
 
     await executeAssistantToolCall({ runId: 'run-event-cancel', toolCall: call('file_plan_batch', args, 'event-plan') })
     const pending = executeAssistantToolCall({ runId: 'run-event-cancel', toolCall: call('file_apply_batch', { previewId: 'event-preview' }, 'event-apply') })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('event-preview', 'once')).toBe(true)
+    await resolveApprovalWhenReady('event-preview', 'once')
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('work_assistant_execute', expect.anything()))
 
     dispatchOrderedWorkAssistantEvent({ type: 'run.cancelled', runId: 'run-event-cancel', at: Date.now() })
@@ -271,8 +358,7 @@ describe('work assistant runtime', () => {
 
     await executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_plan_batch', args, 'bounded-plan-1') })
     const firstApply = executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_apply_batch', { previewId: 'bounded-preview-1' }, 'bounded-apply-1') })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('bounded-preview-1', 'run')).toBe(true)
+    await resolveApprovalWhenReady('bounded-preview-1', 'run')
     await expect(firstApply).resolves.toMatchObject({ ok: true })
 
     await executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_plan_batch', args, 'bounded-plan-2') })
@@ -283,8 +369,7 @@ describe('work assistant runtime', () => {
 
     await executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_plan_batch', args, 'bounded-plan-3') })
     const largerApply = executeAssistantToolCall({ runId: 'run-bounded-scope', toolCall: call('file_apply_batch', { previewId: 'bounded-preview-3' }, 'bounded-apply-3') })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('bounded-preview-3', 'once')).toBe(true)
+    await resolveApprovalWhenReady('bounded-preview-3', 'once')
     await expect(largerApply).resolves.toMatchObject({ ok: true })
     expect(invoke.mock.calls.filter(([command]) => command === 'work_assistant_approve')).toHaveLength(2)
   })
@@ -293,8 +378,7 @@ describe('work assistant runtime', () => {
     const invoke = vi.fn(async () => undefined)
     setWorkAssistantInvokerForTests(invoke)
     const promise = executeAssistantToolCall({ runId: 'run-1', toolCall: call('desktop_open_url', { url: 'https://example.com' }) })
-    await Promise.resolve()
-    expect(resolveAssistantApproval('approval-call-desktop_open_url', 'deny')).toBe(true)
+    await resolveApprovalWhenReady('approval-call-desktop_open_url', 'deny')
     const result = await promise
 
     expect(result).toMatchObject({ ok: false, errorCode: 'cancelled', recoverable: true })
@@ -310,10 +394,10 @@ describe('work assistant runtime', () => {
       toolCall: call('desktop_open_app', { appId: 'editor' }),
       emit: (event) => events.push(event),
     })
-    await Promise.resolve()
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'approval.required')).toBe(true))
     const approval = events.find((event): event is Extract<WorkAssistantEvent, { type: 'approval.required' }> => event.type === 'approval.required')
     expect(approval?.request.allowedChoices).toEqual(['once', 'deny'])
-    expect(resolveAssistantApproval(approval?.request.id ?? '', 'deny')).toBe(true)
+    await resolveApprovalWhenReady(approval?.request.id ?? '', 'deny')
     await expect(promise).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
   })
 
@@ -369,10 +453,10 @@ describe('work assistant runtime', () => {
       toolCall: call('web_archive', { extractId, resourceName: '归档研究' }, 'archive'),
       emit: (event) => events.push(event),
     })
-    await Promise.resolve()
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'approval.required')).toBe(true))
     const approval = events.find((event): event is Extract<WorkAssistantEvent, { type: 'approval.required' }> => event.type === 'approval.required')
     expect(approval?.request.reason).toContain('归档研究')
-    expect(approval && resolveAssistantApproval(approval.request.id, 'once')).toBe(true)
+    await resolveApprovalWhenReady(approval?.request.id ?? '', 'once')
 
     const result = await archive
     expect(result).toMatchObject({ ok: true })

@@ -212,6 +212,24 @@ export type SaveSecretaryLedgerCheckpointInput = {
   nextStep: string
 }
 
+export type PersistSecretaryLedgerTaskProgressInput = {
+  task: UpdateSecretaryLedgerTaskInput
+  events: RecordSecretaryLedgerEventInput[]
+  checkpoint: SaveSecretaryLedgerCheckpointInput
+}
+
+export type StartSecretaryLedgerTaskInput = {
+  task: CreateSecretaryLedgerTaskInput
+  events: RecordSecretaryLedgerEventInput[]
+  checkpoint: SaveSecretaryLedgerCheckpointInput
+}
+
+export type SecretaryLedgerTaskProgress = {
+  task: SecretaryLedgerTask
+  events: SecretaryLedgerTaskEvent[]
+  checkpoint: SecretaryLedgerCheckpoint
+}
+
 export type SecretaryLedgerLegacyProjectInput = {
   id: string
   title: string
@@ -253,6 +271,9 @@ type SecretaryLedgerCommand =
   | 'secretary_ledger_delete_memory'
   | 'secretary_ledger_search'
   | 'secretary_ledger_create_task'
+  | 'secretary_ledger_start_task'
+  | 'secretary_ledger_claim_task'
+  | 'secretary_ledger_persist_task_progress'
   | 'secretary_ledger_get_task'
   | 'secretary_ledger_list_tasks'
   | 'secretary_ledger_update_task'
@@ -379,6 +400,35 @@ export function createSecretaryLedgerTask(access: SecretaryLedgerProjectAccess, 
   return callWithAccess('secretary_ledger_create_task', access, { input }, parseTask)
 }
 
+export function startSecretaryLedgerTask(
+  access: SecretaryLedgerProjectAccess,
+  input: StartSecretaryLedgerTaskInput,
+) {
+  const normalizedInput = normalizeStartTaskInput(input)
+  if (normalizedInput === null) return invalidInputResult<SecretaryLedgerTaskProgress>()
+  return callWithAccess('secretary_ledger_start_task', access, { input: normalizedInput }, parseTaskProgress)
+}
+
+export function claimSecretaryLedgerTask(
+  access: SecretaryLedgerProjectAccess,
+  id: string,
+  input: PersistSecretaryLedgerTaskProgressInput,
+) {
+  const normalizedInput = normalizeTaskProgressInput(input)
+  if (normalizedInput === null) return invalidInputResult<SecretaryLedgerTaskProgress | null>()
+  return callWithAccess('secretary_ledger_claim_task', access, { id, input: normalizedInput }, parseOptionalTaskProgress)
+}
+
+export function persistSecretaryLedgerTaskProgress(
+  access: SecretaryLedgerProjectAccess,
+  id: string,
+  input: PersistSecretaryLedgerTaskProgressInput,
+) {
+  const normalizedInput = normalizeTaskProgressInput(input)
+  if (normalizedInput === null) return invalidInputResult<SecretaryLedgerTaskProgress>()
+  return callWithAccess('secretary_ledger_persist_task_progress', access, { id, input: normalizedInput }, parseTaskProgress)
+}
+
 export function getSecretaryLedgerTask(access: SecretaryLedgerProjectAccess, id: string) {
   return callWithAccess('secretary_ledger_get_task', access, { id }, parseOptionalTask)
 }
@@ -490,6 +540,37 @@ function hasSafeOptionalScheduleAt(input: unknown) {
   if (!Object.prototype.hasOwnProperty.call(input, 'scheduleAt')) return true
   const value = input.scheduleAt
   return value === null || isSafeIntegerInRange(value, 0, Number.MAX_SAFE_INTEGER)
+}
+
+function normalizeStartTaskInput(input: unknown): StartSecretaryLedgerTaskInput | null {
+  if (!isRecord(input) || !isRecord(input.task) || !hasSafeOptionalScheduleAt(input.task)) return null
+  const events = normalizeTaskProgressEvents(input.events)
+  const checkpoint = normalizeCheckpointInput(input.checkpoint)
+  if (events === null || checkpoint === null) return null
+  return {
+    task: input.task as CreateSecretaryLedgerTaskInput,
+    events,
+    checkpoint,
+  }
+}
+
+function normalizeTaskProgressInput(input: unknown): PersistSecretaryLedgerTaskProgressInput | null {
+  if (!isRecord(input) || !isRecord(input.task) || !hasSafeOptionalScheduleAt(input.task)) return null
+  const events = normalizeTaskProgressEvents(input.events)
+  const checkpoint = normalizeCheckpointInput(input.checkpoint)
+  if (events === null || checkpoint === null) return null
+  return {
+    task: input.task as UpdateSecretaryLedgerTaskInput,
+    events,
+    checkpoint,
+  }
+}
+
+function normalizeTaskProgressEvents(input: unknown): RecordSecretaryLedgerEventInput[] | null {
+  if (!Array.isArray(input) || input.length === 0 || input.length > 8) return null
+  const events = input.map(normalizeEventInput)
+  if (events.some((event) => event === null)) return null
+  return events as RecordSecretaryLedgerEventInput[]
 }
 
 function normalizeEventInput(input: unknown): RecordSecretaryLedgerEventInput | null {
@@ -743,6 +824,31 @@ function parseCheckpoint(payload: unknown): SecretaryLedgerCheckpoint | typeof i
 
 function parseOptionalCheckpoint(payload: unknown) {
   return payload === null ? null : parseCheckpoint(payload)
+}
+
+function parseTaskProgress(payload: unknown): SecretaryLedgerTaskProgress | typeof invalidPayload {
+  if (!isRecord(payload) || !Array.isArray(payload.events) || payload.events.length === 0 || payload.events.length > 8) {
+    return invalidPayload
+  }
+  const task = parseTask(payload.task)
+  const events = payload.events.map(parseTaskEvent)
+  const checkpoint = parseCheckpoint(payload.checkpoint)
+  if (
+    task === invalidPayload ||
+    events.some((event) => event === invalidPayload) ||
+    checkpoint === invalidPayload
+  ) {
+    return invalidPayload
+  }
+  const parsedEvents = events as SecretaryLedgerTaskEvent[]
+  if (parsedEvents.some((event) => event.taskId !== task.id) || checkpoint.taskId !== task.id) {
+    return invalidPayload
+  }
+  return { task, events: parsedEvents, checkpoint }
+}
+
+function parseOptionalTaskProgress(payload: unknown) {
+  return payload === null ? null : parseTaskProgress(payload)
 }
 
 function parseLegacyImportResult(payload: unknown): SecretaryLedgerLegacyImportResult | typeof invalidPayload {

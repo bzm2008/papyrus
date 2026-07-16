@@ -1,4 +1,6 @@
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -18,6 +20,7 @@ const MAX_SAFE_JSON_CHARS: usize = 16_000;
 const MAX_SAFE_JSON_DEPTH: usize = 12;
 const MAX_SAFE_JSON_KEYS: usize = 100;
 const MAX_SAFE_JSON_NODES: usize = 1_000;
+const MAX_TASK_PROGRESS_EVENTS: usize = 8;
 
 #[derive(Clone, Debug)]
 pub struct SecretaryLedger {
@@ -254,6 +257,30 @@ pub struct SecretaryCheckpoint {
 pub struct SaveCheckpointInput {
     pub context_snapshot: serde_json::Value,
     pub next_step: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistTaskProgressInput {
+    pub task: UpdateTaskInput,
+    pub events: Vec<RecordEventInput>,
+    pub checkpoint: SaveCheckpointInput,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartTaskInput {
+    pub task: CreateTaskInput,
+    pub events: Vec<RecordEventInput>,
+    pub checkpoint: SaveCheckpointInput,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretaryTaskProgress {
+    pub task: SecretaryTask,
+    pub events: Vec<TaskEvent>,
+    pub checkpoint: SecretaryCheckpoint,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -782,67 +809,139 @@ impl SecretaryLedger {
         let existing =
             find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
         authorize_project_write(&access, Some(&existing.project_id))?;
-        let UpdateTaskInput {
-            title,
-            request,
-            status,
-            priority,
-            schedule_at,
-            next_step,
-            public_plan,
-            summary,
-        } = input;
-        let title = title
-            .map(|value| normalize_safe_text(value, 240))
-            .transpose()?
-            .unwrap_or(existing.title);
-        let request = request
-            .map(|value| normalize_safe_text(value, 16_000))
-            .transpose()?
-            .unwrap_or(existing.request);
-        let status = status
-            .map(normalize_task_status)
-            .transpose()?
-            .unwrap_or(existing.status);
-        let priority = priority.unwrap_or(existing.priority);
-        let schedule_at = match schedule_at {
-            TaskFieldPatch::Unchanged => existing.schedule_at,
-            TaskFieldPatch::Clear => None,
-            TaskFieldPatch::Set(value) => Some(normalize_schedule_at(value)?),
-        };
-        let next_step = match next_step {
-            TaskFieldPatch::Unchanged => existing.next_step,
-            TaskFieldPatch::Clear => None,
-            TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 4_000)?),
-        };
-        let public_plan = match public_plan {
-            TaskFieldPatch::Unchanged => existing.public_plan,
-            TaskFieldPatch::Clear => None,
-            TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 16_000)?),
-        };
-        let summary = match summary {
-            TaskFieldPatch::Unchanged => existing.summary,
-            TaskFieldPatch::Clear => None,
-            TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 4_000)?),
-        };
-        let task = SecretaryTask {
-            id,
-            project_id: existing.project_id,
-            title,
-            request,
-            status,
-            priority,
-            schedule_at,
-            next_step,
-            public_plan,
-            summary,
-            created_at: existing.created_at,
-            updated_at: unix_millis(),
-        };
-        validate_priority(task.priority)?;
+        let task = updated_task_from_input(existing, input)?;
         update_task_record(&transaction, &task)?;
         transaction.commit()?;
         Ok(task)
+    }
+
+    /// Creates a direct user-started task, its public start event, and its first recovery
+    /// checkpoint in one transaction. No agent work starts until this record is durable.
+    pub fn start_task(
+        &self,
+        access: &ProjectAccess,
+        input: StartTaskInput,
+    ) -> Result<SecretaryTaskProgress, LedgerError> {
+        let StartTaskInput {
+            task: task_input,
+            events,
+            checkpoint,
+        } = input;
+        validate_task_progress_events(&events)?;
+        let mut task = normalized_new_task(task_input)?;
+        if !matches!(task.status.as_str(), "queued" | "running") {
+            return Err(LedgerError::InvalidInput);
+        }
+        task.status = "running".into();
+        task.schedule_at = None;
+        task.updated_at = unix_millis();
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let access = validate_project_access_in_transaction(&transaction, access)?;
+        authorize_project_write(&access, Some(&task.project_id))?;
+        ensure_task_project(&transaction, &task.project_id, false)?;
+        insert_task(&transaction, &task)?;
+        let events = events
+            .into_iter()
+            .map(|event| append_task_event(&transaction, &task, event))
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint = append_task_checkpoint(&transaction, &task, checkpoint)?;
+        transaction.commit()?;
+        Ok(SecretaryTaskProgress {
+            task,
+            events,
+            checkpoint,
+        })
+    }
+
+    /// Atomically claims a queued or paused task. The status compare-and-set and the first
+    /// durable progress event/checkpoint share a transaction, preventing both double starts and
+    /// stranded running tasks when the initial checkpoint cannot be written.
+    pub fn claim_task(
+        &self,
+        access: &ProjectAccess,
+        id: &str,
+        input: PersistTaskProgressInput,
+    ) -> Result<Option<SecretaryTaskProgress>, LedgerError> {
+        let id = normalize_identifier(id.to_string())?;
+        let PersistTaskProgressInput {
+            mut task,
+            events,
+            checkpoint,
+        } = input;
+        validate_task_progress_events(&events)?;
+        if task
+            .status
+            .as_deref()
+            .is_some_and(|status| status != "running")
+        {
+            return Err(LedgerError::InvalidInput);
+        }
+        task.status = Some("running".into());
+        task.schedule_at = TaskFieldPatch::Clear;
+
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let access = validate_project_access_in_transaction(&transaction, access)?;
+        let existing =
+            find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
+        authorize_project_write(&access, Some(&existing.project_id))?;
+        if !matches!(existing.status.as_str(), "queued" | "paused") {
+            return Ok(None);
+        }
+        let task = updated_task_from_input(existing, task)?;
+        if !update_task_record_if_claimable(&transaction, &task)? {
+            return Ok(None);
+        }
+        let events = events
+            .into_iter()
+            .map(|event| append_task_event(&transaction, &task, event))
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint = append_task_checkpoint(&transaction, &task, checkpoint)?;
+        transaction.commit()?;
+        Ok(Some(SecretaryTaskProgress {
+            task,
+            events,
+            checkpoint,
+        }))
+    }
+
+    /// Commits a task transition, its observable event(s), and the recovery checkpoint together.
+    /// Any validation or SQLite failure rolls the entire transaction back rather than reporting a
+    /// partially durable task state as resumable progress.
+    pub fn persist_task_progress(
+        &self,
+        access: &ProjectAccess,
+        id: &str,
+        input: PersistTaskProgressInput,
+    ) -> Result<SecretaryTaskProgress, LedgerError> {
+        let id = normalize_identifier(id.to_string())?;
+        let PersistTaskProgressInput {
+            task: task_input,
+            events,
+            checkpoint,
+        } = input;
+        validate_task_progress_events(&events)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let access = validate_project_access_in_transaction(&transaction, access)?;
+        let existing =
+            find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
+        authorize_project_write(&access, Some(&existing.project_id))?;
+        let task = updated_task_from_input(existing, task_input)?;
+        update_task_record(&transaction, &task)?;
+        let events = events
+            .into_iter()
+            .map(|event| append_task_event(&transaction, &task, event))
+            .collect::<Result<Vec<_>, _>>()?;
+        let checkpoint = append_task_checkpoint(&transaction, &task, checkpoint)?;
+        transaction.commit()?;
+        Ok(SecretaryTaskProgress {
+            task,
+            events,
+            checkpoint,
+        })
     }
 
     pub fn delete_task(&self, access: &ProjectAccess, id: &str) -> Result<(), LedgerError> {
@@ -878,43 +977,13 @@ impl SecretaryLedger {
         input: RecordEventInput,
     ) -> Result<TaskEvent, LedgerError> {
         let task_id = normalize_identifier(task_id.to_string())?;
-        let event_type = normalize_safe_text(input.event_type, 64)?;
-        let payload = normalize_safe_json(input.payload, 16_000)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let task =
             find_task_in_transaction(&transaction, &task_id)?.ok_or(LedgerError::InvalidInput)?;
         authorize_project_write(&access, Some(&task.project_id))?;
-        let event = TaskEvent {
-            task_id,
-            sequence: next_sequence(&transaction, "secretary_task_events", &task.id)?,
-            event_type,
-            payload,
-            created_at: unix_millis(),
-        };
-        let payload_text = serialize_json(&event.payload)?;
-        transaction.execute(
-            "
-            INSERT INTO secretary_task_events(task_id, sequence, event_type, payload, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            ",
-            params![
-                event.task_id,
-                event.sequence,
-                event.event_type,
-                payload_text,
-                event.created_at,
-            ],
-        )?;
-        upsert_fts(
-            &transaction,
-            &format!("event:{}:{}", event.task_id, event.sequence),
-            "event",
-            Some(&task.project_id),
-            &event.event_type,
-            &payload_text,
-        )?;
+        let event = append_task_event(&transaction, &task, input)?;
         transaction.commit()?;
         Ok(event)
     }
@@ -952,43 +1021,13 @@ impl SecretaryLedger {
         input: SaveCheckpointInput,
     ) -> Result<SecretaryCheckpoint, LedgerError> {
         let task_id = normalize_identifier(task_id.to_string())?;
-        let context_snapshot = normalize_safe_json(input.context_snapshot, 16_000)?;
-        let next_step = normalize_safe_text(input.next_step, 4_000)?;
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         let access = validate_project_access_in_transaction(&transaction, access)?;
         let task =
             find_task_in_transaction(&transaction, &task_id)?.ok_or(LedgerError::InvalidInput)?;
         authorize_project_write(&access, Some(&task.project_id))?;
-        let checkpoint = SecretaryCheckpoint {
-            task_id,
-            sequence: next_sequence(&transaction, "secretary_task_checkpoints", &task.id)?,
-            context_snapshot,
-            next_step,
-            created_at: unix_millis(),
-        };
-        let snapshot_text = serialize_json(&checkpoint.context_snapshot)?;
-        transaction.execute(
-            "
-            INSERT INTO secretary_task_checkpoints(task_id, sequence, context_snapshot, next_step, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            ",
-            params![
-                checkpoint.task_id,
-                checkpoint.sequence,
-                snapshot_text,
-                checkpoint.next_step,
-                checkpoint.created_at,
-            ],
-        )?;
-        upsert_fts(
-            &transaction,
-            &format!("checkpoint:{}:{}", checkpoint.task_id, checkpoint.sequence),
-            "checkpoint",
-            Some(&task.project_id),
-            "任务检查点",
-            &format!("{} {}", checkpoint.next_step, snapshot_text),
-        )?;
+        let checkpoint = append_task_checkpoint(&transaction, &task, input)?;
         transaction.commit()?;
         Ok(checkpoint)
     }
@@ -1231,6 +1270,37 @@ pub fn secretary_ledger_create_task(
     input: CreateTaskInput,
 ) -> Result<SecretaryTask, String> {
     with_app_ledger(app, |ledger| ledger.create_task(&access, input))
+}
+
+#[tauri::command]
+pub fn secretary_ledger_start_task(
+    app: tauri::AppHandle,
+    access: ProjectAccess,
+    input: StartTaskInput,
+) -> Result<SecretaryTaskProgress, String> {
+    with_app_ledger(app, |ledger| ledger.start_task(&access, input))
+}
+
+#[tauri::command]
+pub fn secretary_ledger_claim_task(
+    app: tauri::AppHandle,
+    access: ProjectAccess,
+    id: String,
+    input: PersistTaskProgressInput,
+) -> Result<Option<SecretaryTaskProgress>, String> {
+    with_app_ledger(app, |ledger| ledger.claim_task(&access, &id, input))
+}
+
+#[tauri::command]
+pub fn secretary_ledger_persist_task_progress(
+    app: tauri::AppHandle,
+    access: ProjectAccess,
+    id: String,
+    input: PersistTaskProgressInput,
+) -> Result<SecretaryTaskProgress, String> {
+    with_app_ledger(app, |ledger| {
+        ledger.persist_task_progress(&access, &id, input)
+    })
 }
 
 #[tauri::command]
@@ -1750,6 +1820,57 @@ fn normalized_new_task(input: CreateTaskInput) -> Result<SecretaryTask, LedgerEr
     })
 }
 
+fn updated_task_from_input(
+    mut task: SecretaryTask,
+    input: UpdateTaskInput,
+) -> Result<SecretaryTask, LedgerError> {
+    let UpdateTaskInput {
+        title,
+        request,
+        status,
+        priority,
+        schedule_at,
+        next_step,
+        public_plan,
+        summary,
+    } = input;
+    if let Some(value) = title {
+        task.title = normalize_safe_text(value, 240)?;
+    }
+    if let Some(value) = request {
+        task.request = normalize_safe_text(value, 16_000)?;
+    }
+    if let Some(value) = status {
+        task.status = normalize_task_status(value)?;
+    }
+    if let Some(value) = priority {
+        task.priority = value;
+    }
+    task.schedule_at = match schedule_at {
+        TaskFieldPatch::Unchanged => task.schedule_at,
+        TaskFieldPatch::Clear => None,
+        TaskFieldPatch::Set(value) => Some(normalize_schedule_at(value)?),
+    };
+    task.next_step = match next_step {
+        TaskFieldPatch::Unchanged => task.next_step,
+        TaskFieldPatch::Clear => None,
+        TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 4_000)?),
+    };
+    task.public_plan = match public_plan {
+        TaskFieldPatch::Unchanged => task.public_plan,
+        TaskFieldPatch::Clear => None,
+        TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 16_000)?),
+    };
+    task.summary = match summary {
+        TaskFieldPatch::Unchanged => task.summary,
+        TaskFieldPatch::Clear => None,
+        TaskFieldPatch::Set(value) => Some(normalize_safe_text(value, 4_000)?),
+    };
+    validate_priority(task.priority)?;
+    task.updated_at = unix_millis();
+    Ok(task)
+}
+
 fn normalize_task_status(value: String) -> Result<String, LedgerError> {
     let value = normalize_safe_text(value, 32)?;
     if matches!(
@@ -1831,7 +1952,7 @@ fn update_task_record(
     transaction: &Transaction<'_>,
     task: &SecretaryTask,
 ) -> Result<(), LedgerError> {
-    transaction.execute(
+    let changed = transaction.execute(
         "
         UPDATE secretary_tasks
         SET title = ?2, request = ?3, status = ?4, priority = ?5, schedule_at = ?6,
@@ -1851,7 +1972,125 @@ fn update_task_record(
             task.updated_at,
         ],
     )?;
+    if changed != 1 {
+        return Err(LedgerError::InvalidInput);
+    }
     index_task(transaction, task)
+}
+
+fn update_task_record_if_claimable(
+    transaction: &Transaction<'_>,
+    task: &SecretaryTask,
+) -> Result<bool, LedgerError> {
+    let changed = transaction.execute(
+        "
+        UPDATE secretary_tasks
+        SET title = ?2, request = ?3, status = ?4, priority = ?5, schedule_at = ?6,
+            next_step = ?7, public_plan = ?8, summary = ?9, updated_at = ?10
+        WHERE id = ?1 AND status IN ('queued', 'paused')
+        ",
+        params![
+            task.id,
+            task.title,
+            task.request,
+            task.status,
+            task.priority,
+            task.schedule_at,
+            task.next_step,
+            task.public_plan,
+            task.summary,
+            task.updated_at,
+        ],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    if changed != 1 {
+        return Err(LedgerError::Unavailable);
+    }
+    index_task(transaction, task)?;
+    Ok(true)
+}
+
+fn validate_task_progress_events(events: &[RecordEventInput]) -> Result<(), LedgerError> {
+    if events.is_empty() || events.len() > MAX_TASK_PROGRESS_EVENTS {
+        return Err(LedgerError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn append_task_event(
+    transaction: &Transaction<'_>,
+    task: &SecretaryTask,
+    input: RecordEventInput,
+) -> Result<TaskEvent, LedgerError> {
+    let event = TaskEvent {
+        task_id: task.id.clone(),
+        sequence: next_sequence(transaction, "secretary_task_events", &task.id)?,
+        event_type: normalize_safe_text(input.event_type, 64)?,
+        payload: normalize_safe_json(input.payload, 16_000)?,
+        created_at: unix_millis(),
+    };
+    let payload_text = serialize_json(&event.payload)?;
+    transaction.execute(
+        "
+        INSERT INTO secretary_task_events(task_id, sequence, event_type, payload, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ",
+        params![
+            event.task_id,
+            event.sequence,
+            event.event_type,
+            payload_text,
+            event.created_at,
+        ],
+    )?;
+    upsert_fts(
+        transaction,
+        &format!("event:{}:{}", event.task_id, event.sequence),
+        "event",
+        Some(&task.project_id),
+        &event.event_type,
+        &payload_text,
+    )?;
+    Ok(event)
+}
+
+fn append_task_checkpoint(
+    transaction: &Transaction<'_>,
+    task: &SecretaryTask,
+    input: SaveCheckpointInput,
+) -> Result<SecretaryCheckpoint, LedgerError> {
+    let checkpoint = SecretaryCheckpoint {
+        task_id: task.id.clone(),
+        sequence: next_sequence(transaction, "secretary_task_checkpoints", &task.id)?,
+        context_snapshot: normalize_safe_json(input.context_snapshot, 16_000)?,
+        next_step: normalize_safe_text(input.next_step, 4_000)?,
+        created_at: unix_millis(),
+    };
+    let snapshot_text = serialize_json(&checkpoint.context_snapshot)?;
+    transaction.execute(
+        "
+        INSERT INTO secretary_task_checkpoints(task_id, sequence, context_snapshot, next_step, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ",
+        params![
+            checkpoint.task_id,
+            checkpoint.sequence,
+            snapshot_text,
+            checkpoint.next_step,
+            checkpoint.created_at,
+        ],
+    )?;
+    upsert_fts(
+        transaction,
+        &format!("checkpoint:{}:{}", checkpoint.task_id, checkpoint.sequence),
+        "checkpoint",
+        Some(&task.project_id),
+        "任务检查点",
+        &format!("{} {}", checkpoint.next_step, snapshot_text),
+    )?;
+    Ok(checkpoint)
 }
 
 fn index_task(transaction: &Transaction<'_>, task: &SecretaryTask) -> Result<(), LedgerError> {
@@ -1926,11 +2165,19 @@ fn next_sequence(
     task_id: &str,
 ) -> Result<i64, LedgerError> {
     let query = match table {
-        "secretary_task_events" => "SELECT COALESCE(MAX(sequence), 0) + 1 FROM secretary_task_events WHERE task_id = ?1",
-        "secretary_task_checkpoints" => "SELECT COALESCE(MAX(sequence), 0) + 1 FROM secretary_task_checkpoints WHERE task_id = ?1",
+        "secretary_task_events" => {
+            "SELECT COALESCE(MAX(sequence), 0) FROM secretary_task_events WHERE task_id = ?1"
+        }
+        "secretary_task_checkpoints" => {
+            "SELECT COALESCE(MAX(sequence), 0) FROM secretary_task_checkpoints WHERE task_id = ?1"
+        }
         _ => return Err(LedgerError::InvalidInput),
     };
-    Ok(transaction.query_row(query, params![task_id], |row| row.get(0))?)
+    let current: i64 = transaction.query_row(query, params![task_id], |row| row.get(0))?;
+    if !(0..MAX_SAFE_JSON_INTEGER).contains(&current) {
+        return Err(LedgerError::InvalidInput);
+    }
+    Ok(current + 1)
 }
 
 fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
@@ -2771,6 +3018,8 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use uuid::Uuid;
 
     fn test_dir() -> PathBuf {
@@ -3106,6 +3355,29 @@ mod tests {
         }
     }
 
+    fn progress_input(phase: &str) -> PersistTaskProgressInput {
+        PersistTaskProgressInput {
+            task: UpdateTaskInput {
+                title: None,
+                request: None,
+                status: Some("running".into()),
+                priority: None,
+                schedule_at: TaskFieldPatch::Clear,
+                next_step: TaskFieldPatch::Set("继续整理已保存的资料。".into()),
+                public_plan: TaskFieldPatch::Unchanged,
+                summary: TaskFieldPatch::Set("秘书任务正在安全推进。".into()),
+            },
+            events: vec![RecordEventInput {
+                event_type: phase.into(),
+                payload: serde_json::json!({ "phase": phase, "summary": "秘书任务正在安全推进。" }),
+            }],
+            checkpoint: SaveCheckpointInput {
+                context_snapshot: serde_json::json!({ "phase": phase, "summary": "秘书任务正在安全推进。" }),
+                next_step: "继续整理已保存的资料。".into(),
+            },
+        }
+    }
+
     #[test]
     fn rejects_new_tasks_without_a_valid_project_owner() {
         let directory = test_dir();
@@ -3117,6 +3389,126 @@ mod tests {
             ledger.create_task(&project_a, task_input("missing-project")),
             Err(LedgerError::InvalidInput)
         ));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomically_claims_a_queued_task_for_only_one_concurrent_scheduler() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let first_ledger = ledger.clone();
+        let first_access = project_a.clone();
+        let first_task_id = task.id.clone();
+        let first_barrier = barrier.clone();
+        let first = thread::spawn(move || {
+            first_barrier.wait();
+            first_ledger.claim_task(&first_access, &first_task_id, progress_input("started"))
+        });
+
+        let second_ledger = ledger.clone();
+        let second_access = project_a.clone();
+        let second_task_id = task.id.clone();
+        let second_barrier = barrier.clone();
+        let second = thread::spawn(move || {
+            second_barrier.wait();
+            second_ledger.claim_task(&second_access, &second_task_id, progress_input("started"))
+        });
+
+        barrier.wait();
+        let claims = [
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        ];
+        assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
+        assert_eq!(claims.iter().filter(|claim| claim.is_none()).count(), 1);
+        assert_eq!(
+            ledger
+                .get_task(&project_a, &task.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+        assert_eq!(
+            ledger.list_events(&project_a, &task.id, 10).unwrap().len(),
+            1
+        );
+        assert!(ledger
+            .load_latest_checkpoint(&project_a, &task.id)
+            .unwrap()
+            .is_some());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rolls_back_task_transition_when_progress_event_cannot_be_durably_appended() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO secretary_task_events(task_id, sequence, event_type, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![task.id, MAX_SAFE_JSON_INTEGER, "seed", "{}", 1_i64],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            ledger.persist_task_progress(&project_a, &task.id, progress_input("planned")),
+            Err(LedgerError::InvalidInput)
+        ));
+        let persisted = ledger.get_task(&project_a, &task.id).unwrap().unwrap();
+        assert_eq!(persisted.status, "queued");
+        assert!(ledger
+            .load_latest_checkpoint(&project_a, &task.id)
+            .unwrap()
+            .is_none());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rolls_back_a_new_task_start_when_its_initial_checkpoint_is_not_persistable() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+
+        assert!(matches!(
+            ledger.start_task(
+                &project_a,
+                StartTaskInput {
+                    task: task_input("project-a"),
+                    events: vec![RecordEventInput {
+                        event_type: "started".into(),
+                        payload: serde_json::json!({ "phase": "started", "summary": "任务开始" }),
+                    }],
+                    checkpoint: SaveCheckpointInput {
+                        context_snapshot: serde_json::json!({ "token": "must-not-persist" }),
+                        next_step: "继续整理。".into(),
+                    },
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(ledger.list_tasks(&project_a, 10).unwrap().is_empty());
 
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3295,9 +3687,9 @@ mod tests {
             "summary": null,
         }))
         .unwrap();
-        assert!(matches!(missing.schedule_at, TaskFieldPatch::Unchanged));
-        assert!(matches!(clear.schedule_at, TaskFieldPatch::Clear));
-        assert!(matches!(clear.next_step, TaskFieldPatch::Clear));
+        assert!(matches!(&missing.schedule_at, TaskFieldPatch::Unchanged));
+        assert!(matches!(&clear.schedule_at, TaskFieldPatch::Clear));
+        assert!(matches!(&clear.next_step, TaskFieldPatch::Clear));
 
         let directory = test_dir();
         let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
@@ -3308,22 +3700,7 @@ mod tests {
         input.summary = Some("待清空摘要".into());
         let task = ledger.create_task(&project_a, input).unwrap();
 
-        let updated = ledger
-            .update_task(
-                &project_a,
-                &task.id,
-                UpdateTaskInput {
-                    title: None,
-                    request: None,
-                    status: None,
-                    priority: None,
-                    schedule_at: TaskFieldPatch::Clear,
-                    next_step: TaskFieldPatch::Clear,
-                    public_plan: TaskFieldPatch::Clear,
-                    summary: TaskFieldPatch::Clear,
-                },
-            )
-            .unwrap();
+        let updated = ledger.update_task(&project_a, &task.id, clear).unwrap();
         assert_eq!(updated.schedule_at, None);
         assert_eq!(updated.next_step, None);
         assert_eq!(updated.public_plan, None);
@@ -3373,6 +3750,153 @@ mod tests {
             .load_latest_checkpoint(&project_a, &task.id)
             .unwrap()
             .is_none());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_event_and_checkpoint_sequences_past_the_javascript_safe_range_before_committing() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "
+                INSERT INTO secretary_task_events(task_id, sequence, event_type, payload, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ",
+                params![
+                    &task.id,
+                    MAX_SAFE_JSON_INTEGER,
+                    "plan",
+                    r#"{"summary":"已存在的最大序号事件"}"#,
+                    1_i64,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "
+                INSERT INTO secretary_task_checkpoints(task_id, sequence, context_snapshot, next_step, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                ",
+                params![
+                    &task.id,
+                    MAX_SAFE_JSON_INTEGER,
+                    r#"{"summary":"已存在的最大序号检查点"}"#,
+                    "继续整理",
+                    1_i64,
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            ledger.record_event(
+                &project_a,
+                &task.id,
+                RecordEventInput {
+                    event_type: "plan".into(),
+                    payload: serde_json::json!({ "summary": "不应写入" }),
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.save_checkpoint(
+                &project_a,
+                &task.id,
+                SaveCheckpointInput {
+                    context_snapshot: serde_json::json!({ "summary": "不应写入" }),
+                    next_step: "不应写入".into(),
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+
+        let connection = Connection::open(&path).unwrap();
+        let event_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM secretary_task_events WHERE task_id = ?1",
+                params![&task.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let checkpoint_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM secretary_task_checkpoints WHERE task_id = ?1",
+                params![&task.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_rows, 1);
+        assert_eq!(checkpoint_rows, 1);
+        drop(connection);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn round_trips_event_and_checkpoint_payloads_at_the_serialized_json_limit() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        let empty_payload = serde_json::json!({ "summary": "" });
+        let overhead = serialize_json(&empty_payload).unwrap().chars().count();
+        let payload = serde_json::json!({
+            "summary": "x".repeat(MAX_SAFE_JSON_CHARS - overhead),
+        });
+        assert_eq!(
+            serialize_json(&payload).unwrap().chars().count(),
+            MAX_SAFE_JSON_CHARS
+        );
+
+        let event = ledger
+            .record_event(
+                &project_a,
+                &task.id,
+                RecordEventInput {
+                    event_type: "plan".into(),
+                    payload: payload.clone(),
+                },
+            )
+            .unwrap();
+        let checkpoint = ledger
+            .save_checkpoint(
+                &project_a,
+                &task.id,
+                SaveCheckpointInput {
+                    context_snapshot: payload.clone(),
+                    next_step: "继续整理".into(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(event.payload, payload);
+        assert_eq!(
+            ledger.list_events(&project_a, &task.id, 20).unwrap()[0].payload,
+            payload
+        );
+        assert_eq!(checkpoint.context_snapshot, payload);
+        assert_eq!(
+            ledger
+                .load_latest_checkpoint(&project_a, &task.id)
+                .unwrap()
+                .unwrap()
+                .context_snapshot,
+            payload
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }

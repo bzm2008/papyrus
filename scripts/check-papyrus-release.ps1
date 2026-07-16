@@ -1,9 +1,41 @@
 param(
-  [string]$BaseUrl = "https://scallion.uno"
+  [string]$BaseUrl = "https://scallion.uno",
+  [string]$ExpectedVersion
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$packagePath = Join-Path $repoRoot "package.json"
+$versionChecker = Join-Path $PSScriptRoot "lib\release-version.mjs"
+
+if (-not (Test-Path -LiteralPath $packagePath)) {
+  throw "Missing local package.json version source."
+}
+
+if (-not (Test-Path -LiteralPath $versionChecker)) {
+  throw "Missing local release-version checker."
+}
+
+$localVersion = [string](Get-Content -LiteralPath $packagePath -Raw | ConvertFrom-Json).version
+
+if (-not $ExpectedVersion) {
+  $ExpectedVersion = $localVersion
+}
+
+if ($ExpectedVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+  throw "ExpectedVersion must be a stable numeric release version, got: $ExpectedVersion"
+}
+
+if ($ExpectedVersion -ne $localVersion) {
+  throw "ExpectedVersion $ExpectedVersion does not match local package.json version $localVersion."
+}
+
+& node $versionChecker --check
+if ($LASTEXITCODE -ne 0) {
+  throw "Local release metadata does not match package.json version $ExpectedVersion."
+}
 
 function Read-Json([string]$Url) {
   return Invoke-RestMethod -Uri $Url -Headers @{ Accept = "application/json" }
@@ -14,6 +46,12 @@ function Read-Head([string]$Url) {
 }
 
 $manifest = Read-Json "$BaseUrl/api/papyrus/update"
+$manifestVersion = [string]$manifest.version
+
+if ($manifestVersion -ne $ExpectedVersion) {
+  throw "Updater manifest version $manifestVersion does not match local release version $ExpectedVersion."
+}
+
 $platform = $manifest.platforms."windows-x86_64"
 
 if (-not $platform) {
@@ -57,7 +95,8 @@ if ($signatureText.Trim() -ne $platform.signature.Trim()) {
 }
 
 [pscustomobject]@{
-  Version = $manifest.version
+  Version = $manifestVersion
+  ExpectedVersion = $ExpectedVersion
   DownloadLocation = $location
   UpdaterUrl = $platform.url
   InstallerBytes = $artifactHead.Headers.'Content-Length'
