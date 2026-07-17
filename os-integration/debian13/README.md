@@ -31,6 +31,20 @@ with the AppImage path and avoids an upgrade removing files owned by another
 package. The extracted Tauri binary and resources remain under
 `/opt/papyrus/usr/`.
 
+## Preinstall into a Debian rootfs
+
+For a Debian 13 image build, set `PAPYRUS_ROOTFS` to the rootfs mount point.
+The script writes only inside that directory; the installed desktop entry still
+uses `/opt/papyrus` and `/usr/bin/papyrus` after the image boots.
+
+```sh
+sudo env PAPYRUS_ROOTFS=/work/rootfs \
+  ./install-papyrus.sh /work/assets/Papyrus_1.0.0_amd64.deb
+```
+
+Use `PAPYRUS_INSTALL_ROOT`, `PAPYRUS_BIN_LINK`, `PAPYRUS_DESKTOP_DIR` or
+`PAPYRUS_ICON_DIR` when the image layout needs a more specific destination.
+
 ## Upgrades and rollback
 
 Run the same command with the new release asset. Files are copied over the
@@ -72,3 +86,4 @@ only when a complete data reset is intended.
 * Debian 13 (amd64) or a compatible Debian-based system.
 * `dpkg-deb` for `.deb` assets, or FUSE/AppImage support for AppImage assets.
 * A graphical session for the desktop entry.
+* `sha256sum` to verify the pinned assets listed in `SHA256SUMS`.
