@@ -339,7 +339,7 @@ async fn test_model_connection(
         request_builder = request_builder.bearer_auth(request.api_key.trim());
     }
 
-    let body = json!({
+    let mut body = json!({
       "model": model_name,
       "messages": [
         { "role": "system", "content": "You are a connectivity checker. Reply with exactly: OK" },
@@ -347,12 +347,15 @@ async fn test_model_connection(
       ],
       "temperature": 0.0,
       "max_tokens": 8,
-      "routing_mode": request.routing_mode,
       "stream": false
-    })
-    .to_string();
+    });
+    if request.provider_type == "scallion_proxy" {
+        if let Some(routing_mode) = request.routing_mode.as_deref() {
+            body["routing_mode"] = json!(routing_mode);
+        }
+    }
     let response = request_builder
-        .body(body)
+        .body(body.to_string())
         .send()
         .await
         .map_err(|error| format!("模型联通性检测失败：{}", error))?;
@@ -395,18 +398,20 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
         request_builder = request_builder.bearer_auth(request.api_key.trim());
     }
 
+    let mut body = json!({
+      "model": model_name,
+      "messages": request.messages,
+      "temperature": request.temperature,
+      "max_tokens": request.max_tokens,
+      "stream": false
+    });
+    if request.provider_type == "scallion_proxy" {
+        if let Some(routing_mode) = request.routing_mode.as_deref() {
+            body["routing_mode"] = json!(routing_mode);
+        }
+    }
     let response = request_builder
-        .body(
-            json!({
-              "model": model_name,
-              "routing_mode": request.routing_mode,
-              "messages": request.messages,
-              "temperature": request.temperature,
-              "max_tokens": request.max_tokens,
-              "stream": false
-            })
-            .to_string(),
-        )
+        .body(body.to_string())
         .send()
         .await
         .map_err(|error| format!("LLM network request failed: {}", error))?;

@@ -24,19 +24,25 @@ export function SecretaryBrowserWorkbench() {
   const [status, setStatus] = useState<BrowserBridgeStatus>({ running: false, paired: false })
   const [snapshot, setSnapshot] = useState<BrowserSnapshot>()
   const [pairing, setPairing] = useState<BrowserBridgePairing>()
+  const [message, setMessage] = useState('')
   const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
     try {
       const next = await getBrowserBridgeStatus()
       setStatus(next)
-      if (next.paired) setPairing(undefined)
+      if (next.paired) {
+        setPairing(undefined)
+        setMessage('')
+      }
       if (next.paired) {
         setSnapshot(await browserSnapshot())
       }
       setError(next.error ?? '')
+      if (next.error) setMessage('')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法读取浏览器状态')
+      setMessage('')
     }
   }, [])
 
@@ -55,9 +61,11 @@ export function SecretaryBrowserWorkbench() {
       const next = await startBrowserBridgePairing()
       setPairing(next)
       setStatus(await getBrowserBridgeStatus())
-      setError('请在 Browser Bridge 扩展弹窗粘贴配对信息，并选择连接当前标签页。')
+      setError('')
+      setMessage('Browser Bridge 已待命。打开扩展后点击“连接当前标签页”即可自动完成一次性授权。')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '启动配对失败')
+      setMessage('')
     }
   }
 
@@ -65,6 +73,7 @@ export function SecretaryBrowserWorkbench() {
     await disconnectBrowserBridge()
     setPairing(undefined)
     setSnapshot(undefined)
+    setMessage('')
     await refresh()
   }
 
@@ -86,17 +95,20 @@ export function SecretaryBrowserWorkbench() {
       })()}
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" onClick={() => void pair()} className="rounded-md bg-[#20201d] px-2.5 py-1.5 text-xs text-white">启动配对</button>
+        <button type="button" onClick={() => void pair()} className="rounded-md bg-[#20201d] px-2.5 py-1.5 text-xs text-white">准备浏览器连接</button>
         <button type="button" onClick={() => void refresh()} className="rounded-md border border-[#d8cfc0] px-2.5 py-1.5 text-xs">刷新快照</button>
         {status.paired ? <button type="button" onClick={() => void disconnect()} className="rounded-md border border-[#e6c9bf] px-2.5 py-1.5 text-xs text-[#9a4338]">断开</button> : null}
       </div>
 
       {pairing ? (
-        <div className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs leading-5">
-          <div>WebSocket：{pairing.wsUrl}</div>
-          <div className="break-all">一次性 Token：{pairing.token}</div>
-          <div className="break-all">Nonce：{pairing.nonce}</div>
-        </div>
+        <details className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs leading-5">
+          <summary className="cursor-pointer text-[#817a6d]">兼容模式：查看配对信息</summary>
+          <div className="mt-2">
+            <div>WebSocket：{pairing.wsUrl}</div>
+            <div className="break-all">一次性 Token：{pairing.token}</div>
+            <div className="break-all">Nonce：{pairing.nonce}</div>
+          </div>
+        </details>
       ) : null}
       {status.tabId !== undefined || status.origin ? (
         <div className="mt-3 grid gap-1 rounded-lg bg-[#fffefa] px-3 py-2 text-xs text-[#625c50]">
@@ -104,6 +116,7 @@ export function SecretaryBrowserWorkbench() {
           {status.origin ? <div className="truncate">来源：{status.origin}</div> : null}
         </div>
       ) : null}
+      {message ? <div className="mt-3 rounded-lg bg-[#edf6eb] p-2 text-xs text-[#315d39]">{message}</div> : null}
       {error ? <div className="mt-3 rounded-lg bg-[#fff4ef] p-2 text-xs text-[#92483d]">{error}</div> : null}
 
       {snapshot ? (

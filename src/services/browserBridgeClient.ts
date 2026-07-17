@@ -115,6 +115,15 @@ export async function getBrowserBridgeStatus() {
   const status = await call<Omit<BrowserBridgeStatus, 'connectionState'>>('browser_bridge_status')
   return { ...status, connectionState: deriveBrowserBridgeState(status) }
 }
+/** Start the loopback listener on app startup so Browser Bridge is ready without settings work. */
+export async function ensureBrowserBridgeReady() {
+  const current = await getBrowserBridgeStatus()
+  if (current.running && (current.paired || current.sessionId)) {
+    return current
+  }
+
+  return startBrowserBridgePairing()
+}
 export const disconnectBrowserBridge = () => call<void>('browser_bridge_disconnect')
 export const pairBrowserBridge = (token: string, nonce: string, extensionId: string, tabId: number, origin: string) =>
   call<BrowserBridgeStatus>('browser_bridge_pair', { token, nonce, extensionId, tabId, origin })

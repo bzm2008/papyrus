@@ -278,8 +278,8 @@ describe('Scallion production contract', () => {
 
     const models = await fetchScallionProxyModels(defaultProviderConfigs.qwen36)
 
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain(
-      '/models?include_unavailable=1',
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(
+      'https://scallion.uno/api/papyrus/llm/models',
     )
     expect(models).toEqual([
       expect.objectContaining({
@@ -293,6 +293,28 @@ describe('Scallion production contract', () => {
         contextWindowLabel: '1M',
       }),
     ])
+  })
+
+  it('retries once without routing_mode for an older gateway validation response', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { error: { message: 'Validation: Unsupported parameter(s): `routing_mode`', type: 'Bad Request', code: 400 } },
+          400,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: '已兼容回复' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatible(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }]),
+    ).resolves.toBe('已兼容回复')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toHaveProperty('routing_mode', 'auto')
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).not.toHaveProperty('routing_mode')
   })
 
   it('keeps server-declared plan restrictions so the UI can show unavailable models', async () => {
@@ -719,6 +741,29 @@ describe('Scallion production contract', () => {
       ),
     ).rejects.toMatchObject({ code: 'forbidden', status: 403 })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('allows a user-configured custom model on every Scallion plan', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      scallionPlan: {
+        key: 'free',
+        name: 'Free',
+        availableModels: [],
+        externalApi: false,
+        updatedAt: Date.now(),
+      },
+    })
+    const fetchMock = vi.fn(async () => jsonResponse({ choices: [{ message: { content: '自定义模型回复' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.custom, baseUrl: 'https://custom.example/v1', apiKey: 'custom-key', modelName: 'my-model' },
+        [{ role: 'user', content: '测试' }],
+      ),
+    ).resolves.toBe('自定义模型回复')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
   it('allows external providers only when the gateway explicitly grants Deeper access', async () => {

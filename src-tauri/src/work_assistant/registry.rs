@@ -184,7 +184,7 @@ pub fn work_assistant_capabilities(
         capability.reason = if paired || web_only {
             None
         } else {
-            Some("先在设置中启动并配对 Browser Bridge 当前标签页".into())
+            Some("Browser Bridge 已自动待命；首次使用时请在扩展中授权当前标签页".into())
         };
     }
     capabilities

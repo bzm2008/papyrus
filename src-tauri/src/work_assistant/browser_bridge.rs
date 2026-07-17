@@ -15,8 +15,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
+    io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::{mpsc, Arc, Condvar, Mutex},
+    sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,6 +29,7 @@ use tungstenite::{accept_hdr_with_config, Message};
 use uuid::Uuid;
 
 const PAIRING_LIFETIME_SECONDS: u64 = 5 * 60;
+const DISCOVERY_PORT: u16 = 43121;
 const MAX_WEB_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WEB_TEXT: usize = 60_000;
 const MAX_REDIRECTS: usize = 5;
@@ -274,6 +276,14 @@ struct BrowserBridgeInner {
     browser_previews: Mutex<HashMap<String, StoredBrowserPreview>>,
     browser_approvals: Mutex<HashMap<String, StoredBrowserApproval>>,
 }
+
+// The browser extension cannot invoke Tauri directly. A single process-local
+// discovery listener lets it obtain a short-lived pairing from the running
+// Papyrus instance without asking users to copy secrets into a popup. The
+// websocket still validates the extension origin, one-time token, tab, and
+// page origin before exposing any browser data.
+static DISCOVERY_TARGET: OnceLock<Arc<Mutex<Weak<BrowserBridgeInner>>>> = OnceLock::new();
+static DISCOVERY_STARTED: OnceLock<()> = OnceLock::new();
 
 pub struct BrowserBridgeState {
     inner: Arc<BrowserBridgeInner>,
@@ -582,6 +592,7 @@ pub async fn work_assistant_web_extract(
 fn start_pairing(
     inner: &Arc<BrowserBridgeInner>,
 ) -> Result<BrowserBridgePairing, WorkAssistantError> {
+    ensure_discovery_listener(inner);
     let listener = ensure_listener(inner)?;
     let now = unix_seconds();
     let session_id = Uuid::new_v4().to_string();
@@ -1383,6 +1394,114 @@ impl InstantDeadline {
     }
 }
 
+fn ensure_discovery_listener(inner: &Arc<BrowserBridgeInner>) {
+    let target = DISCOVERY_TARGET
+        .get_or_init(|| Arc::new(Mutex::new(Weak::new())))
+        .clone();
+    if let Ok(mut current) = target.lock() {
+        *current = Arc::downgrade(inner);
+    }
+
+    DISCOVERY_STARTED.get_or_init(|| {
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", DISCOVERY_PORT)) else {
+            // Another Papyrus instance or a local service may own the optional
+            // discovery port. The secure manual pairing path remains available.
+            return;
+        };
+        let Ok(()) = listener.set_nonblocking(true) else {
+            return;
+        };
+        let registry = target.clone();
+        thread::spawn(move || discovery_listener_loop(listener, registry));
+    });
+}
+
+fn discovery_listener_loop(listener: TcpListener, target: Arc<Mutex<Weak<BrowserBridgeInner>>>) {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let registry = target.clone();
+                thread::spawn(move || discovery_connection(stream, registry));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(30));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn discovery_connection(mut stream: TcpStream, target: Arc<Mutex<Weak<BrowserBridgeInner>>>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut buffer = [0_u8; 8 * 1024];
+    let Ok(read) = stream.read(&mut buffer) else {
+        return;
+    };
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let mut lines = request.lines();
+    let Some(request_line) = lines.next() else {
+        return;
+    };
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default();
+    let path = request_parts.next().unwrap_or_default();
+    let origin = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("origin")
+                .then(|| value.trim())
+        })
+        .unwrap_or_default();
+
+    if method != "GET" || path.split('?').next() != Some("/pairing") {
+        write_discovery_response(&mut stream, 404, "Not Found", None, None);
+        return;
+    }
+    if extension_origin_id(origin).is_none() {
+        write_discovery_response(&mut stream, 403, "Forbidden", None, None);
+        return;
+    }
+
+    let inner = target.lock().ok().and_then(|current| current.upgrade());
+    let Some(inner) = inner else {
+        write_discovery_response(&mut stream, 503, "Papyrus is not ready", None, None);
+        return;
+    };
+    match start_pairing(&inner) {
+        Ok(pairing) => match serde_json::to_string(&pairing) {
+            Ok(body) => write_discovery_response(
+                &mut stream,
+                200,
+                "OK",
+                Some(body.as_bytes()),
+                Some(origin),
+            ),
+            Err(_) => write_discovery_response(&mut stream, 500, "Pairing unavailable", None, None),
+        },
+        Err(_) => write_discovery_response(&mut stream, 503, "Pairing unavailable", None, None),
+    }
+}
+
+fn write_discovery_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: Option<&[u8]>,
+    allow_origin: Option<&str>,
+) {
+    let body = body.unwrap_or_default();
+    let cors = allow_origin
+        .map(|origin| format!("Access-Control-Allow-Origin: {origin}\r\n"))
+        .unwrap_or_default();
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{cors}Connection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+}
+
 fn ensure_listener(inner: &Arc<BrowserBridgeInner>) -> Result<u16, WorkAssistantError> {
     let mut listener = inner
         .listener
@@ -1730,21 +1849,26 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn extension_origin_matches(origin: &str, extension_id: &str) -> bool {
+    extension_origin_id(origin).is_some_and(|id| id == extension_id)
+}
+
+fn extension_origin_id(origin: &str) -> Option<&str> {
     let trimmed = origin.trim_end_matches('/');
-    let Some((scheme, id)) = trimmed.split_once("://") else {
-        return false;
-    };
+    let (scheme, id) = trimmed.split_once("://")?;
     if !matches!(
         scheme.to_ascii_lowercase().as_str(),
         "chrome-extension" | "edge-extension" | "brave-extension"
     ) {
-        return false;
+        return None;
     }
-    id == extension_id
-        && id.len() == 32
-        && id
+    if id.len() != 32
+        || !id
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(id)
 }
 
 fn validate_bridge_message_size(raw: &str) -> Result<(), WorkAssistantError> {

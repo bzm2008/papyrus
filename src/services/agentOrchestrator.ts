@@ -36,6 +36,7 @@ import {
 } from './secretaryGoalService'
 import {
   classifySecretaryTask,
+  isConversationalShortcut,
   type SecretaryTaskClassification,
   type SecretaryTaskComplexity,
 } from './secretaryTaskClassifier'
@@ -78,6 +79,7 @@ import {
   type FlowThinkingEffort,
   type FlowTrace,
   type ImportedResource,
+  type LlmProviderConfig,
   type SecretaryPlanDraft,
   useAppStore,
 } from '../stores/useAppStore'
@@ -120,15 +122,31 @@ export type AgentRunOutcome = {
   runId: string
   result?: AgentRunResult
   error?: string
+  conversationOnly?: boolean
 }
 
-export function shouldContinueSecretaryGoalCycle(outcome: Pick<AgentRunOutcome, 'status'> | undefined) {
-  return outcome?.status === 'completed'
+export function shouldContinueSecretaryGoalCycle(
+  outcome: Pick<AgentRunOutcome, 'status' | 'conversationOnly'> | undefined,
+) {
+  return outcome?.status === 'completed' && outcome.conversationOnly !== true
 }
 
 /** Low effort is deliberately a single-agent path to keep latency and cost predictable. */
 export function canUseSecretarySubAgents(thinkingEffort: FlowThinkingEffort) {
   return thinkingEffort !== 'low'
+}
+
+/** Lightweight turns skip persistent scheduling, Todo, tools, and sub-agents. */
+export function isLightweightSecretaryTask(prompt: string) {
+  const classification = classifySecretaryTask(prompt)
+  if (classification.complexity !== 'simple' || classification.domain !== 'writing') {
+    return false
+  }
+
+  return !shouldCreateDocumentPatch(prompt)
+    && !hasLongformIntent(prompt)
+    && !hasRealtimeOrExternalIntent(prompt)
+    && !shouldUseProjectContext(prompt, false)
 }
 
 type AgentOutput = {
@@ -298,6 +316,32 @@ export async function sendFlowMessage(
   try {
     runSignal = startSecretaryRun(run.id)
     throwIfAborted(runSignal)
+
+    // Social turns are intentionally kept outside the secretary planner. A
+    // greeting should not initialize the ledger, tools, Todo list, or Agent
+    // traces because none of those are part of the user's requested work.
+    if (isConversationalShortcut(content) || isLightweightSecretaryTask(content)) {
+      const conversational = isConversationalShortcut(content)
+      const response = conversational
+        ? await runConversationalShortcut(provider, content, runSignal, thinkingEffort)
+        : await runLightweightSecretaryResponse(provider, content, runSignal, thinkingEffort)
+      finishAgentRun(run, {
+        status: 'completed',
+        response,
+        summary: conversational
+          ? '简短寒暄已直接回复，未进入任务编排。'
+          : '轻量秘书任务已直接完成，未创建 Todo、工具或子 Agent。',
+      })
+      store.addFlowMessage({ role: 'assistant', agentId: 'writer', content: response })
+      store.setLlmRunState('idle', '铭荼已回复')
+      return {
+        status: 'completed',
+        runId: run.id,
+        result: { response },
+        conversationOnly: true,
+      }
+    }
+
     try {
       ledgerRun = await beginSecretaryLedgerRun({
         runId: run.id,
@@ -552,6 +596,94 @@ export async function sendFlowMessage(
   }
 }
 
+async function runConversationalShortcut(
+  provider: LlmProviderConfig,
+  prompt: string,
+  signal: AbortSignal,
+  thinkingEffort: FlowThinkingEffort,
+) {
+  if (!canCallProvider(provider)) {
+    return createConversationalFallback(prompt)
+  }
+
+  const sampling = getAgentSamplingProfile('agent_output', thinkingEffort, {
+    repeatRisk: 0.15,
+    creative: false,
+  })
+
+  return callOpenAICompatible(
+    provider,
+    [
+      {
+        role: 'system',
+        content: composeSystemPrompt(
+          [
+            sharedAgentRules,
+            '你是 Papyrus 的铭荼，一位体贴、可爱的中文秘书。',
+            '这是简短寒暄，不要规划任务，不要调用工具、子 Agent 或写入文稿。',
+            '只用一两句自然、有人情味的话回应，并邀请用户说出想处理的事情。',
+          ].join('\n'),
+        ),
+      },
+      { role: 'user', content: prompt },
+    ],
+    signal,
+    { ...sampling, maxTokens: Math.min(sampling.maxTokens, 256) },
+  )
+}
+
+function createConversationalFallback(prompt: string) {
+  if (/谢谢|多谢/.test(prompt)) {
+    return '不客气呀。需要我帮你处理什么，直接告诉我就好。'
+  }
+
+  if (/在吗|有人吗/.test(prompt)) {
+    return '在的，我是铭荼。你想先处理哪件事？'
+  }
+
+  if (/再见/.test(prompt)) {
+    return '好呀，等你回来。'
+  }
+
+  return '你好呀，我是铭荼。今天想一起处理什么？'
+}
+
+async function runLightweightSecretaryResponse(
+  provider: LlmProviderConfig,
+  prompt: string,
+  signal: AbortSignal,
+  thinkingEffort: FlowThinkingEffort,
+) {
+  if (!canCallProvider(provider)) {
+    return '这件事可以直接处理，但当前没有可用模型。请先登录主站或配置一个模型。'
+  }
+
+  const sampling = getAgentSamplingProfile('agent_output', thinkingEffort, {
+    repeatRisk: 0.2,
+    creative: false,
+  })
+
+  return callOpenAICompatible(
+    provider,
+    [
+      {
+        role: 'system',
+        content: composeSystemPrompt(
+          [
+            sharedAgentRules,
+            '你是 Papyrus 的铭荼，一位体贴、清楚、偏文科秘书风格的助手。',
+            '这是一个轻量任务。直接完成用户请求，只返回自然的最终答复。',
+            '不要创建 Todo，不要调用工具或子 Agent，不要输出计划、内部状态、工具轨迹或正文补丁标记。',
+          ].join('\n'),
+        ),
+      },
+      { role: 'user', content: prompt },
+    ],
+    signal,
+    { ...sampling, maxTokens: Math.min(sampling.maxTokens, 1024) },
+  )
+}
+
 export async function createSecretaryPlanDraft(
   request: string,
   executionPrompt = request,
@@ -765,6 +897,10 @@ export async function planAgentRun(
     store.customStudioAgents,
     store.disabledBuiltInStudioAgentIds,
   )
+
+  if (isConversationalShortcut(prompt) || isLightweightSecretaryTask(prompt)) {
+    return createConversationOnlyPlan([describeModelRouting(plannerModel)], thinkingEffort)
+  }
 
   if (canCallProvider(provider)) {
     const step = store.addAgentStep({
@@ -1846,6 +1982,10 @@ function sanitizePlan(
   modelRoutingSummary: string[] = [],
   thinkingEffort = useAppStore.getState().flowThinkingEffort,
 ): AgentRunPlan {
+  if (isConversationalShortcut(prompt) || isLightweightSecretaryTask(prompt)) {
+    return createConversationOnlyPlan(modelRoutingSummary, thinkingEffort)
+  }
+
   const fallback = createFallbackPlan(prompt, classification, modelRoutingSummary, thinkingEffort)
   const routing = routeForPrompt(prompt)
   const routedAgents = [
@@ -1979,6 +2119,27 @@ function normalizePatchOperation(operation: unknown, prompt: string) {
   return allowed.includes(operation as DocumentPatchOperation)
     ? (operation as DocumentPatchOperation)
     : inferPatchOperation(prompt)
+}
+
+function createConversationOnlyPlan(
+  modelRoutingSummary: string[] = [],
+  thinkingEffort = useAppStore.getState().flowThinkingEffort,
+): AgentRunPlan {
+  return {
+    needsWebSearch: false,
+    subAgents: [],
+    toolCalls: [],
+    writeIntent: false,
+    replyMode: 'conversation_only',
+    conversationGoal: '自然回应用户的简短寒暄，并等待下一步请求。',
+    routingRationale: '检测到简短寒暄，跳过规划器、工具和多 Agent 调度。',
+    taskComplexity: 'simple',
+    taskType: 'conversation',
+    classificationConfidence: 1,
+    maxAgentCount: 0,
+    modelRoutingSummary,
+    agentBudgetLabel: `寒暄直达：${describeThinkingEffort(thinkingEffort)}模式不创建 Agent 任务`,
+  }
 }
 
 function uniqueAgents(agents: FlowAgentId[], maxCount = 5) {
