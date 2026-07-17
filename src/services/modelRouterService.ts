@@ -12,6 +12,7 @@ import {
   getProviderTierWeight,
   isProviderAllowedForAuto,
 } from './modelGovernanceService'
+import { getScallionRoutingAccess } from './scallionModelCatalog'
 import type { SecretaryTaskComplexity } from './secretaryTaskClassifier'
 
 export type ModelProviderRole =
@@ -51,9 +52,14 @@ export function selectModelForRole(
   }
 
   if (store.providerConfigs.qwen36.type === 'scallion_proxy') {
-    const autoModel = store.scallionModels.find(
-      (model) => model.available && model.autoAvailable !== false,
+    const configuredModelName = store.providerConfigs.qwen36.modelName.trim()
+    const autoModels = store.scallionModels.filter(
+      (model) => model.available !== false && getScallionRoutingAccess(model, 'auto'),
     )
+    const autoModel =
+      autoModels.find(
+        (model) => model.id === configuredModelName || model.modelName === configuredModelName,
+      ) ?? autoModels[0]
     if (autoModel) {
       const provider = {
         ...store.providerConfigs.qwen36,

@@ -84,6 +84,27 @@ const platformPatterns = [
   /私域/,
 ]
 
+const conversationalShortcutPattern = /^(?:你好|您好|嗨|嗨嗨|哈喽|hello|hi|hey|在吗|有人吗|早上好|下午好|晚上好|晚安|谢谢|谢谢你|多谢|好的|好呀|好吧|收到|明白了|了解了|嗯|嗯嗯|哈哈|哈哈哈|再见|你是谁|你叫什么|你能做什么|how are you|who are you)[!！。,.，?？~～\s]*$/i
+
+/**
+ * Short social turns should take one conversational model call. They must not
+ * enter the planner/tool pipeline, even when a model over-interprets a greeting
+ * as a writing request.
+ */
+export function isConversationalShortcut(prompt: string) {
+  const text = prompt
+    .split('【思考强度】', 1)[0]
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!text || text.length > 32 || !conversationalShortcutPattern.test(text)) {
+    return false
+  }
+
+  const classification = classifySecretaryTask(text)
+  return classification.complexity === 'simple' && classification.domain === 'writing'
+}
+
 export function classifySecretaryTask(
   prompt: string,
   options: { activeGoal?: boolean; writeIntent?: boolean } = {},

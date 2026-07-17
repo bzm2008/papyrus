@@ -49,26 +49,47 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {!collapsed ? (
-        <div className="grid shrink-0 grid-cols-2 gap-1.5 border-b border-[#e8ddc7]/80 p-2">
-          <SmallAction icon={Plus} label="新建对话" primary onClick={newChatSession} />
-          <SmallAction icon={FilePlus2} label="新建文章" onClick={() => newArticleInChat()} />
-          <SmallAction icon={Gauge} label="作品体检" onClick={() => setStoryDashboardOpen(true)} />
+      <div
+        className={`shrink-0 border-b border-[#e3dac8] ${
+          collapsed ? 'flex flex-col items-center gap-2 px-2 py-3' : 'px-3 py-3'
+        }`}
+      >
+        {!collapsed ? (
+          <div className="mb-2.5 flex items-end justify-between gap-2 px-0.5">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[12px] font-semibold text-[#3f5845]">
+                <Gauge size={14} />
+                <span>工作台</span>
+              </div>
+              <div className="mt-0.5 truncate text-[10px] text-[#9d988a]">
+                {sortedChats.length} 个对话 · {articles.length} 篇文稿 · {resources.length} 份资料
+              </div>
+            </div>
+            <span className="shrink-0 rounded-full bg-[#edf2e8] px-2 py-0.5 text-[10px] text-[#59705b]">当前项目</span>
+          </div>
+        ) : null}
+
+        <div className={collapsed ? 'flex flex-col items-center gap-2' : 'grid grid-cols-2 gap-2'}>
+          <SmallAction collapsed={collapsed} icon={Plus} label="新建对话" primary onClick={newChatSession} />
+          <SmallAction collapsed={collapsed} icon={FilePlus2} label="新建文章" onClick={() => newArticleInChat()} />
+          <SmallAction collapsed={collapsed} icon={Gauge} label="作品体检" onClick={() => setStoryDashboardOpen(true)} />
           <SmallAction
+            collapsed={collapsed}
             icon={Upload}
             label="导入文件"
             onClick={() => void importResourceFiles().catch(showResourceImportUnavailable)}
           />
           <SmallAction
+            collapsed={collapsed}
             icon={FolderPlus}
             label="打开文件夹"
             onClick={() => void openProjectFolder().catch(showResourceImportUnavailable)}
           />
         </div>
-      ) : null}
+      </div>
 
-      <div className="papyrus-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto p-2">
-        <NavigatorSection collapsed={collapsed} title="历史聊天">
+      <div className="papyrus-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-2.5 py-3">
+        <NavigatorSection collapsed={collapsed} icon={MessageSquare} title="历史聊天">
           {sortedChats.length ? (
             <AnimatedList>
               {sortedChats.map((chat) => (
@@ -115,7 +136,8 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
 
         <NavigatorSection
           collapsed={collapsed}
-          title="文件"
+          icon={FileText}
+          title="项目资料"
           meta={
             resources.length
               ? `${includedResources.length}/${resources.length} · ${includedResourceTokens.toLocaleString()} tokens`
@@ -146,6 +168,15 @@ export function ProjectNavigator({ collapsed = false }: { collapsed?: boolean })
           )}
         </NavigatorSection>
       </div>
+
+      {!collapsed ? (
+        <div className="shrink-0 border-t border-[#e3dac8] px-3 py-2.5">
+          <div className="flex items-center justify-between gap-2 text-[10px] text-[#9d988a]">
+            <span>项目资料会作为上下文按需使用</span>
+            <FileText size={13} className="shrink-0 text-[#7c9273]" />
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -207,11 +238,13 @@ function ResourceItem({
 }
 
 function SmallAction({
+  collapsed = false,
   icon: Icon,
   label,
   primary = false,
   onClick,
 }: {
+  collapsed?: boolean
   icon: LucideIcon
   label: string
   primary?: boolean
@@ -221,36 +254,46 @@ function SmallAction({
     <button
       type="button"
       title={label}
+      aria-label={label}
       onClick={onClick}
-      className={`inline-flex h-7 items-center justify-center gap-1.5 rounded-md px-2 text-[11px] font-medium ${
-        primary ? 'papyrus-primary-button' : 'papyrus-control'
-      }`}
+      className={`inline-flex items-center justify-center gap-1.5 rounded-md text-[11px] font-medium ${
+        collapsed ? 'size-9 px-0' : 'h-10 min-w-0 px-2.5'
+      } ${primary ? 'papyrus-primary-button' : 'papyrus-control'}`}
     >
-      <Icon size={13} />
-      <span className="truncate">{label}</span>
+      <Icon size={collapsed ? 16 : 14} />
+      {!collapsed ? <span className="truncate">{label}</span> : null}
     </button>
   )
 }
 
 function NavigatorSection({
+  icon: Icon,
   title,
   meta,
   collapsed,
   children,
 }: {
+  icon: LucideIcon
   title: string
   meta?: string
   collapsed: boolean
   children: ReactNode
 }) {
   return (
-    <section>
+    <section className="min-w-0">
       {!collapsed ? (
-        <div className="mb-1.5 flex items-center justify-between gap-2 px-1 text-[11px] font-semibold text-[#9d988a]">
-          <span>{title}</span>
-          {meta ? <span className="truncate font-normal text-[#8f897a]">{meta}</span> : null}
+        <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[11px] font-semibold text-[#6f7168]">
+          <span className="flex min-w-0 items-center gap-1.5">
+            <Icon size={14} className="shrink-0 text-[#7c9273]" />
+            <span className="truncate">{title}</span>
+          </span>
+          {meta ? <span className="truncate text-[10px] font-normal text-[#9d988a]">{meta}</span> : null}
         </div>
-      ) : null}
+      ) : (
+        <div className="mb-2 flex justify-center text-[#7c9273]" title={title} aria-label={title}>
+          <Icon size={15} />
+        </div>
+      )}
       {children}
     </section>
   )

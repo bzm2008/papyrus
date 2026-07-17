@@ -1,4 +1,4 @@
-﻿import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
   Clipboard,
   Copy,
@@ -6,7 +6,6 @@ import {
   FileText,
   PanelLeftOpen,
   MessageSquare,
-  PanelRightOpen,
   PenLine,
   Play,
   RotateCcw,
@@ -82,16 +81,12 @@ type ReceiptSnapshot = {
 
 export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
-  const [rightPanelOpen, setRightPanelOpen] = useState(false)
-  const [rightPanelPinned, setRightPanelPinned] = useState(false)
-  const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('run')
+  const [inlineWorkbenchView, setInlineWorkbenchView] = useState<WorkbenchView>('run')
   const [taskCenterDrawerOpen, setTaskCenterDrawerOpen] = useState(false)
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
   const autoStartTaskIdRef = useRef<string | null>(null)
   const pendingPersistentTaskRef = useRef<{ task: { id: string; request: string }; recovery?: SecretaryLedgerRecoveryItem } | null>(null)
-  const autoWorkbenchTimerRef = useRef<number | undefined>(undefined)
-  const previousRunStateRef = useRef(useAppStore.getState().llmRunState)
   const receiptRunStateRef = useRef(useAppStore.getState().llmRunState)
   const flowMessages = useAppStore((state) => state.flowMessages)
   const setFlowMessages = useAppStore((state) => state.setFlowMessages)
@@ -160,57 +155,12 @@ export function FlowWorkspace() {
     latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
       ? latestChangeStat
       : undefined
-  const shouldAutoOpenWorkbench =
-    Boolean(activeSecretaryGoal?.status === 'active') ||
-    flowThinkingEffort === 'ultra_hive' ||
-    agentSteps.length >= 2 ||
-    flowTraces.length >= 2 ||
-    agentTodos.length >= 4
-
-  useEffect(() => {
-    const previousRunState = previousRunStateRef.current
-
-    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
-    const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
-
-    if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'run') {
-      setRightPanelOpen(false)
-    }
-
-    previousRunStateRef.current = llmRunState
-  }, [llmRunState, rightPanelPinned, rightPanelView])
-
-  useEffect(() => {
-    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
-
-    if (
-      !isBusy ||
-      rightPanelOpen ||
-      rightPanelPinned ||
-      rightPanelView !== 'run' ||
-      !shouldAutoOpenWorkbench
-    ) {
-      if (autoWorkbenchTimerRef.current !== undefined) {
-        window.clearTimeout(autoWorkbenchTimerRef.current)
-        autoWorkbenchTimerRef.current = undefined
-      }
-      return
-    }
-
-    autoWorkbenchTimerRef.current = window.setTimeout(() => {
-      setRightPanelView('run')
-      setRightPanelOpen(true)
-      autoWorkbenchTimerRef.current = undefined
-    }, 420)
-
-    return () => {
-      if (autoWorkbenchTimerRef.current !== undefined) {
-        window.clearTimeout(autoWorkbenchTimerRef.current)
-        autoWorkbenchTimerRef.current = undefined
-      }
-    }
-  }, [llmRunState, rightPanelOpen, rightPanelPinned, rightPanelView, shouldAutoOpenWorkbench])
-
+  const showInlineWorkbench =
+    inlineWorkbenchView !== 'run' ||
+    Boolean(activeWorkAssistantRun) ||
+    agentTodos.length > 0 ||
+    agentSteps.length > 0 ||
+    flowTraces.length > 0
   useEffect(() => {
     const previousRunState = receiptRunStateRef.current
     const hasRunData = agentTodos.length > 0 || agentSteps.length > 0 || flowTraces.length > 0
@@ -508,8 +458,7 @@ export function FlowWorkspace() {
           onPauseActiveTask={() => pauseSecretaryRun()}
           onCancelActiveTask={() => cancelSecretaryRun()}
           onOpenMaterials={() => {
-            setRightPanelOpen(true)
-            setRightPanelView('files')
+            setInlineWorkbenchView('files')
           }}
         />
       </div>
@@ -551,40 +500,15 @@ export function FlowWorkspace() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              title={rightPanelOpen && rightPanelView === 'run' ? '隐藏工作台' : '显示工作台'}
-              aria-label={rightPanelOpen && rightPanelView === 'run' ? '隐藏工作台' : '显示工作台'}
+              title={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
+              aria-label={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
               onClick={() => {
-                if (rightPanelOpen && rightPanelView === 'run') {
-                  setRightPanelOpen(false)
-                  setRightPanelPinned(false)
-                  return
-                }
-
-                setRightPanelOpen(true)
-                setRightPanelView('run')
-              }}
-              className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
-            >
-              <PanelRightOpen size={14} />
-              <span className="hidden sm:inline">工作台</span>
-            </button>
-            <button
-              type="button"
-              title={rightPanelOpen && rightPanelView === 'manuscript' ? '隐藏文稿' : '显示文稿'}
-              aria-label={rightPanelOpen && rightPanelView === 'manuscript' ? '隐藏文稿' : '显示文稿'}
-              onClick={() => {
-                if (rightPanelOpen && rightPanelView === 'manuscript') {
-                  setRightPanelOpen(false)
-                  return
-                }
-
-                setRightPanelOpen(true)
-                setRightPanelView('manuscript')
+                setInlineWorkbenchView((view) => (view === 'manuscript' ? 'run' : 'manuscript'))
               }}
               className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
             >
               <FileText size={14} />
-              <span className="hidden sm:inline">文稿</span>
+              <span className="hidden sm:inline">{inlineWorkbenchView === 'manuscript' ? '收起文稿' : '文稿'}</span>
             </button>
           </div>
         </header>
@@ -645,6 +569,24 @@ export function FlowWorkspace() {
                   : null}
               </AnimatePresence>
             </div>
+            {showInlineWorkbench ? (
+              <div className="mt-4">
+                <SecretaryWorkbenchPanel
+                  inline
+                  todos={agentTodos}
+                  steps={agentSteps}
+                  traces={flowTraces}
+                  runState={llmRunState}
+                  pinned={false}
+                  activeView={inlineWorkbenchView}
+                  onViewChange={setInlineWorkbenchView}
+                  changeStat={latestRunChangeStat}
+                  manuscript={<div className="h-[34rem]"><EditorPane /></div>}
+                  files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
+                  browser={<SecretaryBrowserWorkbench />}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -751,8 +693,7 @@ export function FlowWorkspace() {
                 onPauseActiveTask={() => pauseSecretaryRun()}
                 onCancelActiveTask={() => cancelSecretaryRun()}
                 onOpenMaterials={() => {
-                  setRightPanelOpen(true)
-                  setRightPanelView('files')
+                  setInlineWorkbenchView('files')
                   setTaskCenterDrawerOpen(false)
                 }}
                 onClose={() => setTaskCenterDrawerOpen(false)}
@@ -762,28 +703,6 @@ export function FlowWorkspace() {
         ) : null}
       </AnimatePresence>
 
-      <AnimatePresence initial={false}>
-        {rightPanelOpen ? (
-          <SecretaryWorkbenchPanel
-            todos={agentTodos}
-            steps={agentSteps}
-            traces={flowTraces}
-            runState={llmRunState}
-            pinned={rightPanelPinned}
-            activeView={rightPanelView}
-            onViewChange={setRightPanelView}
-            onPinnedChange={setRightPanelPinned}
-            onClose={() => {
-              setRightPanelOpen(false)
-              setRightPanelPinned(false)
-            }}
-            changeStat={latestRunChangeStat}
-            manuscript={<EditorPane />}
-            files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
-            browser={<SecretaryBrowserWorkbench />}
-          />
-        ) : null}
-      </AnimatePresence>
     </section>
   )
 }

@@ -215,6 +215,7 @@ async function callOpenAICompatibleOnce(
   signal?: AbortSignal,
   sampling?: LlmSamplingOptions,
   allowModelRecovery = true,
+  omitScallionRoutingMode = false,
 ) {
   assertExternalApiAllowed(provider)
   const modelName = resolveProviderModelName(provider, sampling?.routingMode)
@@ -242,7 +243,7 @@ async function callOpenAICompatibleOnce(
     max_tokens: sampling?.maxTokens ?? 8192,
     frequency_penalty: sampling?.frequencyPenalty,
     presence_penalty: sampling?.presencePenalty,
-    ...(provider.type === 'scallion_proxy'
+    ...(provider.type === 'scallion_proxy' && !omitScallionRoutingMode
       ? { routing_mode: resolveScallionRoutingMode(sampling?.routingMode) }
       : {}),
     stream: false,
@@ -284,6 +285,21 @@ async function callOpenAICompatibleOnce(
 
   if (!response.ok) {
     const error = createHttpError(response.status, payload)
+
+    if (
+      allowModelRecovery &&
+      provider.type === 'scallion_proxy' &&
+      isUnsupportedRoutingModeError(error)
+    ) {
+      return callOpenAICompatibleOnce(
+        provider,
+        messages,
+        signal,
+        sampling,
+        false,
+        true,
+      )
+    }
 
     if (provider.type === 'scallion_proxy') {
       if (error.code === 'unauthorized') {
@@ -366,6 +382,7 @@ async function callOpenAICompatibleStreamOnce(
   { signal, onToken, sampling }: StreamOptions,
   allowModelRecovery = true,
   emptyStreamFallback = { attempted: false },
+  omitScallionRoutingMode = false,
 ) {
   assertExternalApiAllowed(provider)
   const modelName = resolveProviderModelName(provider, sampling?.routingMode)
@@ -400,7 +417,7 @@ async function callOpenAICompatibleStreamOnce(
         max_tokens: sampling?.maxTokens ?? 8192,
         frequency_penalty: sampling?.frequencyPenalty,
         presence_penalty: sampling?.presencePenalty,
-        ...(provider.type === 'scallion_proxy'
+        ...(provider.type === 'scallion_proxy' && !omitScallionRoutingMode
           ? { routing_mode: resolveScallionRoutingMode(sampling?.routingMode) }
           : {}),
         stream: true,
@@ -434,6 +451,21 @@ async function callOpenAICompatibleStreamOnce(
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as ChatCompletionResponse
     const error = createHttpError(response.status, payload)
+
+    if (
+      allowModelRecovery &&
+      provider.type === 'scallion_proxy' &&
+      isUnsupportedRoutingModeError(error)
+    ) {
+      return callOpenAICompatibleStreamOnce(
+        provider,
+        messages,
+        { signal, onToken, sampling },
+        false,
+        emptyStreamFallback,
+        true,
+      )
+    }
 
     if (provider.type === 'scallion_proxy') {
       if (error.code === 'unauthorized') {
@@ -575,9 +607,11 @@ export async function fetchScallionProxyModelCatalog(
     return { models: [] }
   }
 
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models${
-    options.includeUnavailable === false ? '' : '?include_unavailable=1'
-  }`
+  // The gateway's /models response is the sole directory authority. Do not
+  // add the legacy include_unavailable switch: older gateways used it to
+  // expose provider-side models outside the Papyrus catalogue.
+  void options
+  const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models`
   const headers: Record<string, string> = {}
   const apiKey = resolveProviderApiKey(provider)
 
@@ -744,7 +778,10 @@ function isExternalApiProviderAllowed(provider: LlmProviderConfig) {
     return true
   }
 
-  if (provider.type === 'custom' && isLocalCompatibleEndpoint(provider.baseUrl)) {
+  // A user-configured OpenAI-compatible endpoint is independent of the
+  // Scallion subscription. The gateway entitlement only governs built-in
+  // vendor-key routing; custom endpoints use the user's own credentials.
+  if (provider.type === 'custom') {
     return true
   }
 
@@ -758,7 +795,7 @@ function isExternalApiProviderAllowed(provider: LlmProviderConfig) {
 }
 
 function assertExternalApiAllowed(provider: LlmProviderConfig) {
-  if (provider.type === 'scallion_proxy' || (provider.type === 'custom' && isLocalCompatibleEndpoint(provider.baseUrl))) {
+  if (provider.type === 'scallion_proxy' || provider.type === 'custom') {
     return
   }
 
@@ -938,6 +975,10 @@ function createHttpError(status: number, payload: ChatCompletionResponse) {
       code === 'server_error' ||
       code === 'rate_limited',
   })
+}
+
+function isUnsupportedRoutingModeError(error: LlmRequestError) {
+  return error.status === 400 && /routing[_ -]?mode/i.test(error.message)
 }
 
 async function recoverScallionModel(provider: LlmProviderConfig, requestedRoutingMode?: ModelRoutingMode) {

@@ -1,10 +1,11 @@
-﻿import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import { Settings, Sparkles } from 'lucide-react'
 import { useEffect } from 'react'
 import { useContextAutomation } from '../hooks/useContextAutomation'
 import { useProjectGuidance } from '../hooks/useProjectGuidance'
 import { useRemoteRelay } from '../hooks/useRemoteRelay'
 import { refreshHardwareCapabilityProfile } from '../services/hardwareCapabilityService'
+import { ensureBrowserBridgeReady } from '../services/browserBridgeClient'
 import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { verifyUpdateDataAfterStartup } from '../services/updateDataProtection'
 import { useAppStore } from '../stores/useAppStore'
@@ -111,6 +112,12 @@ function MainWorkbench() {
     refreshHardwareCapabilityProfile()
   }, [])
 
+  useEffect(() => {
+    // The loopback listener is local-only and safe to start at launch. The
+    // browser extension still controls which tab is authorized.
+    void ensureBrowserBridgeReady().catch(() => undefined)
+  }, [])
+
   const isFlowMode = mode === 'flow'
   const showLeft = columnMode === 3
   const showRight = !isFlowMode && columnMode >= 2
@@ -150,7 +157,7 @@ function MainWorkbench() {
             <motion.aside
               key="left-sidebar"
               initial={{ width: 0, opacity: 0 }}
-              animate={{ width: isLeftCollapsed ? 72 : 280, opacity: 1 }}
+              animate={{ width: isLeftCollapsed ? 72 : 320, opacity: 1 }}
               exit={{ width: 0, opacity: 0 }}
               transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
               className="min-h-0 shrink-0 overflow-hidden border-r border-[#e1dccf] bg-[#fffefa]"

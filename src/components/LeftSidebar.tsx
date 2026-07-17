@@ -7,12 +7,17 @@ export function LeftSidebar() {
   const toggleLeftCollapsed = useAppStore((state) => state.toggleLeftCollapsed)
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#fffefa]/72">
-      <div className="papyrus-toolbar flex h-11 shrink-0 items-center justify-between border-b px-2.5">
+    <div className="flex h-full min-h-0 flex-col bg-[#f8f5ed]">
+      <div className="papyrus-toolbar flex h-[58px] shrink-0 items-center justify-between border-b px-3">
         <div className="flex min-w-0 items-center gap-2">
-          <BookMarked size={16} className="shrink-0 text-[#6f7f68]" />
+          <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-[#edf2e8] text-[#3f5845]">
+            <BookMarked size={16} />
+          </div>
           {!collapsed ? (
-            <span className="truncate text-[13px] font-semibold text-[#2f2b22]">项目</span>
+            <div className="min-w-0 leading-tight">
+              <span className="block truncate text-[13px] font-semibold text-[#2f2b22]">项目</span>
+              <span className="block truncate text-[10px] text-[#8f897a]">对话、文稿与资料</span>
+            </div>
           ) : null}
         </div>
         <button
