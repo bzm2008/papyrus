@@ -35,8 +35,10 @@ function setUsableModel(modelName = 'agnes-2.0-flash') {
 }
 
 afterEach(async () => {
-  // Let the post-call quota refresh scheduled by the client settle before
-  // the next contract test replaces its fetch mock.
+  // Let the post-call quota refresh and its dynamic import settle before the
+  // next contract test replaces its fetch mock. Linux CI resolves the import
+  // one turn later than the local Windows runner.
+  await vi.dynamicImportSettled()
   await new Promise((resolve) => setTimeout(resolve, 0))
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
