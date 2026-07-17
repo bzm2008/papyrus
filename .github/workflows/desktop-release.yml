@@ -28,15 +28,19 @@ jobs:
         include:
           - name: windows-x86_64
             runner: windows-latest
+            target: x86_64-pc-windows-msvc
             bundle: 'src-tauri/target/release/bundle'
           - name: linux-x86_64
             runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
             bundle: 'src-tauri/target/release/bundle'
           - name: darwin-x86_64
-            runner: macos-13
+            runner: macos-latest
+            target: x86_64-apple-darwin
             bundle: 'src-tauri/target/release/bundle'
           - name: darwin-aarch64
             runner: macos-latest
+            target: aarch64-apple-darwin
             bundle: 'src-tauri/target/release/bundle'
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +55,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -73,14 +78,16 @@ jobs:
           node -e "const p=require('./package.json'); if(p.version !== process.argv[1]) { console.error('package.json version mismatch', p.version, process.argv[1]); process.exit(1) }" "$expected"
 
       - name: Build signed Tauri bundle
-        run: npm run tauri -- build
+        run: npm run tauri -- build --target "${{ matrix.target }}"
 
       - name: Upload signed desktop bundle
         uses: actions/upload-artifact@v4
         with:
           name: papyrus-${{ matrix.name }}
           if-no-files-found: error
-          path: ${{ matrix.bundle }}
+          path: |
+            ${{ matrix.bundle }}
+            src-tauri/target/**/release/bundle
 
   build-wps:
     name: Build WPS add-in
