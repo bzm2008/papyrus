@@ -1,0 +1,163 @@
+name: Papyrus production release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag to release'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+jobs:
+  build-desktop:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: 'src-tauri/target/release/bundle'
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            bundle: 'src-tauri/target/release/bundle'
+          - name: darwin-x86_64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            bundle: 'src-tauri/target/release/bundle'
+          - name: darwin-aarch64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            bundle: 'src-tauri/target/release/bundle'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref || inputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          expected="${GITHUB_REF_NAME#v}"
+          if [[ -z "$expected" || "$expected" == "$GITHUB_REF_NAME" ]]; then expected="${{ inputs.tag }}"; expected="${expected#v}"; fi
+          node -e "const p=require('./package.json'); if(p.version !== process.argv[1]) { console.error('package.json version mismatch', p.version, process.argv[1]); process.exit(1) }" "$expected"
+
+      - name: Build signed Tauri bundle
+        run: npm run tauri -- build --target "${{ matrix.target }}"
+
+      - name: Upload signed desktop bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: papyrus-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            ${{ matrix.bundle }}
+            src-tauri/target/**/release/bundle
+
+  build-wps:
+    name: Build WPS add-in
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref || inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Build WPS package
+        run: npm run wps:package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: papyrus-wps
+          if-no-files-found: error
+          path: artifacts/Papyrus-WPS-Addin_*.zip
+
+  publish:
+    name: Publish GitHub Release and OTA manifest
+    runs-on: ubuntu-24.04
+    needs: [build-desktop, build-wps]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref || inputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: papyrus-*
+          path: release-assets
+          merge-multiple: true
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if [[ "$tag" != v* ]]; then tag="${{ inputs.tag }}"; fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Normalize macOS updater assets
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          x86="$(find release-assets -type f -path '*x86_64-apple-darwin*/release/bundle/macos/Papyrus.app.tar.gz' | head -n 1)"
+          x86_sig="$(find release-assets -type f -path '*x86_64-apple-darwin*/release/bundle/macos/Papyrus.app.tar.gz.sig' | head -n 1)"
+          arm="$(find release-assets -type f -path '*aarch64-apple-darwin*/release/bundle/macos/Papyrus.app.tar.gz' | head -n 1)"
+          arm_sig="$(find release-assets -type f -path '*aarch64-apple-darwin*/release/bundle/macos/Papyrus.app.tar.gz.sig' | head -n 1)"
+          test -n "$x86" && test -n "$x86_sig" && test -n "$arm" && test -n "$arm_sig"
+          cp "$x86" "release-assets/Papyrus_${version}_x64.app.tar.gz"
+          cp "$x86_sig" "release-assets/Papyrus_${version}_x64.app.tar.gz.sig"
+          cp "$arm" "release-assets/Papyrus_${version}_aarch64.app.tar.gz"
+          cp "$arm_sig" "release-assets/Papyrus_${version}_aarch64.app.tar.gz.sig"
+          find release-assets -type f -path '*/release/bundle/macos/Papyrus.app.tar.gz*' -delete
+      - name: Build signed OTA manifest
+        run: node scripts/build-papyrus-update-manifest.mjs --artifacts release-assets --version "${{ steps.version.outputs.version }}" --output release-assets/latest.json
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' 'Papyrus 1.0.0 production release.' 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
+          mapfile -d '' release_files < <(find release-assets -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' -o -name 'Papyrus-WPS-Addin_*.zip' \) -print0)
+          gh release upload "${{ steps.version.outputs.tag }}" "${release_files[@]}" release-assets/latest.json --repo "${GITHUB_REPOSITORY}" --clobber
+      - name: Upload Debian 13 integration bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tar -czf "Papyrus-Debian13-Integration_${{ steps.version.outputs.version }}.tar.gz" os-integration/debian13
+          gh release upload "${{ steps.version.outputs.tag }}" "Papyrus-Debian13-Integration_${{ steps.version.outputs.version }}.tar.gz" --repo "${GITHUB_REPOSITORY}" --clobber

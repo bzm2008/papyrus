@@ -9,7 +9,9 @@ const extension = path.join(root, 'apps', 'browser-bridge')
 
 test('Browser Bridge manifest is MV3 and uses activeTab injection', async () => {
   const manifest = JSON.parse(await fs.readFile(path.join(extension, 'manifest.json'), 'utf8'))
+  const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'))
   assert.equal(manifest.manifest_version, 3)
+  assert.equal(manifest.version, packageJson.version)
   assert.ok(manifest.permissions.includes('activeTab'))
   assert.ok(manifest.permissions.includes('scripting'))
   assert.ok(!manifest.permissions.includes('downloads'))

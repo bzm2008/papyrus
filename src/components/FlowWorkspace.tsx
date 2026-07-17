@@ -1,10 +1,11 @@
-﻿import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
   Clipboard,
   Copy,
+  ExternalLink,
   FileText,
+  PanelLeftOpen,
   MessageSquare,
-  PanelRightOpen,
   PenLine,
   Play,
   RotateCcw,
@@ -25,9 +26,16 @@ import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import { formatScallionPlanName } from '../services/scallionModelCatalog'
+import { getScallionQuotaDisplay } from '../services/scallionAccountService'
 import { shouldShowSecretaryPartialReply } from '../services/secretaryPartialReply'
 import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
-import { cancelSecretaryRun } from '../services/secretaryRunController'
+import {
+  buildSecretaryLedgerResumePrompt,
+  loadSecretaryTaskCenterSnapshot,
+  type SecretaryLedgerRecoveryItem,
+} from '../services/secretaryLedgerRuntime'
+import { cancelSecretaryRun, pauseSecretaryRun } from '../services/secretaryRunController'
+import { selectNextAutoStartSecretaryTask } from '../services/secretaryTaskScheduler'
 import { resolveAssistantApproval } from '../services/workAssistantRuntime'
 import type { AssistantApprovalRequest } from '../services/workAssistantProtocol'
 import {
@@ -53,6 +61,7 @@ import {
   type WorkbenchView,
   ThoughtSummaryBlock,
 } from './SecretaryWorkbenchPanel'
+import { SecretaryTaskCenter } from './SecretaryTaskCenter'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
 import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
@@ -72,13 +81,12 @@ type ReceiptSnapshot = {
 
 export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
-  const [rightPanelOpen, setRightPanelOpen] = useState(false)
-  const [rightPanelPinned, setRightPanelPinned] = useState(false)
-  const [rightPanelView, setRightPanelView] = useState<WorkbenchView>('run')
+  const [inlineWorkbenchView, setInlineWorkbenchView] = useState<WorkbenchView>('run')
+  const [taskCenterDrawerOpen, setTaskCenterDrawerOpen] = useState(false)
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
-  const autoWorkbenchTimerRef = useRef<number | undefined>(undefined)
-  const previousRunStateRef = useRef(useAppStore.getState().llmRunState)
+  const autoStartTaskIdRef = useRef<string | null>(null)
+  const pendingPersistentTaskRef = useRef<{ task: { id: string; request: string }; recovery?: SecretaryLedgerRecoveryItem } | null>(null)
   const receiptRunStateRef = useRef(useAppStore.getState().llmRunState)
   const flowMessages = useAppStore((state) => state.flowMessages)
   const setFlowMessages = useAppStore((state) => state.setFlowMessages)
@@ -102,6 +110,15 @@ export function FlowWorkspace() {
   const removeQueuedUserInput = useAppStore((state) => state.removeQueuedUserInput)
   const sendQueuedInputAsGuidance = useAppStore((state) => state.sendQueuedInputAsGuidance)
   const activeSecretaryGoal = useAppStore((state) => state.activeSecretaryGoal)
+  const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
+  const scallionToken = useAppStore((state) => state.scallionToken)
+  const planLabel =
+    scallionQuota?.planName ??
+    scallionQuota?.planKey ??
+    scallionPlan?.name ??
+    scallionPlan?.key ??
+    (scallionToken ? '套餐同步中' : '未登录')
   const activeAgentRunId = useAppStore((state) => state.activeAgentRunId)
   const activeWorkAssistantRunId = useWorkAssistantStore((state) => state.activeRunId)
   const activeWorkAssistantRun = useWorkAssistantStore((state) => activeWorkAssistantRunId ? state.runs[activeWorkAssistantRunId] : undefined)
@@ -138,57 +155,12 @@ export function FlowWorkspace() {
     latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
       ? latestChangeStat
       : undefined
-  const shouldAutoOpenWorkbench =
-    Boolean(activeSecretaryGoal?.status === 'active') ||
-    flowThinkingEffort === 'ultra_hive' ||
-    agentSteps.length >= 2 ||
-    flowTraces.length >= 2 ||
-    agentTodos.length >= 4
-
-  useEffect(() => {
-    const previousRunState = previousRunStateRef.current
-
-    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
-    const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
-
-    if (wasBusy && !isBusy && !rightPanelPinned && rightPanelView === 'run') {
-      setRightPanelOpen(false)
-    }
-
-    previousRunStateRef.current = llmRunState
-  }, [llmRunState, rightPanelPinned, rightPanelView])
-
-  useEffect(() => {
-    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
-
-    if (
-      !isBusy ||
-      rightPanelOpen ||
-      rightPanelPinned ||
-      rightPanelView !== 'run' ||
-      !shouldAutoOpenWorkbench
-    ) {
-      if (autoWorkbenchTimerRef.current !== undefined) {
-        window.clearTimeout(autoWorkbenchTimerRef.current)
-        autoWorkbenchTimerRef.current = undefined
-      }
-      return
-    }
-
-    autoWorkbenchTimerRef.current = window.setTimeout(() => {
-      setRightPanelView('run')
-      setRightPanelOpen(true)
-      autoWorkbenchTimerRef.current = undefined
-    }, 420)
-
-    return () => {
-      if (autoWorkbenchTimerRef.current !== undefined) {
-        window.clearTimeout(autoWorkbenchTimerRef.current)
-        autoWorkbenchTimerRef.current = undefined
-      }
-    }
-  }, [llmRunState, rightPanelOpen, rightPanelPinned, rightPanelView, shouldAutoOpenWorkbench])
-
+  const showInlineWorkbench =
+    inlineWorkbenchView !== 'run' ||
+    Boolean(activeWorkAssistantRun) ||
+    agentTodos.length > 0 ||
+    agentSteps.length > 0 ||
+    flowTraces.length > 0
   useEffect(() => {
     const previousRunState = receiptRunStateRef.current
     const hasRunData = agentTodos.length > 0 || agentSteps.length > 0 || flowTraces.length > 0
@@ -239,7 +211,7 @@ export function FlowWorkspace() {
       round += 1
       const runOutcome = await sendFlowMessage(currentRequest, {
         displayPrompt: currentDisplay,
-        thinkingEffort: flowThinkingEffort === 'low' ? 'high' : flowThinkingEffort,
+        thinkingEffort: flowThinkingEffort,
         goalId: goal.id,
         queuedInputId: currentQueuedInputId,
       })
@@ -267,7 +239,10 @@ export function FlowWorkspace() {
     }
   }, [flowThinkingEffort, updateSecretaryGoal])
 
-  const dispatchPrompt = useCallback(async (rawPrompt: string, options: { queuedInputId?: string } = {}) => {
+  const dispatchPrompt = useCallback(async (
+    rawPrompt: string,
+    options: { queuedInputId?: string; ledgerTaskId?: string; displayPrompt?: string } = {},
+  ) => {
     const cleanPrompt = rawPrompt.trim()
 
     if (!cleanPrompt) {
@@ -302,12 +277,70 @@ export function FlowWorkspace() {
     }
 
     await sendFlowMessage(resolved.executionPrompt, {
-      displayPrompt: resolved.displayPrompt,
+      displayPrompt: options.displayPrompt ?? resolved.displayPrompt,
       thinkingEffort: flowThinkingEffort,
       goalId: activeSecretaryGoal?.status === 'active' ? activeSecretaryGoal.id : undefined,
       queuedInputId: options.queuedInputId,
+      ledgerTaskId: options.ledgerTaskId,
     })
   }, [activeSecretaryGoal, flowThinkingEffort, runGoalCycle, secretaryPlanDraft])
+
+  const startPersistentTask = useCallback((
+    task: { id: string; request: string },
+    recovery?: SecretaryLedgerRecoveryItem,
+  ) => {
+    if (llmRunState === 'running' || llmRunState === 'reconnecting') {
+      pendingPersistentTaskRef.current = { task, recovery }
+      setPrompt(`继续任务：${task.request}`)
+      return
+    }
+
+    setTaskCenterDrawerOpen(false)
+    const executionPrompt = recovery ? buildSecretaryLedgerResumePrompt(recovery) : task.request
+    void dispatchPrompt(executionPrompt, { ledgerTaskId: task.id })
+  }, [dispatchPrompt, llmRunState])
+
+  useEffect(() => {
+    if (llmRunState !== 'idle') return
+    const pending = pendingPersistentTaskRef.current
+    if (!pending) return
+    pendingPersistentTaskRef.current = null
+    const executionPrompt = pending.recovery
+      ? buildSecretaryLedgerResumePrompt(pending.recovery)
+      : pending.task.request
+    void dispatchPrompt(executionPrompt, { ledgerTaskId: pending.task.id })
+  }, [dispatchPrompt, llmRunState])
+
+  useEffect(() => {
+    const checkScheduledTask = async () => {
+      if (
+        llmRunState === 'running'
+        || llmRunState === 'reconnecting'
+        || autoStartTaskIdRef.current
+      ) {
+        return
+      }
+
+      const snapshot = await loadSecretaryTaskCenterSnapshot()
+      if (!snapshot.state.available) return
+      const task = selectNextAutoStartSecretaryTask(snapshot.tasks)
+      if (!task) return
+
+      autoStartTaskIdRef.current = task.id
+      try {
+        await dispatchPrompt(task.request, {
+          displayPrompt: `定时任务：${task.title}`,
+          ledgerTaskId: task.id,
+        })
+      } finally {
+        autoStartTaskIdRef.current = null
+      }
+    }
+
+    void checkScheduledTask()
+    const timer = window.setInterval(() => void checkScheduledTask(), 30_000)
+    return () => window.clearInterval(timer)
+  }, [dispatchPrompt, llmRunState])
 
   useEffect(() => {
     if (llmRunState !== 'idle' || processingQueuedIdRef.current) {
@@ -419,14 +452,45 @@ export function FlowWorkspace() {
 
   return (
     <section className="flex h-full min-h-0 bg-transparent">
+      <div className="hidden min-h-0 xl:flex">
+        <SecretaryTaskCenter
+          onStartTask={startPersistentTask}
+          onPauseActiveTask={() => pauseSecretaryRun()}
+          onCancelActiveTask={() => cancelSecretaryRun()}
+          onOpenMaterials={() => {
+            setInlineWorkbenchView('files')
+          }}
+        />
+      </div>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="papyrus-toolbar flex h-11 shrink-0 items-center justify-between border-b px-4">
           <div className="flex min-w-0 items-center gap-2.5">
+            <button
+              type="button"
+              title="打开项目现场"
+              aria-label="打开项目现场"
+              onClick={() => setTaskCenterDrawerOpen(true)}
+              className="papyrus-icon-button size-7 shrink-0 rounded-md xl:hidden"
+            >
+              <PanelLeftOpen size={14} />
+            </button>
             <div className="grid size-7 place-items-center rounded-md bg-[#20201d] text-[#fffefa]">
               <PenLine size={14} />
             </div>
             <div className="min-w-0 leading-tight">
-              <div className="truncate text-[13px] font-semibold text-[#20201d]">秘书模式</div>
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="truncate text-[13px] font-semibold text-[#20201d]">秘书模式</div>
+                <a
+                  href={scallionQuota?.upgradeUrl ?? 'https://scallion.uno/pricing'}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="查看套餐与升级"
+                  className="inline-flex min-w-0 max-w-[9rem] shrink items-center gap-1 rounded-md border border-[#d7aa4f]/55 bg-[#fff6df] px-1.5 py-0.5 text-[10px] font-semibold text-[#6b5220] transition hover:border-[#d7aa4f] hover:bg-[#ffefc1] sm:max-w-[12rem]"
+                >
+                  <span className="min-w-0 truncate">{planLabel}</span>
+                  <ExternalLink size={10} />
+                </a>
+              </div>
               <div className="truncate text-[11px] text-[#6f7168]">
                 规划、检索、写作和校对在同一条执行线上推进
               </div>
@@ -436,38 +500,15 @@ export function FlowWorkspace() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              title={rightPanelOpen && rightPanelView === 'run' ? '隐藏工作台' : '显示工作台'}
+              title={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
+              aria-label={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
               onClick={() => {
-                if (rightPanelOpen && rightPanelView === 'run') {
-                  setRightPanelOpen(false)
-                  setRightPanelPinned(false)
-                  return
-                }
-
-                setRightPanelOpen(true)
-                setRightPanelView('run')
-              }}
-              className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
-            >
-              <PanelRightOpen size={14} />
-              <span>工作台</span>
-            </button>
-            <button
-              type="button"
-              title={rightPanelOpen && rightPanelView === 'manuscript' ? '隐藏文稿' : '显示文稿'}
-              onClick={() => {
-                if (rightPanelOpen && rightPanelView === 'manuscript') {
-                  setRightPanelOpen(false)
-                  return
-                }
-
-                setRightPanelOpen(true)
-                setRightPanelView('manuscript')
+                setInlineWorkbenchView((view) => (view === 'manuscript' ? 'run' : 'manuscript'))
               }}
               className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
             >
               <FileText size={14} />
-              <span>文稿</span>
+              <span className="hidden sm:inline">{inlineWorkbenchView === 'manuscript' ? '收起文稿' : '文稿'}</span>
             </button>
           </div>
         </header>
@@ -528,6 +569,24 @@ export function FlowWorkspace() {
                   : null}
               </AnimatePresence>
             </div>
+            {showInlineWorkbench ? (
+              <div className="mt-4">
+                <SecretaryWorkbenchPanel
+                  inline
+                  todos={agentTodos}
+                  steps={agentSteps}
+                  traces={flowTraces}
+                  runState={llmRunState}
+                  pinned={false}
+                  activeView={inlineWorkbenchView}
+                  onViewChange={setInlineWorkbenchView}
+                  changeStat={latestRunChangeStat}
+                  manuscript={<div className="h-[34rem]"><EditorPane /></div>}
+                  files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
+                  browser={<SecretaryBrowserWorkbench />}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -611,27 +670,39 @@ export function FlowWorkspace() {
       </div>
 
       <AnimatePresence initial={false}>
-        {rightPanelOpen ? (
-          <SecretaryWorkbenchPanel
-            todos={agentTodos}
-            steps={agentSteps}
-            traces={flowTraces}
-            runState={llmRunState}
-            pinned={rightPanelPinned}
-            activeView={rightPanelView}
-            onViewChange={setRightPanelView}
-            onPinnedChange={setRightPanelPinned}
-            onClose={() => {
-              setRightPanelOpen(false)
-              setRightPanelPinned(false)
-            }}
-            changeStat={latestRunChangeStat}
-            manuscript={<EditorPane />}
-            files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
-            browser={<SecretaryBrowserWorkbench />}
-          />
+        {taskCenterDrawerOpen ? (
+          <motion.div
+            key="secretary-task-center-drawer"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-[#201f1a]/18 p-3 pt-14 xl:hidden"
+            onMouseDown={() => setTaskCenterDrawerOpen(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, x: -18 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -18 }}
+              transition={{ type: 'spring', stiffness: 440, damping: 42, mass: 0.75 }}
+              className="h-full max-w-[360px] overflow-hidden rounded-lg border border-[#e1dccf] bg-[#fffefa] shadow-[0_24px_80px_rgba(43,34,19,0.18)]"
+              onMouseDown={(event) => event.stopPropagation()}
+            >
+              <SecretaryTaskCenter
+                compact
+                onStartTask={startPersistentTask}
+                onPauseActiveTask={() => pauseSecretaryRun()}
+                onCancelActiveTask={() => cancelSecretaryRun()}
+                onOpenMaterials={() => {
+                  setInlineWorkbenchView('files')
+                  setTaskCenterDrawerOpen(false)
+                }}
+                onClose={() => setTaskCenterDrawerOpen(false)}
+              />
+            </motion.div>
+          </motion.div>
         ) : null}
       </AnimatePresence>
+
     </section>
   )
 }
@@ -844,8 +915,10 @@ function SecretaryUsageOverview({
   const providerConfigs = useAppStore((state) => state.providerConfigs)
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const scallionToken = useAppStore((state) => state.scallionToken)
+  const scallionQuotaSyncStatus = useAppStore((state) => state.scallionSync.quota.status)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const hiveTelemetry = useAppStore((state) => state.hiveTelemetry)
   const cacheStats = getModelCacheStats()
@@ -858,16 +931,27 @@ function SecretaryUsageOverview({
     modelRoutingMode === 'auto'
       ? 'Auto 调度'
       : providerConfigs[activeProviderId]?.label ?? '未选择'
-  const quotaValue =
-    scallionQuota?.pointsBalance ??
-    scallionQuota?.remaining ??
-    scallionUser?.points ??
-    scallionUser?.balance ??
-    0
+  const quotaDisplay = getScallionQuotaDisplay({
+    token: scallionToken,
+    quota: scallionQuota,
+    user: scallionUser,
+    syncStatus: scallionQuotaSyncStatus,
+  })
+  const quotaValue = quotaDisplay.value
   const quotaUnit = scallionQuota?.unit ?? '积分'
+  const quotaFreshness = quotaDisplay.source === 'realtime'
+    ? '实时'
+    : quotaDisplay.source === 'cached'
+      ? quotaDisplay.status === 'stale' ? '缓存·可能过期' : '缓存'
+      : quotaDisplay.status === 'error' ? '同步失败' : scallionToken ? '同步中' : '未登录'
+  const autoQuotaLabel = scallionQuota?.autoMonthlyRemaining !== undefined || scallionQuota?.autoDailyRemaining !== undefined
+    ? `Auto 月余 ${scallionQuota.autoMonthlyRemaining ?? '-'} · 日余 ${scallionQuota.autoDailyRemaining ?? '-'}`
+    : undefined
   const planLabel =
     scallionQuota?.planName ??
     scallionQuota?.planKey ??
+    scallionPlan?.name ??
+    scallionPlan?.key ??
     (scallionUser?.member_type ? formatScallionPlanName(scallionUser.member_type) : undefined)
   const contextTitle = [
     `已用 ${formatCompactNumber(contextUsedTokens)} / 上限 ${formatCompactNumber(effectiveContextLimitTokens)} tokens`,
@@ -915,7 +999,8 @@ function SecretaryUsageOverview({
               <UsageMetric label="当前模型" value={modelLabel} />
               <UsageMetric
                 label="套餐 / 积分"
-                value={`${planLabel ?? (scallionToken ? '同步中' : '未登录')} · ${quotaValue} ${quotaUnit}`}
+                value={`${planLabel ?? (scallionToken ? '同步中' : '未登录')} · ${quotaValue === undefined ? quotaFreshness : `${quotaValue} ${quotaUnit} · ${quotaFreshness}`}${autoQuotaLabel ? ` · ${autoQuotaLabel}` : ''}`}
+                wrap
               />
               <UsageMetric label="缓存命中" value={`${cacheStats.hitRate}%`} />
               <UsageMetric label="累计修改" value={formatCompactNumber(totalChanged)} />
@@ -941,11 +1026,23 @@ function SecretaryUsageOverview({
   )
 }
 
-function UsageMetric({ label, value, title }: { label: string; value: string; title?: string }) {
+function UsageMetric({
+  label,
+  value,
+  title,
+  wrap = false,
+}: {
+  label: string
+  value: string
+  title?: string
+  wrap?: boolean
+}) {
   return (
     <div className="min-w-0 rounded-lg bg-[#f0eee7] px-2.5 py-2" title={title}>
       <div className="truncate text-[11px] text-[#8f897a]">{label}</div>
-      <div className="mt-1 truncate text-[15px] font-semibold tabular-nums text-[#20201d]">{value}</div>
+      <div className={`mt-1 text-[15px] font-semibold tabular-nums text-[#20201d] ${wrap ? 'break-words leading-5' : 'truncate'}`}>
+        {value}
+      </div>
     </div>
   )
 }
@@ -988,9 +1085,9 @@ function ThinkingEffortControl({
     'ultra+hive 蜂巢模式：最大思考强度，会调度多个专长 Agent 小队，适合长文、研究、合规、跨文档、复杂运营和 /goal；优先完成质量，并用缓存和摘要减少重复消耗。'
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
       <div
-        className={`relative grid h-8 w-[326px] grid-cols-4 items-center overflow-hidden rounded-xl border p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(43,34,19,0.05)] ${
+        className={`relative grid h-8 w-[min(326px,100%)] max-w-full min-w-0 grid-cols-4 items-center overflow-hidden rounded-xl border p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(43,34,19,0.05)] ${
           hiveActive ? 'border-[#d7aa4f]/75 bg-[#fff6df]' : 'border-[#dccfb9] bg-[#f8f4ea]'
         }`}
         title={hiveActive ? hiveTitle : undefined}
@@ -1043,7 +1140,13 @@ function ThinkingEffortControl({
           <motion.button
             key={option.value}
             type="button"
-            title={isHive ? hiveTitle : `思考强度：${option.label}`}
+            title={
+              option.value === 'low'
+                ? 'low：快速完成当前任务，不调用子 Agent。'
+                : isHive
+                  ? hiveTitle
+                  : `思考强度：${option.label}`
+            }
             onClick={() => onChange(option.value)}
             whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
             className={`relative z-10 h-6 min-w-0 rounded-lg px-1.5 text-[11px] font-semibold tracking-normal transition-colors ${

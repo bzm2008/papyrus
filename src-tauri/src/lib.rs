@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tauri::Manager;
 
+pub mod secretary_ledger;
+mod update_protection;
 mod work_assistant;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -41,6 +43,30 @@ pub fn run() {
             test_model_connection,
             llm_chat,
             open_external_url,
+            secretary_ledger::secretary_ledger_bootstrap,
+            secretary_ledger::secretary_ledger_health,
+            secretary_ledger::secretary_ledger_create_project,
+            secretary_ledger::secretary_ledger_list_projects,
+            secretary_ledger::secretary_ledger_create_memory,
+            secretary_ledger::secretary_ledger_get_memory,
+            secretary_ledger::secretary_ledger_list_memories,
+            secretary_ledger::secretary_ledger_update_memory,
+            secretary_ledger::secretary_ledger_rollback_memory,
+            secretary_ledger::secretary_ledger_delete_memory,
+            secretary_ledger::secretary_ledger_search,
+            secretary_ledger::secretary_ledger_create_task,
+            secretary_ledger::secretary_ledger_start_task,
+            secretary_ledger::secretary_ledger_claim_task,
+            secretary_ledger::secretary_ledger_persist_task_progress,
+            secretary_ledger::secretary_ledger_get_task,
+            secretary_ledger::secretary_ledger_list_tasks,
+            secretary_ledger::secretary_ledger_update_task,
+            secretary_ledger::secretary_ledger_delete_task,
+            secretary_ledger::secretary_ledger_record_event,
+            secretary_ledger::secretary_ledger_list_events,
+            secretary_ledger::secretary_ledger_save_checkpoint,
+            secretary_ledger::secretary_ledger_load_latest_checkpoint,
+            secretary_ledger::secretary_ledger_import_legacy_batch,
             work_assistant::work_assistant_capabilities,
             work_assistant::work_assistant_list_roots,
             work_assistant::work_assistant_add_root,
@@ -86,6 +112,8 @@ pub fn run() {
             work_assistant::work_assistant_browser_snapshot,
             work_assistant::work_assistant_browser_execute_action,
             work_assistant::work_assistant_web_extract,
+            update_protection::prepare_update_snapshot,
+            update_protection::verify_update_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -111,6 +139,8 @@ struct MaintenanceStatus {
     message: String,
     latency_ms: Option<u128>,
     bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clear_committed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +150,8 @@ struct ModelConnectionRequest {
     model_name: String,
     api_key: String,
     provider_type: String,
+    #[serde(default)]
+    routing_mode: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -138,6 +170,8 @@ struct LlmChatRequest {
     messages: Vec<LlmChatMessage>,
     temperature: f32,
     max_tokens: u32,
+    #[serde(default)]
+    routing_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -188,54 +222,71 @@ fn health_check_backend() -> MaintenanceStatus {
         message: "Tauri 后端通信正常".into(),
         latency_ms: Some(0),
         bytes: None,
+        clear_committed: None,
     }
 }
 
 #[tauri::command]
 fn check_sqlite_status(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> {
-    let data_dir = app_data_dir(&app)?;
-    fs::create_dir_all(&data_dir).map_err(|error| format!("创建应用数据目录失败：{}", error))?;
-
-    let probe_path = data_dir.join(".papyrus-write-probe");
-    fs::write(&probe_path, "ok").map_err(|error| format!("应用数据目录不可写：{}", error))?;
-    let _ = fs::remove_file(probe_path);
+    let health = secretary_ledger::SecretaryLedger::open_for_app(&app)
+        .and_then(|ledger| ledger.health())
+        .map_err(|error| error.safe_message().to_string())?;
 
     Ok(MaintenanceStatus {
         status: "ok".into(),
-        message: "应用数据目录可写，SQLite 预留库可用".into(),
+        message: "秘书账本 SQLite 与 FTS5 可用".into(),
         latency_ms: None,
-        bytes: None,
+        bytes: Some(health.bytes),
+        clear_committed: None,
     })
 }
 
 #[tauri::command]
 fn get_memory_usage(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> {
     let memory_dir = memory_dir(&app)?;
-    let bytes = directory_size(&memory_dir);
+    let storage = memory_storage_usage(&memory_dir)?;
+    let ledger_bytes = secretary_ledger::ledger_size_for_app(&app)
+        .map_err(|error| error.safe_message().to_string())?;
+    let bytes = storage.bytes.saturating_add(ledger_bytes);
 
     Ok(MaintenanceStatus {
-        status: "ok".into(),
-        message: "记忆目录统计完成".into(),
+        status: if storage.legacy_cleanup_pending {
+            "warning".into()
+        } else {
+            "ok".into()
+        },
+        message: if storage.legacy_cleanup_pending {
+            "记忆目录与秘书账本统计完成，旧记忆仍待清理".into()
+        } else {
+            "记忆目录与秘书账本统计完成".into()
+        },
         latency_ms: None,
         bytes: Some(bytes),
+        clear_committed: None,
     })
 }
 
 #[tauri::command]
 fn clear_global_memory(app: tauri::AppHandle) -> Result<MaintenanceStatus, String> {
     let memory_dir = memory_dir(&app)?;
-
-    if memory_dir.exists() {
-        fs::remove_dir_all(&memory_dir).map_err(|error| format!("清空记忆目录失败：{}", error))?;
-    }
-
-    fs::create_dir_all(&memory_dir).map_err(|error| format!("重建记忆目录失败：{}", error))?;
+    let ledger = secretary_ledger::SecretaryLedger::open_for_app(&app)
+        .map_err(|error| error.safe_message().to_string())?;
+    let result = clear_memory_storage(&memory_dir, || ledger.clear())?;
 
     Ok(MaintenanceStatus {
-        status: "ok".into(),
-        message: "全局记忆已清空".into(),
+        status: if result.legacy_cleanup_pending {
+            "warning".into()
+        } else {
+            "ok".into()
+        },
+        message: if result.legacy_cleanup_pending {
+            "秘书账本已清空，旧记忆已隔离但仍待清理".into()
+        } else {
+            "全局记忆已清空".into()
+        },
         latency_ms: None,
-        bytes: Some(0),
+        bytes: Some(result.bytes),
+        clear_committed: Some(true),
     })
 }
 
@@ -254,6 +305,7 @@ fn rebuild_project_index(app: tauri::AppHandle) -> Result<MaintenanceStatus, Str
         message: "项目索引重建请求已记录，真实向量库接入后会执行完整重建".into(),
         latency_ms: None,
         bytes: Some(directory_size(&memory_dir)),
+        clear_committed: None,
     })
 }
 
@@ -287,7 +339,7 @@ async fn test_model_connection(
         request_builder = request_builder.bearer_auth(request.api_key.trim());
     }
 
-    let body = json!({
+    let mut body = json!({
       "model": model_name,
       "messages": [
         { "role": "system", "content": "You are a connectivity checker. Reply with exactly: OK" },
@@ -296,10 +348,14 @@ async fn test_model_connection(
       "temperature": 0.0,
       "max_tokens": 8,
       "stream": false
-    })
-    .to_string();
+    });
+    if request.provider_type == "scallion_proxy" {
+        if let Some(routing_mode) = request.routing_mode.as_deref() {
+            body["routing_mode"] = json!(routing_mode);
+        }
+    }
     let response = request_builder
-        .body(body)
+        .body(body.to_string())
         .send()
         .await
         .map_err(|error| format!("模型联通性检测失败：{}", error))?;
@@ -316,6 +372,7 @@ async fn test_model_connection(
         message: "模型联通性检测通过".into(),
         latency_ms: Some(started_at.elapsed().as_millis()),
         bytes: None,
+        clear_committed: None,
     })
 }
 
@@ -341,17 +398,20 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
         request_builder = request_builder.bearer_auth(request.api_key.trim());
     }
 
+    let mut body = json!({
+      "model": model_name,
+      "messages": request.messages,
+      "temperature": request.temperature,
+      "max_tokens": request.max_tokens,
+      "stream": false
+    });
+    if request.provider_type == "scallion_proxy" {
+        if let Some(routing_mode) = request.routing_mode.as_deref() {
+            body["routing_mode"] = json!(routing_mode);
+        }
+    }
     let response = request_builder
-        .body(
-            json!({
-              "model": model_name,
-              "messages": request.messages,
-              "temperature": request.temperature,
-              "max_tokens": request.max_tokens,
-              "stream": false
-            })
-            .to_string(),
-        )
+        .body(body.to_string())
         .send()
         .await
         .map_err(|error| format!("LLM network request failed: {}", error))?;
@@ -518,6 +578,177 @@ fn memory_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app_data_dir(app)?.join("memory"))
 }
 
+struct MemoryStorageClearResult {
+    bytes: u64,
+    legacy_cleanup_pending: bool,
+}
+
+struct MemoryStorageUsage {
+    bytes: u64,
+    legacy_cleanup_pending: bool,
+}
+
+const MEMORY_CLEAR_STAGING_PREFIX: &str = ".memory-clear-";
+
+fn clear_memory_storage(
+    memory_dir: &Path,
+    clear_ledger: impl FnOnce() -> Result<u64, secretary_ledger::LedgerError>,
+) -> Result<MemoryStorageClearResult, String> {
+    clear_memory_storage_with_staged_cleanup(memory_dir, clear_ledger, remove_staged_memory_entry)
+}
+
+fn remove_staged_memory_entry(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_dir() {
+        fs::remove_dir_all(path)
+    } else if file_type.is_file() || file_type.is_symlink() {
+        fs::remove_file(path)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported staged memory entry",
+        ))
+    }
+}
+
+fn clear_memory_storage_with_staged_cleanup(
+    memory_dir: &Path,
+    clear_ledger: impl FnOnce() -> Result<u64, secretary_ledger::LedgerError>,
+    remove_staged: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<MemoryStorageClearResult, String> {
+    let parent = memory_dir
+        .parent()
+        .ok_or_else(|| "清空本地记忆失败".to_string())?;
+    fs::create_dir_all(parent).map_err(|_| "清空本地记忆失败".to_string())?;
+    retry_stale_memory_staging_cleanup(parent, &remove_staged)?;
+
+    let staged_memory_dir = if memory_dir.exists() {
+        let staged = parent.join(format!(
+            "{MEMORY_CLEAR_STAGING_PREFIX}{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::rename(memory_dir, &staged).map_err(|_| "隔离旧记忆失败".to_string())?;
+        Some(staged)
+    } else {
+        None
+    };
+    let had_legacy_memory = staged_memory_dir.is_some();
+
+    if fs::create_dir_all(memory_dir).is_err() {
+        let restored = restore_staged_memory_directory(memory_dir, staged_memory_dir.as_deref());
+        return Err(if restored && had_legacy_memory {
+            "重建本地记忆失败，旧记忆已恢复".into()
+        } else if restored {
+            "重建本地记忆失败".into()
+        } else {
+            "重建本地记忆失败，旧记忆恢复失败".into()
+        });
+    }
+
+    let ledger_bytes = match clear_ledger() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let restored =
+                restore_staged_memory_directory(memory_dir, staged_memory_dir.as_deref());
+            return Err(if restored && had_legacy_memory {
+                "清空秘书账本失败，旧记忆已恢复".into()
+            } else if restored {
+                "清空秘书账本失败".into()
+            } else {
+                "清空失败，旧记忆恢复失败".into()
+            });
+        }
+    };
+
+    let legacy_cleanup_pending = staged_memory_dir
+        .as_deref()
+        .is_some_and(|staged| remove_staged(staged).is_err());
+    let staged_bytes = if legacy_cleanup_pending {
+        staged_memory_dir
+            .as_deref()
+            .map(storage_entry_size)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    Ok(MemoryStorageClearResult {
+        bytes: directory_size(&memory_dir.to_path_buf())
+            .saturating_add(staged_bytes)
+            .saturating_add(ledger_bytes),
+        legacy_cleanup_pending,
+    })
+}
+
+fn memory_storage_usage(memory_dir: &Path) -> Result<MemoryStorageUsage, String> {
+    let parent = memory_dir
+        .parent()
+        .ok_or_else(|| "检查本地记忆状态失败".to_string())?;
+    let staged_dirs = staged_memory_directories(parent)?;
+    let staged_bytes = staged_dirs
+        .iter()
+        .map(|path| storage_entry_size(path))
+        .sum();
+    Ok(MemoryStorageUsage {
+        bytes: directory_size(&memory_dir.to_path_buf()).saturating_add(staged_bytes),
+        legacy_cleanup_pending: !staged_dirs.is_empty(),
+    })
+}
+
+fn retry_stale_memory_staging_cleanup(
+    parent: &Path,
+    remove_staged: &impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let staged_dirs = staged_memory_directories(parent)?;
+    let mut cleanup_failed = false;
+    for staged in staged_dirs {
+        if remove_staged(&staged).is_err() {
+            cleanup_failed = true;
+        }
+    }
+    if cleanup_failed {
+        Err("旧记忆仍待清理，请稍后重试".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn restore_staged_memory_directory(memory_dir: &Path, staged: Option<&Path>) -> bool {
+    let Some(staged) = staged else { return true };
+    let _ = fs::remove_dir_all(memory_dir);
+    fs::rename(staged, memory_dir).is_ok()
+}
+
+fn staged_memory_directories(parent: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = fs::read_dir(parent).map_err(|_| "检查本地记忆状态失败".to_string())?;
+    Ok(entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(MEMORY_CLEAR_STAGING_PREFIX))
+        })
+        .collect())
+}
+
+fn storage_entry_size(path: &Path) -> u64 {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.is_dir() {
+            return fs::read_dir(path)
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .map(|entry| storage_entry_size(&entry.path()))
+                        .sum()
+                })
+                .unwrap_or(0);
+        }
+        return metadata.len();
+    }
+    0
+}
+
 fn read_optional_file(path: PathBuf) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
@@ -592,6 +823,30 @@ mod security_tests {
                 "test_model_connection",
                 "llm_chat",
                 "open_external_url",
+                "secretary_ledger::secretary_ledger_bootstrap",
+                "secretary_ledger::secretary_ledger_health",
+                "secretary_ledger::secretary_ledger_create_project",
+                "secretary_ledger::secretary_ledger_list_projects",
+                "secretary_ledger::secretary_ledger_create_memory",
+                "secretary_ledger::secretary_ledger_get_memory",
+                "secretary_ledger::secretary_ledger_list_memories",
+                "secretary_ledger::secretary_ledger_update_memory",
+                "secretary_ledger::secretary_ledger_rollback_memory",
+                "secretary_ledger::secretary_ledger_delete_memory",
+                "secretary_ledger::secretary_ledger_search",
+                "secretary_ledger::secretary_ledger_create_task",
+                "secretary_ledger::secretary_ledger_start_task",
+                "secretary_ledger::secretary_ledger_claim_task",
+                "secretary_ledger::secretary_ledger_persist_task_progress",
+                "secretary_ledger::secretary_ledger_get_task",
+                "secretary_ledger::secretary_ledger_list_tasks",
+                "secretary_ledger::secretary_ledger_update_task",
+                "secretary_ledger::secretary_ledger_delete_task",
+                "secretary_ledger::secretary_ledger_record_event",
+                "secretary_ledger::secretary_ledger_list_events",
+                "secretary_ledger::secretary_ledger_save_checkpoint",
+                "secretary_ledger::secretary_ledger_load_latest_checkpoint",
+                "secretary_ledger::secretary_ledger_import_legacy_batch",
                 "work_assistant::work_assistant_capabilities",
                 "work_assistant::work_assistant_list_roots",
                 "work_assistant::work_assistant_add_root",
@@ -637,6 +892,8 @@ mod security_tests {
                 "work_assistant::work_assistant_browser_snapshot",
                 "work_assistant::work_assistant_browser_execute_action",
                 "work_assistant::work_assistant_web_extract",
+                "update_protection::prepare_update_snapshot",
+                "update_protection::verify_update_snapshot",
             ]
         );
     }

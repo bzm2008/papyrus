@@ -1,4 +1,4 @@
-﻿import { AnimatePresence, motion } from 'framer-motion'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
   Check,
   DownloadCloud,
@@ -34,7 +34,11 @@ import {
 import { checkAndDownloadUpdate, relaunchToInstallUpdate } from '../services/updater'
 import { logoutScallion, startScallionLogin } from '../services/scallionAuth'
 import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
-import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
+import {
+  formatScallionPlanName,
+  getScallionExternalApiAccess,
+  getScallionModelAccessForMode,
+} from '../services/scallionModelCatalog'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import {
   providerOrder,
@@ -81,6 +85,7 @@ export function SettingsPanel() {
   const updateVersion = useAppStore((state) => state.updateVersion)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionModels = useAppStore((state) => state.scallionModels)
   const scallionSync = useAppStore((state) => state.scallionSync)
   const scallionToken = useAppStore((state) => state.scallionToken)
@@ -92,9 +97,25 @@ export function SettingsPanel() {
     .map((providerId) => providerConfigs[providerId])
     .filter((provider) => provider.type === 'vendor_key')
   const hasScallionSession = Boolean(scallionToken || scallionUser || scallionQuota)
-
+  const externalApiAccess = getScallionExternalApiAccess({
+    token: scallionToken,
+    planKey: scallionQuota?.planKey ?? scallionPlan?.key ?? scallionUser?.member_type,
+    planExternalApi: scallionPlan?.externalApi,
+    quotaExternalApi: scallionQuota?.externalApi,
+  })
+  // Custom OpenAI-compatible endpoints use the user's own API key and are
+  // independent of the Scallion subscription tier.
+  const customProviderCanUse = true
   const validateProvider = async (providerId: ProviderId) => {
     const provider = useAppStore.getState().providerConfigs[providerId]
+
+    if (provider.type === 'vendor_key' && !externalApiAccess.allowed) {
+      setCheckMessages((messages) => ({
+        ...messages,
+        [providerId]: externalApiAccess.reason,
+      }))
+      return
+    }
 
     if (!canCallProvider(provider)) {
       setCheckMessages((messages) => ({
@@ -122,6 +143,7 @@ export function SettingsPanel() {
         validatedAt: Date.now(),
         lastValidatedSignature: providerValidationSignature(provider),
       })
+      useAppStore.getState().setModelRoutingMode('manual')
       useAppStore.getState().setActiveProviderId(providerId)
       setCheckMessages((messages) => ({
         ...messages,
@@ -261,6 +283,30 @@ export function SettingsPanel() {
                             总额度 {scallionQuota.total} {scallionQuota.unit}
                           </div>
                         ) : null}
+                        {(scallionQuota?.autoMonthlyRemaining !== undefined ||
+                          scallionQuota?.autoDailyRemaining !== undefined) ? (
+                          <div className="grid gap-1 border-t border-[#f0e8da] pt-2 text-xs text-[#6f7168]">
+                            <div className="font-medium text-[#4f4a3d]">Auto 体验额度</div>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1">
+                              {scallionQuota.autoMonthlyRemaining !== undefined ? (
+                                <span>
+                                  月余 {scallionQuota.autoMonthlyRemaining}
+                                  {scallionQuota.autoMonthlyCalls !== undefined
+                                    ? ` / ${scallionQuota.autoMonthlyCalls}`
+                                    : ''}
+                                </span>
+                              ) : null}
+                              {scallionQuota.autoDailyRemaining !== undefined ? (
+                                <span>
+                                  日余 {scallionQuota.autoDailyRemaining}
+                                  {scallionQuota.autoDailyCalls !== undefined
+                                    ? ` / ${scallionQuota.autoDailyCalls}`
+                                    : ''}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="text-xs text-[#8f897a]">
                           实时余额以主站 points_balance 为准
                           {scallionSync.quota.status === 'syncing'
@@ -274,6 +320,11 @@ export function SettingsPanel() {
                             ? ` · 更新于 ${new Date(scallionQuota.updatedAt).toLocaleTimeString('zh-CN')}`
                             : ''}
                         </div>
+                        {externalApiAccess.allowed ? (
+                          <div className="mt-1 text-xs text-[#315d39]">外部 API：Deeper 已授权</div>
+                        ) : (
+                          <div className="mt-1 text-xs text-[#8b4138]">外部 API：仅 Deeper 套餐可用</div>
+                        )}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <a
@@ -436,18 +487,28 @@ export function SettingsPanel() {
                   <div className="mb-3">
                     <div className="text-sm font-semibold text-[#2f2b22]">厂商 Key</div>
                     <div className="mt-1 text-xs leading-5 text-[#8f897a]">
-                      选择厂商后填写 API Key、模型名和上下文档位；检测通过后才可切换使用。
+                      {externalApiAccess.allowed
+                        ? '当前主站套餐已授权外部 API。填写 API Key 后检测即可使用。'
+                        : '外部 API 仅 Deeper 套餐可用；Free、Briefly、Futher 不会发送厂商 Key 请求。'}
                     </div>
                   </div>
-                  <VendorUnifiedCard
-                    providerIds={vendorProviders.map((provider) => provider.id)}
-                    selectedProviderId={selectedVendorId}
-                    activeProviderId={activeProviderId}
-                    checking={checkingProviderId === selectedVendorId}
-                    message={checkMessages[selectedVendorId]}
-                    onSelect={setSelectedVendorId}
-                    onValidate={validateProvider}
-                  />
+                  <div className={!externalApiAccess.allowed ? 'pointer-events-none opacity-55' : ''}>
+                    <VendorUnifiedCard
+                      providerIds={vendorProviders.map((provider) => provider.id)}
+                      selectedProviderId={selectedVendorId}
+                      activeProviderId={activeProviderId}
+                      checking={checkingProviderId === selectedVendorId}
+                      message={checkMessages[selectedVendorId]}
+                      onSelect={setSelectedVendorId}
+                      onValidate={validateProvider}
+                    />
+                  </div>
+                  {!externalApiAccess.allowed ? (
+                    <div className="mt-2 flex items-start gap-2 rounded-lg border border-[#d7aa4f]/40 bg-[#fff7e3] px-3 py-2 text-xs leading-5 text-[#6f7168]">
+                      <TriangleAlert size={14} className="mt-0.5 shrink-0 text-[#b7791f]" />
+                      <span>{externalApiAccess.reason}</span>
+                    </div>
+                  ) : null}
                 </section>
 
                 <section className={`rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)] ${activeSection === 'models' ? '' : 'hidden'}`}>
@@ -455,13 +516,15 @@ export function SettingsPanel() {
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">自定义模型</div>
                       <div className="mt-1 text-xs leading-5 text-[#8f897a]">
-                        适合任意 OpenAI-compatible 服务。检测通过后才可使用。
+                        适合任意 OpenAI-compatible 服务，不受 Scallion 套餐限制；请求由你自己的端点和 API Key 负责。
                       </div>
                     </div>
-                    <ProviderUseButton providerId="custom" />
+                    <div className={customProviderCanUse ? '' : 'pointer-events-none opacity-55'}>
+                      <ProviderUseButton providerId="custom" />
+                    </div>
                   </div>
 
-                  <div className="space-y-3">
+                  <div className={`space-y-3 ${customProviderCanUse ? '' : 'opacity-55'}`}>
                     <Field
                       icon={Lock}
                       label="显示名称"
@@ -576,14 +639,15 @@ function ScallionModelDirectory({
       ) : (
         <div className="max-h-80 divide-y divide-[#f0e8da] overflow-y-auto rounded-md border border-[#f0e8da]">
           {models.map((model) => {
-            const access = getScallionModelAccess(model)
+            const manualAccess = getScallionModelAccessForMode(model, 'manual')
+            const autoAccess = getScallionModelAccessForMode(model, 'auto')
             const active = model.id === activeModelId || model.modelName === activeModelId
 
             return (
               <div key={model.id} className="flex items-start justify-between gap-3 px-3 py-2.5">
                 <div className="min-w-0">
                   <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-[#2f2b22]">
-                    {access.usable ? <Check size={13} className="shrink-0 text-[#416746]" /> : <TriangleAlert size={13} className="shrink-0 text-[#b7791f]" />}
+                    {manualAccess.usable || autoAccess.usable ? <Check size={13} className="shrink-0 text-[#416746]" /> : <TriangleAlert size={13} className="shrink-0 text-[#b7791f]" />}
                     <span className="truncate">{model.label}</span>
                     {active ? <span className="shrink-0 text-[10px] text-[#416746]">当前</span> : null}
                   </div>
@@ -595,12 +659,14 @@ function ScallionModelDirectory({
                 <div className="flex max-w-[48%] shrink-0 flex-col items-end gap-0.5 text-right">
                   <span
                     className={`text-[11px] font-medium ${
-                      access.status === 'available' ? 'text-[#416746]' : 'text-[#9a4338]'
+                      manualAccess.usable || autoAccess.usable ? 'text-[#416746]' : 'text-[#9a4338]'
                     }`}
                   >
-                    {access.label}
+                    {manualAccess.usable ? '手动可用' : '手动不可用'}
                   </span>
-                  <span className="text-[10px] leading-4 text-[#8f897a]">{access.detail}</span>
+                  <span className={`text-[10px] leading-4 ${autoAccess.usable ? 'text-[#416746]' : 'text-[#9a4338]'}`}>
+                    {autoAccess.usable ? 'Auto 可用' : `Auto 不可用：${autoAccess.detail}`}
+                  </span>
                 </div>
               </div>
             )
@@ -858,6 +924,7 @@ function ProviderCheckRow({
 function ProviderUseButton({ providerId }: { providerId: ProviderId }) {
   const activeProviderId = useAppStore((state) => state.activeProviderId)
   const setActiveProviderId = useAppStore((state) => state.setActiveProviderId)
+  const setModelRoutingMode = useAppStore((state) => state.setModelRoutingMode)
   const provider = useAppStore((state) => state.providerConfigs[providerId])
   const canUse = canCallProvider(provider) && isProviderValidated(provider)
   const active = activeProviderId === providerId
@@ -866,7 +933,10 @@ function ProviderUseButton({ providerId }: { providerId: ProviderId }) {
     <button
       type="button"
       disabled={!canUse}
-      onClick={() => setActiveProviderId(providerId)}
+      onClick={() => {
+        setModelRoutingMode('manual')
+        setActiveProviderId(providerId)
+      }}
       className={`h-8 shrink-0 rounded-lg px-3 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-45 ${
         active
           ? 'bg-[#171714] text-[#fffefa]'
@@ -974,7 +1044,10 @@ function GeneralSettingsSection() {
   const hardwareCapabilityProfile = useAppStore((state) => state.hardwareCapabilityProfile)
   const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const setModelRoutingMode = useAppStore((state) => state.setModelRoutingMode)
+  const setActiveProviderId = useAppStore((state) => state.setActiveProviderId)
   const setAutoModelProviderIds = useAppStore((state) => state.setAutoModelProviderIds)
+  const scallionModels = useAppStore((state) => state.scallionModels)
+  const updateProviderModelMetadata = useAppStore((state) => state.updateProviderModelMetadata)
   const setModelTierWeight = useAppStore((state) => state.setModelTierWeight)
   const setMode = useAppStore((state) => state.setMode)
   const cacheStats = getModelCacheStats()
@@ -1089,6 +1162,55 @@ function GeneralSettingsSection() {
               )
             })}
           </div>
+          {scallionModels.length ? (
+            <div className="mt-3 border-t border-[#f0e8da] pt-3">
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold text-[#2f2b22]">Auto 首选模型</div>
+                  <div className="mt-1 text-[11px] leading-5 text-[#8f897a]">
+                    选择后仅作为 Auto 的首选；套餐权限仍由主站实时校验。
+                  </div>
+                </div>
+                <span className="shrink-0 text-[10px] text-[#9d988a]">{scallionModels.length} 个目录模型</span>
+              </div>
+              <div className="grid gap-1.5">
+                {scallionModels.map((model) => {
+                  const access = getScallionModelAccessForMode(model, 'auto')
+                  const active = modelRoutingMode === 'auto' && providerConfigs.qwen36.modelName === model.modelName
+
+                  return (
+                    <button
+                      key={model.id}
+                      type="button"
+                      disabled={!access.usable}
+                      onClick={() => {
+                        updateProviderModelMetadata('qwen36', {
+                          label: model.label,
+                          modelName: model.modelName,
+                          contextWindowTokens: model.contextWindowTokens,
+                        })
+                        setActiveProviderId('qwen36')
+                        setModelRoutingMode('auto')
+                      }}
+                      className={`flex items-center justify-between gap-3 rounded-lg border px-2.5 py-2 text-left text-xs transition disabled:cursor-not-allowed disabled:opacity-45 ${
+                        active
+                          ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
+                          : 'border-transparent bg-[#fffefa] text-[#5f6159] hover:border-[#e8ddc7]'
+                      }`}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{model.label}</span>
+                        <span className={`block truncate text-[10px] ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
+                          {model.modelName} · {access.label}
+                        </span>
+                      </span>
+                      {active ? <Check size={14} /> : access.usable ? <span className="text-[10px] text-[#416746]">可选</span> : <TriangleAlert size={14} className="text-[#b7791f]" />}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="grid gap-2 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">

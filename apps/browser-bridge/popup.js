@@ -1,4 +1,4 @@
-const fields = ['wsUrl', 'token', 'nonce']
+const discoveryUrl = 'http://127.0.0.1:43121/pairing'
 const status = document.querySelector('#status')
 
 function setStatus(message, error = false) {
@@ -6,19 +6,24 @@ function setStatus(message, error = false) {
   status.className = error ? 'error' : ''
 }
 
-chrome.storage.session.get(fields, (stored) => fields.forEach((id) => {
-  if (stored[id]) document.querySelector(`#${id}`).value = stored[id]
-}))
+async function discoverPairing() {
+  const response = await fetch(discoveryUrl, { cache: 'no-store', credentials: 'omit' })
+  if (!response.ok) throw new Error('Papyrus 尚未启动 Browser Bridge。')
+  const pairing = await response.json()
+  if (!pairing?.wsUrl || !pairing?.token || !pairing?.nonce) {
+    throw new Error('Papyrus 返回的 Browser Bridge 配对信息无效。')
+  }
+  return { wsUrl: pairing.wsUrl, token: pairing.token, nonce: pairing.nonce }
+}
 
 document.querySelector('#connect').addEventListener('click', async () => {
-  const values = Object.fromEntries(fields.map((id) => [id, document.querySelector(`#${id}`).value.trim()]))
-  if (!values.wsUrl || !values.token || !values.nonce) return setStatus('请填写完整的配对信息。', true)
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   if (!tab?.id || !tab.url) return setStatus('无法读取当前标签页。', true)
   try {
     const tabUrl = new URL(tab.url)
     if (!['http:', 'https:'].includes(tabUrl.protocol)) return setStatus('仅支持 http(s) 网页，已拒绝当前标签页。', true)
-    await chrome.storage.session.set(values)
+    setStatus('正在连接当前标签页…')
+    const values = await discoverPairing()
     const response = await chrome.runtime.sendMessage({
       type: 'connect',
       config: values,

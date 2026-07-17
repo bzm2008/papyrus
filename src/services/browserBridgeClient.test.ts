@@ -7,6 +7,7 @@ import {
   browserDownload,
   browserSubmit,
   browserSnapshot,
+  ensureBrowserBridgeReady,
   executeApprovedBrowserAction,
   getBrowserBridgeStatus,
   openBrowserBridgeTab,
@@ -19,6 +20,19 @@ import {
 afterEach(() => resetBrowserBridgeInvokerForTests())
 
 describe('browser bridge client contract', () => {
+  it('starts the local bridge automatically when the desktop app is ready', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'browser_bridge_status') return { running: false, paired: false }
+      if (command === 'browser_bridge_start_pairing') return { sessionId: 's1', token: 't1', nonce: 'n1', wsUrl: 'ws://127.0.0.1:1/bridge', expiresAt: 10 }
+      return {}
+    })
+    setBrowserBridgeInvokerForTests(invoke)
+
+    await expect(ensureBrowserBridgeReady()).resolves.toMatchObject({ sessionId: 's1' })
+    expect(invoke).toHaveBeenNthCalledWith(1, 'browser_bridge_status', undefined)
+    expect(invoke).toHaveBeenNthCalledWith(2, 'browser_bridge_start_pairing', undefined)
+  })
+
   it('uses typed pairing/status commands and keeps secrets out of status calls', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'browser_bridge_start_pairing') return { sessionId: 's1', token: 't1', nonce: 'n1', wsUrl: 'ws://127.0.0.1:1/bridge', expiresAt: 10 }

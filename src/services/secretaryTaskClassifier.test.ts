@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifySecretaryTask } from './secretaryTaskClassifier'
+import { classifySecretaryTask, isConversationalShortcut } from './secretaryTaskClassifier'
 
 describe('classifySecretaryTask domain routing', () => {
   it('routes local file and desktop requests to the controlled work assistant', () => {
@@ -20,5 +20,12 @@ describe('classifySecretaryTask domain routing', () => {
 
   it('preserves ordinary writing classification', () => {
     expect(classifySecretaryTask('续写这个小说章节', { writeIntent: true }).domain).toBe('writing')
+  })
+
+  it('recognizes greetings as conversation-only shortcuts', () => {
+    expect(isConversationalShortcut('你好')).toBe(true)
+    expect(isConversationalShortcut('谢谢你')).toBe(true)
+    expect(isConversationalShortcut('写一段欢迎词')).toBe(false)
+    expect(isConversationalShortcut('查看今天的新闻')).toBe(false)
   })
 })
