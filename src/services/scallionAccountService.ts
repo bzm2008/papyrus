@@ -110,7 +110,7 @@ export async function refreshScallionRuntimeMetadata() {
   await Promise.allSettled([refreshScallionModels(), refreshScallionQuota()])
 }
 
-export function refreshScallionModels() {
+export function refreshScallionModels(options: { force?: boolean } = {}) {
   const state = useAppStore.getState()
 
   if (!state.scallionToken) {
@@ -121,7 +121,7 @@ export function refreshScallionModels() {
   }
 
   const tokenAtRequest = state.scallionToken
-  if (modelsRefreshInFlight?.token === tokenAtRequest) {
+  if (!options.force && modelsRefreshInFlight?.token === tokenAtRequest) {
     return modelsRefreshInFlight.promise
   }
 

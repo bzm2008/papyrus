@@ -990,7 +990,9 @@ async function recoverScallionModel(provider: LlmProviderConfig, requestedRoutin
     // valid model catalogue and trigger a second model charge.
     let refreshedModels: Awaited<ReturnType<typeof refreshScallionModels>>
     try {
-      refreshedModels = await refreshScallionModels()
+      // A plan denial is an explicit signal that the cached catalog may be
+      // stale. Do not reuse a same-token refresh started by another view.
+      refreshedModels = await refreshScallionModels({ force: true })
     } catch {
       return undefined
     }
