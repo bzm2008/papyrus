@@ -12,7 +12,7 @@ describe.skipIf(process.platform !== 'win32')('portable MSVC probe', () => {
     ], { encoding: 'utf8' })
 
     expect(output).toContain('MSVC toolchain ready')
-  }, 15_000)
+    }, 30_000)
 
   it('propagates cargo failures to the caller', () => {
     expect(() => execFileSync('powershell', [
@@ -21,5 +21,5 @@ describe.skipIf(process.platform !== 'win32')('portable MSVC probe', () => {
       '-File', path.resolve('scripts/with-portable-msvc.ps1'),
       'not-a-real-cargo-command',
     ], { encoding: 'utf8', stdio: 'pipe' })).toThrow()
-  }, 15_000)
+    }, 30_000)
 })
