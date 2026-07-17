@@ -5,9 +5,11 @@
 
 set -eu
 
-APP_ROOT=${PAPYRUS_INSTALL_ROOT:-/opt/papyrus}
-BIN_LINK=${PAPYRUS_BIN_LINK:-/usr/bin/papyrus}
-DESKTOP_DIR=${PAPYRUS_DESKTOP_DIR:-/usr/share/applications}
+SYSTEM_ROOT=${PAPYRUS_ROOTFS:-}
+APP_ROOT=${PAPYRUS_INSTALL_ROOT:-${SYSTEM_ROOT}/opt/papyrus}
+BIN_LINK=${PAPYRUS_BIN_LINK:-${SYSTEM_ROOT}/usr/bin/papyrus}
+DESKTOP_DIR=${PAPYRUS_DESKTOP_DIR:-${SYSTEM_ROOT}/usr/share/applications}
+ICON_DIR=${PAPYRUS_ICON_DIR:-${SYSTEM_ROOT}/usr/share/icons/hicolor/128x128/apps}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
@@ -78,7 +80,7 @@ case "$source_file" in
 esac
 
 source_file=$(readlink -f -- "$source_file")
-mkdir -p "$APP_ROOT"
+mkdir -p "$APP_ROOT" "$(dirname "$BIN_LINK")" "$DESKTOP_DIR" "$ICON_DIR"
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/papyrus-install.XXXXXX")
 cleanup() {
@@ -163,7 +165,7 @@ for candidate in \
     fi
 done
 if [ -n "$icon_source" ]; then
-    install -Dm644 "$icon_source" /usr/share/icons/hicolor/128x128/apps/papyrus.png
+    install -Dm644 "$icon_source" "$ICON_DIR/papyrus.png"
 fi
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
