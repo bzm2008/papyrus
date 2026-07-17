@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'dist-wps-addin', '.codex-tools', 'src-tauri/target', 'artifacts']),
+  globalIgnores(['dist', 'dist-wps-addin', '.codex-tools', 'src-tauri/target', 'artifacts', '.worktrees']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

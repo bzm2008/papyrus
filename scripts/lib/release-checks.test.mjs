@@ -18,11 +18,13 @@ async function fixture() {
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'src', 'lib.rs'), REQUIRED_COMMANDS.map((command) => `work_assistant::${command},`).join('\n'))
   await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'manifest.json'), JSON.stringify({
     manifest_version: 3,
+    version: '0.1.2',
     permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
     host_permissions: ['http://127.0.0.1/*'],
   }))
   await fs.writeFile(path.join(rootDir, 'README.md'), 'Papyrus Work Assistant and Browser Bridge release notes')
   await fs.writeFile(path.join(rootDir, 'package.json'), JSON.stringify({
+    version: '0.1.2',
     scripts: {
       'ci:desktop': 'npm run lint && npm run release:assistant-check',
       'browser:package': 'npm run browser:build && node scripts/package-browser-bridge.mjs',
@@ -115,6 +117,22 @@ test('forbidden extension permissions fail closed', async () => {
     const report = await runReleaseChecks({ rootDir, phase: 'local' })
     assert.ok(report.failures.some((failure) => failure.includes('forbidden permission cookies')))
     assert.ok(report.failures.some((failure) => failure.includes('<all_urls>')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('extension output version must match the application package version', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'manifest.json'), JSON.stringify({
+      manifest_version: 3,
+      version: '0.1.1',
+      permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
+      host_permissions: ['http://127.0.0.1/*'],
+    }))
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('version must match package.json.version')))
   } finally {
     await cleanup(rootDir)
   }

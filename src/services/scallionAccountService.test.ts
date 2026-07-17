@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { normalizeQuota, quotaFromUser, refreshScallionModels, refreshScallionQuota } from './scallionAccountService'
+import {
+  getScallionQuotaDisplay,
+  normalizeQuota,
+  quotaFromUser,
+  refreshScallionModels,
+  refreshScallionQuota,
+} from './scallionAccountService'
 import { useAppStore } from '../stores/useAppStore'
 
 afterEach(() => {
@@ -70,6 +76,79 @@ describe('normalizeQuota', () => {
         planKey: 'briefly',
         planName: 'Briefly',
         planExpiresAt: '2026-08-12T00:00:00.000Z',
+      }),
+    )
+  })
+
+  it('preserves plan manual/Auto catalog and live Auto quota fields', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 504,
+        plan: {
+          key: 'free',
+          name: 'Free',
+          manual_models: [],
+          auto_models: ['agnes-2.0-flash'],
+          auto_monthly_calls: 300,
+          auto_daily_calls: 10,
+          external_api: false,
+        },
+        auto: {
+          monthly_used: 4,
+          daily_used: 2,
+          monthly_remaining: 296,
+          daily_remaining: 8,
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoDailyCalls: 10,
+        autoMonthlyUsed: 4,
+        autoDailyUsed: 2,
+        autoMonthlyRemaining: 296,
+        autoDailyRemaining: 8,
+        externalApi: false,
+      }),
+    )
+  })
+
+  it('accepts Auto quota nested under the quota object for gateway variants', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 12,
+        quota: {
+          points_balance: 12,
+          auto: { monthly_remaining: 4, daily_remaining: 1 },
+          plan: { key: 'free', name: 'Free' },
+        } as never,
+      }),
+    ).toEqual(expect.objectContaining({ autoMonthlyRemaining: 4, autoDailyRemaining: 1 }))
+  })
+
+  it('accepts top-level Auto entitlement fields and external API labels', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 10,
+        manual_models: [],
+        auto_models: ['agnes-2.0-flash'],
+        auto_monthly_calls: 300,
+        auto_daily_calls: 10,
+        auto_monthly_remaining: 299,
+        auto_daily_remaining: 9,
+        external_api: 'deeper',
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoDailyCalls: 10,
+        autoMonthlyRemaining: 299,
+        autoDailyRemaining: 9,
+        externalApi: 'deeper',
       }),
     )
   })
@@ -215,7 +294,83 @@ describe('normalizeQuota', () => {
   })
 })
 
+describe('getScallionQuotaDisplay', () => {
+  it('labels only a ready authenticated points balance as realtime', () => {
+    expect(getScallionQuotaDisplay({
+      token: 'jwt',
+      quota: {
+        remaining: 10,
+        pointsBalance: 10,
+        unit: '积分',
+        isMember: false,
+        memberPriceLabel: '',
+        upgradeUrl: '',
+        topUpUrl: '',
+        updatedAt: 1,
+      },
+      syncStatus: 'ready',
+    })).toEqual({ value: 10, source: 'realtime', status: 'ready' })
+  })
+
+  it('labels a stale account value as cached', () => {
+    expect(getScallionQuotaDisplay({
+      token: 'jwt',
+      quota: {
+        remaining: 9,
+        pointsBalance: 9,
+        unit: '积分',
+        isMember: false,
+        memberPriceLabel: '',
+        upgradeUrl: '',
+        topUpUrl: '',
+        updatedAt: 1,
+      },
+      syncStatus: 'stale',
+    })).toEqual({ value: 9, source: 'cached', status: 'stale' })
+  })
+})
+
 describe('refreshScallionModels', () => {
+  it('does not commit a stale catalog after the Scallion account changes', async () => {
+    let resolveResponse!: (response: Response) => void
+    const responsePromise = new Promise<Response>((resolve) => {
+      resolveResponse = resolve
+    })
+    useAppStore.setState({
+      scallionToken: 'old-jwt',
+      scallionPlan: {
+        key: 'briefly',
+        name: 'Briefly',
+        availableModels: ['old-model'],
+        updatedAt: Date.now(),
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn(() => responsePromise))
+
+    const refresh = refreshScallionModels()
+    useAppStore.setState({
+      scallionToken: 'new-jwt',
+      scallionPlan: {
+        key: 'deeper',
+        name: 'Deeper',
+        availableModels: ['new-model'],
+        updatedAt: Date.now(),
+      },
+    })
+    resolveResponse({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [{ id: 'old-model', name: '旧账号模型' }],
+        plan: { key: 'briefly', name: 'Briefly' },
+      }),
+    } as Response)
+
+    await expect(refresh).resolves.toEqual([])
+    expect(useAppStore.getState().scallionPlan?.key).toBe('deeper')
+    expect(useAppStore.getState().scallionModels).toEqual([])
+  })
+
   it('keeps the full catalog and marks plan-restricted models as non-callable', async () => {
     useAppStore.setState({ scallionToken: 'jwt-token' })
     vi.stubGlobal(

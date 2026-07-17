@@ -1,6 +1,6 @@
 [package]
 name = "papyrus"
-version = "0.1.2"
+version = "1.0.0"
 description = "Papyrus AI writing workstation"
 authors = ["Scallion"]
 license = ""
@@ -38,6 +38,7 @@ open = "5"
 libc = "=0.2.186"
 tungstenite = "0.27"
 tokio = { version = "1", features = ["macros", "net", "time"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }

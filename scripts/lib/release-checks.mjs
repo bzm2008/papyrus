@@ -218,7 +218,17 @@ async function checkExtensionOutput(rootDir) {
   const relativeManifest = path.relative(rootDir, manifestPath)
   const { value, error } = await readJson(rootDir, relativeManifest)
   if (error) failures.push(error)
-  else failures.push(...checkManifestPermissions(value, relativeManifest))
+  else {
+    failures.push(...checkManifestPermissions(value, relativeManifest))
+    const packageJson = await readJson(rootDir, 'package.json')
+    if (packageJson.error) {
+      failures.push(packageJson.error)
+    } else if (typeof packageJson.value?.version !== 'string' || !packageJson.value.version.trim()) {
+      failures.push('package.json.version is required to validate Browser Bridge output')
+    } else if (value?.version !== packageJson.value.version) {
+      failures.push(`Browser Bridge manifest ${relativeManifest} version must match package.json.version (${packageJson.value.version})`)
+    }
+  }
   return failures
 }
 

@@ -6,6 +6,7 @@ import { useProjectGuidance } from '../hooks/useProjectGuidance'
 import { useRemoteRelay } from '../hooks/useRemoteRelay'
 import { refreshHardwareCapabilityProfile } from '../services/hardwareCapabilityService'
 import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
+import { verifyUpdateDataAfterStartup } from '../services/updateDataProtection'
 import { useAppStore } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { EditorPane } from './EditorPane'
@@ -22,6 +23,10 @@ import { StoryDashboard } from './StoryDashboard'
 export function AppShell() {
   const isFirstLaunch = useAppStore((state) => state.isFirstLaunch)
   const isEnvReady = useAppStore((state) => state.isEnvReady)
+
+  useEffect(() => {
+    void verifyUpdateDataAfterStartup()
+  }, [])
 
   return (
     <AnimatePresence mode="wait" initial={false}>

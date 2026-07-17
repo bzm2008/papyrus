@@ -50,6 +50,29 @@ export function selectModelForRole(
     }
   }
 
+  if (store.providerConfigs.qwen36.type === 'scallion_proxy') {
+    const autoModel = store.scallionModels.find(
+      (model) => model.available && model.autoAvailable !== false,
+    )
+    if (autoModel) {
+      const provider = {
+        ...store.providerConfigs.qwen36,
+        modelName: autoModel.modelName || autoModel.id,
+        label: autoModel.label || store.providerConfigs.qwen36.label,
+        serverContextWindowTokens:
+          autoModel.contextWindowTokens ?? store.providerConfigs.qwen36.serverContextWindowTokens,
+      }
+      return {
+        provider,
+        providerId: 'qwen36',
+        mode: 'auto',
+        role,
+        reason: `Auto 路由选择 ${provider.label}`,
+        fallbackUsed: false,
+      }
+    }
+  }
+
   const usable = providerOrder
     .map((providerId) => store.providerConfigs[providerId])
     .filter((provider): provider is LlmProviderConfig => Boolean(provider))

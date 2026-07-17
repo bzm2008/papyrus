@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { canCallProvider } from '../services/llmClient'
 import { getEffectiveContextLimit, isProviderValidated } from '../services/modelCatalog'
-import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
+import { formatScallionPlanName, getScallionModelAccessForMode, getScallionRoutingAccess } from '../services/scallionModelCatalog'
 import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { providerOrder, useAppStore, type ProviderId, type ScallionModelMetadata } from '../stores/useAppStore'
 
@@ -36,11 +36,10 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
     () =>
       scallionModels.find(
         (model) =>
-          model.available &&
-          model.planAvailable !== false &&
+          getScallionRoutingAccess(model, modelRoutingMode) &&
           model.modelName === providerConfigs.qwen36.modelName,
-      ) ?? scallionModels.find((model) => model.available && model.planAvailable !== false),
-    [providerConfigs.qwen36.modelName, scallionModels],
+      ) ?? scallionModels.find((model) => getScallionRoutingAccess(model, modelRoutingMode)),
+    [providerConfigs.qwen36.modelName, scallionModels, modelRoutingMode],
   )
   const activeLabel =
     modelRoutingMode === 'auto'
@@ -157,6 +156,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectScallionModel = (model: ScallionModelMetadata) => {
+    if (!getScallionRoutingAccess(model, 'manual')) return
     updateProviderModelMetadata('qwen36', {
       label: model.label,
       modelName: model.modelName,
@@ -168,6 +168,14 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectAuto = () => {
+    const autoModel = scallionModels.find((model) => getScallionRoutingAccess(model, 'auto'))
+    if (autoModel && providerConfigs.qwen36.modelName !== autoModel.modelName) {
+      updateProviderModelMetadata('qwen36', {
+        label: autoModel.label,
+        modelName: autoModel.modelName,
+        contextWindowTokens: autoModel.contextWindowTokens,
+      })
+    }
     setModelRoutingMode('auto')
     close()
   }
@@ -259,6 +267,9 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-[#8f897a]">
                         {scallionToken ? formatPoints(scallionQuota, scallionSync.quota.status) : '登录后同步套餐和积分'}
+                        {scallionQuota?.autoMonthlyRemaining !== undefined
+                          ? ` · Auto 月余 ${scallionQuota.autoMonthlyRemaining}`
+                          : ''}
                         {scallionQuota?.planExpiresAt ? ` · 到期 ${formatExpiry(scallionQuota.planExpiresAt)}` : ''}
                         {scallionQuota?.updatedAt ? ` · ${formatSyncTime(scallionQuota.updatedAt)}` : ''}
                         {scallionSync.quota.error ? ` · ${scallionSync.quota.error}` : ''}
@@ -292,8 +303,14 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                           modelRoutingMode === 'manual' &&
                           activeProviderId === 'qwen36' &&
                           providerConfigs.qwen36.modelName === model.modelName
-                        const access = getScallionModelAccess(model)
-                        const disabled = !access.usable
+                        const access = getScallionModelAccessForMode(model, 'manual')
+                        const autoAccess = getScallionModelAccessForMode(model, 'auto')
+                        const disabled = !getScallionRoutingAccess(model, 'manual')
+                        const accessSummary = access.usable
+                          ? '手动可用'
+                          : autoAccess.usable
+                            ? '仅 Auto 可用 · 当前套餐可由 Auto 路由'
+                            : `${access.label} · ${access.detail}`
 
                         return (
                           <button
@@ -312,7 +329,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                               <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
                                 {model.modelName} · {contextLabel(model.contextWindowTokens)}
                                 {model.tier ? ` · ${model.tier}` : ''}
-                                {disabled ? ` · ${access.label} · ${access.detail}` : ` · ${access.label}`}
+                                {` · ${accessSummary}`}
                               </span>
                             </span>
                             {active ? (

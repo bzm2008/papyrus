@@ -20,7 +20,7 @@ import {
 import type { LucideIcon } from 'lucide-react'
 import { useState } from 'react'
 import { agentSkills } from '../services/agentSkillLibrary'
-import { canCallProvider } from '../services/llmClient'
+import { canCallProvider, isLocalCompatibleEndpoint } from '../services/llmClient'
 import { testModelConnection } from '../services/maintenance'
 import { testMcpServer } from '../services/mcpClient'
 import { acceptTowriteSuggestion, rejectTowriteSuggestion, syncTowriteToMemory } from '../services/towriteService'
@@ -34,7 +34,7 @@ import {
 import { checkAndDownloadUpdate, relaunchToInstallUpdate } from '../services/updater'
 import { logoutScallion, startScallionLogin } from '../services/scallionAuth'
 import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
-import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
+import { formatScallionPlanName, getScallionExternalApiAccess, getScallionModelAccess } from '../services/scallionModelCatalog'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import {
   providerOrder,
@@ -81,6 +81,7 @@ export function SettingsPanel() {
   const updateVersion = useAppStore((state) => state.updateVersion)
   const scallionUser = useAppStore((state) => state.scallionUser)
   const scallionQuota = useAppStore((state) => state.scallionQuota)
+  const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionModels = useAppStore((state) => state.scallionModels)
   const scallionSync = useAppStore((state) => state.scallionSync)
   const scallionToken = useAppStore((state) => state.scallionToken)
@@ -92,9 +93,27 @@ export function SettingsPanel() {
     .map((providerId) => providerConfigs[providerId])
     .filter((provider) => provider.type === 'vendor_key')
   const hasScallionSession = Boolean(scallionToken || scallionUser || scallionQuota)
-
+  const externalApiAccess = getScallionExternalApiAccess({
+    token: scallionToken,
+    planKey: scallionQuota?.planKey ?? scallionPlan?.key ?? scallionUser?.member_type,
+    planExternalApi: scallionPlan?.externalApi,
+    quotaExternalApi: scallionQuota?.externalApi,
+  })
+  const customProviderCanUse = externalApiAccess.allowed || isLocalCompatibleEndpoint(customProvider.baseUrl)
   const validateProvider = async (providerId: ProviderId) => {
     const provider = useAppStore.getState().providerConfigs[providerId]
+
+    if (
+      provider.type !== 'scallion_proxy' &&
+      !(provider.type === 'custom' && isLocalCompatibleEndpoint(provider.baseUrl)) &&
+      !externalApiAccess.allowed
+    ) {
+      setCheckMessages((messages) => ({
+        ...messages,
+        [providerId]: externalApiAccess.reason,
+      }))
+      return
+    }
 
     if (!canCallProvider(provider)) {
       setCheckMessages((messages) => ({
@@ -261,6 +280,30 @@ export function SettingsPanel() {
                             总额度 {scallionQuota.total} {scallionQuota.unit}
                           </div>
                         ) : null}
+                        {(scallionQuota?.autoMonthlyRemaining !== undefined ||
+                          scallionQuota?.autoDailyRemaining !== undefined) ? (
+                          <div className="grid gap-1 border-t border-[#f0e8da] pt-2 text-xs text-[#6f7168]">
+                            <div className="font-medium text-[#4f4a3d]">Auto 体验额度</div>
+                            <div className="flex flex-wrap gap-x-3 gap-y-1">
+                              {scallionQuota.autoMonthlyRemaining !== undefined ? (
+                                <span>
+                                  月余 {scallionQuota.autoMonthlyRemaining}
+                                  {scallionQuota.autoMonthlyCalls !== undefined
+                                    ? ` / ${scallionQuota.autoMonthlyCalls}`
+                                    : ''}
+                                </span>
+                              ) : null}
+                              {scallionQuota.autoDailyRemaining !== undefined ? (
+                                <span>
+                                  日余 {scallionQuota.autoDailyRemaining}
+                                  {scallionQuota.autoDailyCalls !== undefined
+                                    ? ` / ${scallionQuota.autoDailyCalls}`
+                                    : ''}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="text-xs text-[#8f897a]">
                           实时余额以主站 points_balance 为准
                           {scallionSync.quota.status === 'syncing'
@@ -274,6 +317,11 @@ export function SettingsPanel() {
                             ? ` · 更新于 ${new Date(scallionQuota.updatedAt).toLocaleTimeString('zh-CN')}`
                             : ''}
                         </div>
+                        {externalApiAccess.allowed ? (
+                          <div className="mt-1 text-xs text-[#315d39]">外部 API：Deeper 已授权</div>
+                        ) : (
+                          <div className="mt-1 text-xs text-[#8b4138]">外部 API：仅 Deeper 套餐可用</div>
+                        )}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <a
@@ -436,18 +484,28 @@ export function SettingsPanel() {
                   <div className="mb-3">
                     <div className="text-sm font-semibold text-[#2f2b22]">厂商 Key</div>
                     <div className="mt-1 text-xs leading-5 text-[#8f897a]">
-                      选择厂商后填写 API Key、模型名和上下文档位；检测通过后才可切换使用。
+                      {externalApiAccess.allowed
+                        ? '当前主站套餐已授权外部 API。填写 API Key 后检测即可使用。'
+                        : '外部 API 仅 Deeper 套餐可用；Free、Briefly、Futher 不会发送厂商 Key 请求。'}
                     </div>
                   </div>
-                  <VendorUnifiedCard
-                    providerIds={vendorProviders.map((provider) => provider.id)}
-                    selectedProviderId={selectedVendorId}
-                    activeProviderId={activeProviderId}
-                    checking={checkingProviderId === selectedVendorId}
-                    message={checkMessages[selectedVendorId]}
-                    onSelect={setSelectedVendorId}
-                    onValidate={validateProvider}
-                  />
+                  <div className={!externalApiAccess.allowed ? 'pointer-events-none opacity-55' : ''}>
+                    <VendorUnifiedCard
+                      providerIds={vendorProviders.map((provider) => provider.id)}
+                      selectedProviderId={selectedVendorId}
+                      activeProviderId={activeProviderId}
+                      checking={checkingProviderId === selectedVendorId}
+                      message={checkMessages[selectedVendorId]}
+                      onSelect={setSelectedVendorId}
+                      onValidate={validateProvider}
+                    />
+                  </div>
+                  {!externalApiAccess.allowed ? (
+                    <div className="mt-2 flex items-start gap-2 rounded-lg border border-[#d7aa4f]/40 bg-[#fff7e3] px-3 py-2 text-xs leading-5 text-[#6f7168]">
+                      <TriangleAlert size={14} className="mt-0.5 shrink-0 text-[#b7791f]" />
+                      <span>{externalApiAccess.reason}</span>
+                    </div>
+                  ) : null}
                 </section>
 
                 <section className={`rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-4 shadow-[0_10px_24px_rgba(43,34,19,0.04)] ${activeSection === 'models' ? '' : 'hidden'}`}>
@@ -458,10 +516,12 @@ export function SettingsPanel() {
                         适合任意 OpenAI-compatible 服务。检测通过后才可使用。
                       </div>
                     </div>
-                    <ProviderUseButton providerId="custom" />
+                    <div className={customProviderCanUse ? '' : 'pointer-events-none opacity-55'}>
+                      <ProviderUseButton providerId="custom" />
+                    </div>
                   </div>
 
-                  <div className="space-y-3">
+                  <div className={`space-y-3 ${customProviderCanUse ? '' : 'opacity-55'}`}>
                     <Field
                       icon={Lock}
                       label="显示名称"
@@ -498,6 +558,12 @@ export function SettingsPanel() {
                       message={checkMessages.custom}
                       onValidate={validateProvider}
                     />
+                    {!customProviderCanUse ? (
+                      <div className="flex items-start gap-2 rounded-lg border border-[#d7aa4f]/40 bg-[#fff7e3] px-3 py-2 text-xs leading-5 text-[#6f7168]">
+                        <TriangleAlert size={14} className="mt-0.5 shrink-0 text-[#b7791f]" />
+                        <span>{externalApiAccess.reason}；本机 localhost/127.0.0.1 模型仍可直接使用。</span>
+                      </div>
+                    ) : null}
                   </div>
                 </section>
 

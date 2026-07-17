@@ -31,20 +31,24 @@ export async function startScallionLogin() {
   const store = useAppStore.getState()
   store.setScallionAuthStatus('starting')
 
-  const response = await fetch(`${SCALLION_API}/device`, { method: 'POST' })
-  const payload = (await response.json().catch(() => ({}))) as Partial<DeviceResponse> & {
-    data?: Partial<DeviceResponse>
-  }
-  const device = normalizeDeviceResponse(payload)
+  try {
+    const response = await fetch(`${SCALLION_API}/device`, { method: 'POST' })
+    const payload = (await response.json().catch(() => ({}))) as Partial<DeviceResponse> & {
+      data?: Partial<DeviceResponse>
+    }
+    const device = normalizeDeviceResponse(payload)
 
-  if (!response.ok || !device?.deviceCode || !device.verificationUrl) {
+    if (!response.ok || !device?.deviceCode || !device.verificationUrl) {
+      throw new Error('无法创建 Scallion 登录设备码')
+    }
+
+    store.setScallionDevice(device.deviceCode, device.userCode ?? '')
+    await openExternalUrl(device.verificationUrl)
+    pollScallionLogin(device.deviceCode, device.interval ?? 2)
+  } catch (error) {
     store.setScallionAuthStatus('error')
-    throw new Error('无法创建 Scallion 登录设备码')
+    throw error instanceof Error ? error : new Error('无法创建 Scallion 登录设备码')
   }
-
-  store.setScallionDevice(device.deviceCode, device.userCode ?? '')
-  await openExternalUrl(device.verificationUrl)
-  pollScallionLogin(device.deviceCode, device.interval ?? 2)
 }
 
 export function pollScallionLogin(deviceCode: string, intervalSeconds = 2) {
@@ -76,6 +80,9 @@ export function pollScallionLogin(deviceCode: string, intervalSeconds = 2) {
     try {
       const response = await fetch(`${SCALLION_API}/device/${encodeURIComponent(deviceCode)}`)
       const payload = (await response.json().catch(() => ({}))) as PollResponse
+      if (!response.ok) {
+        throw new Error(`Scallion 授权轮询失败（HTTP ${response.status}）`)
+      }
       const data = normalizePollResponse(payload)
       transientFailures = 0
       nextDelay = Math.max(1, intervalSeconds) * 1000

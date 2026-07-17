@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { sendFlowMessage, shouldContinueSecretaryGoalCycle } from './agentOrchestrator'
+import { canUseSecretarySubAgents, sendFlowMessage, shouldContinueSecretaryGoalCycle } from './agentOrchestrator'
 import { activeSecretaryRunId, cancelSecretaryRun, finishSecretaryRun } from './secretaryRunController'
 
 afterEach(() => {
@@ -12,6 +12,12 @@ afterEach(() => {
 })
 
 describe('secretary goal cycle cancellation', () => {
+  it('keeps low effort in single-agent mode', () => {
+    expect(canUseSecretarySubAgents('low')).toBe(false)
+    expect(canUseSecretarySubAgents('medium')).toBe(true)
+    expect(canUseSecretarySubAgents('high')).toBe(true)
+  })
+
   it('does not advance the goal cycle after a cancelled run', () => {
     expect(shouldContinueSecretaryGoalCycle({ status: 'cancelled' })).toBe(false)
   })

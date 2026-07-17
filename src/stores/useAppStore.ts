@@ -158,14 +158,34 @@ export type ScallionModelMetadata = {
   billingMode?: string
   callPrice?: number
   contextWindowLabel?: string
+  /** Whether the current plan can select this model explicitly. */
+  manualAvailable?: boolean
+  /** Whether the current plan's Auto pool can route to this model. */
+  autoAvailable?: boolean
+  /** Convenience flag returned by the gateway for Auto-only models. */
+  autoOnly?: boolean
   planAvailable?: boolean
   requiredPlan?: string
+  autoRequiredPlan?: string
   availabilityReason?: string
   contextWindowTokens?: number
   available: boolean
   tier?: ModelCapabilityTier
   score?: number
   rationale?: string
+  updatedAt: number
+}
+
+export type ScallionPlan = {
+  key: string
+  name: string
+  expiresAt?: string | null
+  availableModels: string[]
+  manualModels?: string[]
+  autoModels?: string[]
+  autoMonthlyCalls?: number
+  autoDailyCalls?: number
+  externalApi?: boolean | string
   updatedAt: number
 }
 
@@ -205,6 +225,15 @@ export type ScallionQuota = {
   total?: number
   unit: string
   isMember: boolean
+  manualModels?: string[]
+  autoModels?: string[]
+  autoMonthlyCalls?: number
+  autoDailyCalls?: number
+  autoMonthlyUsed?: number
+  autoDailyUsed?: number
+  autoMonthlyRemaining?: number
+  autoDailyRemaining?: number
+  externalApi?: boolean | string
   memberPriceLabel: string
   upgradeUrl: string
   topUpUrl: string
@@ -976,6 +1005,7 @@ type AppState = TokenSnapshot & {
   scallionUser?: ScallionUser
   scallionToken?: string
   scallionModels: ScallionModelMetadata[]
+  scallionPlan?: ScallionPlan
   scallionQuota?: ScallionQuota
   scallionSync: ScallionSyncState
   hardwareCapabilityProfile: HardwareCapabilityProfile
@@ -1195,6 +1225,7 @@ type AppState = TokenSnapshot & {
   expireScallionSession: () => void
   clearScallionSession: () => void
   setScallionModelMetadata: (models: ScallionModelMetadata[]) => void
+  setScallionPlan: (plan?: ScallionPlan) => void
   setScallionQuota: (quota?: ScallionQuota) => void
   setScallionSyncState: (
     channel: keyof ScallionSyncState,
@@ -1375,6 +1406,7 @@ export const useAppStore = create<AppState>()(
       scallionUser: undefined,
       scallionToken: undefined,
       scallionModels: [],
+      scallionPlan: undefined,
       scallionQuota: undefined,
       scallionSync: defaultScallionSyncState(),
       hardwareCapabilityProfile: defaultHardwareProfile(),
@@ -3029,6 +3061,7 @@ export const useAppStore = create<AppState>()(
             ...(tokenChanged
               ? {
                   scallionModels: [],
+                  scallionPlan: undefined,
                   scallionQuota: undefined,
                   scallionSync: defaultScallionSyncState(),
                   providerConfigs: {
@@ -3051,6 +3084,7 @@ export const useAppStore = create<AppState>()(
           scallionToken: undefined,
           scallionUser: undefined,
           scallionModels: [],
+          scallionPlan: undefined,
           scallionQuota: undefined,
           scallionSync: defaultScallionSyncState(),
           authDeviceCode: undefined,
@@ -3070,6 +3104,7 @@ export const useAppStore = create<AppState>()(
           scallionToken: undefined,
           scallionUser: undefined,
           scallionModels: [],
+          scallionPlan: undefined,
           scallionQuota: undefined,
           scallionSync: defaultScallionSyncState(),
           authDeviceCode: undefined,
@@ -3088,11 +3123,16 @@ export const useAppStore = create<AppState>()(
         set((state) => {
           const normalized = sanitizeScallionModels(scallionModels)
           const currentProvider = state.providerConfigs.qwen36
+          const canRoute = (model: ScallionModelMetadata) =>
+            model.available &&
+            (state.modelRoutingMode === 'auto'
+              ? model.autoAvailable !== false
+              : model.manualAvailable !== false && model.planAvailable !== false)
           const primary =
             normalized.find(
-              (model) => model.available && model.planAvailable !== false && model.modelName === currentProvider.modelName,
+              (model) => canRoute(model) && model.modelName === currentProvider.modelName,
             ) ??
-            normalized.find((model) => model.available && model.planAvailable !== false)
+            normalized.find(canRoute)
 
           if (!primary) {
             return {
@@ -3141,6 +3181,7 @@ export const useAppStore = create<AppState>()(
                 : state.modelContextSource,
           }
         }),
+      setScallionPlan: (scallionPlan) => set({ scallionPlan }),
       setScallionQuota: (scallionQuota) => set({ scallionQuota }),
       setScallionSyncState: (channel, patch) =>
         set((state) => ({
@@ -3429,6 +3470,7 @@ export const useAppStore = create<AppState>()(
         scallionUser: state.scallionUser,
         scallionToken: state.scallionToken,
         scallionModels: state.scallionModels,
+        scallionPlan: state.scallionPlan,
         scallionQuota: state.scallionQuota,
         hardwareCapabilityProfile: state.hardwareCapabilityProfile,
         authStatus: state.authStatus,
@@ -3552,6 +3594,7 @@ export const useAppStore = create<AppState>()(
           updateProgress: 0,
           authStatus: (persistedState.scallionToken ? 'approved' : 'idle') as ScallionAuthStatus,
           scallionModels: sanitizeScallionModels(persistedState.scallionModels),
+          scallionPlan: sanitizeScallionPlan(persistedState.scallionPlan),
           scallionQuota: sanitizeScallionQuota(persistedState.scallionQuota),
           hardwareCapabilityProfile: sanitizeHardwareCapabilityProfile(
             persistedState.hardwareCapabilityProfile,
@@ -4186,10 +4229,21 @@ function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
           typeof item.contextWindowLabel === 'string' && item.contextWindowLabel.trim()
             ? item.contextWindowLabel.trim()
             : undefined,
+        manualAvailable:
+          typeof item.manualAvailable === 'boolean' ? item.manualAvailable : item.planAvailable !== false,
+        autoAvailable:
+          typeof item.autoAvailable === 'boolean'
+            ? item.autoAvailable
+            : item.planAvailable !== false,
+        autoOnly: item.autoOnly === true,
         planAvailable: item.planAvailable !== false,
         requiredPlan:
           typeof item.requiredPlan === 'string' && item.requiredPlan.trim()
             ? item.requiredPlan.trim()
+            : undefined,
+        autoRequiredPlan:
+          typeof item.autoRequiredPlan === 'string' && item.autoRequiredPlan.trim()
+            ? item.autoRequiredPlan.trim()
             : undefined,
         availabilityReason:
           typeof item.availabilityReason === 'string' && item.availabilityReason.trim()
@@ -4199,7 +4253,7 @@ function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
           typeof item.contextWindowTokens === 'number' && item.contextWindowTokens > 0
             ? Math.round(item.contextWindowTokens)
             : undefined,
-        available: item.available !== false && item.planAvailable !== false,
+        available: item.available !== false,
         tier: item.tier ? normalizeModelCapabilityTier(item.tier) : undefined,
         score:
           typeof item.score === 'number' && Number.isFinite(item.score)
@@ -4240,6 +4294,20 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
         : Math.max(0, Number(item.total) || 0),
     unit: typeof item.unit === 'string' && item.unit.trim() ? item.unit.trim() : '积分',
     isMember: item.isMember === true,
+    manualModels: sanitizeStringArray(item.manualModels),
+    autoModels: sanitizeStringArray(item.autoModels),
+    autoMonthlyCalls: sanitizeNonNegativeNumber(item.autoMonthlyCalls),
+    autoDailyCalls: sanitizeNonNegativeNumber(item.autoDailyCalls),
+    autoMonthlyUsed: sanitizeNonNegativeNumber(item.autoMonthlyUsed),
+    autoDailyUsed: sanitizeNonNegativeNumber(item.autoDailyUsed),
+    autoMonthlyRemaining: sanitizeNonNegativeNumber(item.autoMonthlyRemaining),
+    autoDailyRemaining: sanitizeNonNegativeNumber(item.autoDailyRemaining),
+    externalApi:
+      typeof item.externalApi === 'boolean'
+        ? item.externalApi
+        : typeof item.externalApi === 'string' && item.externalApi.trim()
+          ? item.externalApi.trim()
+          : undefined,
     memberPriceLabel:
       typeof item.memberPriceLabel === 'string' && item.memberPriceLabel.trim()
         ? item.memberPriceLabel.trim()
@@ -4254,6 +4322,53 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
         : 'https://scallion.uno/pricing',
     updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
   }
+}
+
+function sanitizeScallionPlan(value: unknown): ScallionPlan | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const item = value as Partial<ScallionPlan>
+  const key = typeof item.key === 'string' ? item.key.trim() : ''
+  const name = typeof item.name === 'string' ? item.name.trim() : ''
+  if (!key && !name) return undefined
+  const list = (input: unknown) =>
+    Array.isArray(input)
+      ? input.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim())
+      : []
+  const number = (input: unknown) => {
+    if (input === undefined || input === null || input === '') return undefined
+    const parsed = typeof input === 'number' ? input : Number(input)
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed) : undefined
+  }
+  const externalApi =
+    typeof item.externalApi === 'boolean'
+      ? item.externalApi
+      : typeof item.externalApi === 'string' && item.externalApi.trim()
+        ? item.externalApi.trim()
+        : undefined
+  return {
+    key: key || name.toLowerCase() || 'free',
+    name: name || key || 'Free',
+    expiresAt: typeof item.expiresAt === 'string' || item.expiresAt === null ? item.expiresAt : undefined,
+    availableModels: list(item.availableModels),
+    manualModels: list(item.manualModels),
+    autoModels: list(item.autoModels),
+    autoMonthlyCalls: number(item.autoMonthlyCalls),
+    autoDailyCalls: number(item.autoDailyCalls),
+    externalApi,
+    updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
+  }
+}
+
+function sanitizeStringArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : undefined
+}
+
+function sanitizeNonNegativeNumber(value: unknown) {
+  if (value === undefined || value === null || value === '') return undefined
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? Math.max(0, number) : undefined
 }
 
 function sanitizeModelCallCacheMetrics(value: unknown): ModelCallCacheMetric[] {
