@@ -12,6 +12,7 @@ use uuid::Uuid;
 pub const COMPUTER_OBSERVATION_TTL_MS: u64 = 30_000;
 const MAX_COMPUTER_OBSERVATIONS: usize = 32;
 const MAX_COMPUTER_PREVIEWS: usize = 32;
+const MAX_COMPUTER_MODEL_TARGETS: usize = 96;
 const COMPUTER_APPROVAL_TTL_MS: u64 = 30_000;
 const COMPUTER_RUN_GRANT_TTL_MS: u64 = 10 * 60_000;
 
@@ -30,6 +31,7 @@ pub struct ComputerWindow {
     pub app_id: String,
     pub title: String,
     pub fingerprint: String,
+    pub stable_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -375,6 +377,7 @@ impl ComputerObservationStore {
         confirmed: bool,
         now: u64,
     ) -> Result<ComputerApprovalGrant, WorkAssistantError> {
+        self.prune(now);
         if !confirmed {
             return Err(WorkAssistantError::cancelled(
                 "native computer action confirmation was declined",
@@ -406,7 +409,7 @@ impl ComputerObservationStore {
                 StoredComputerRunGrant {
                     run_id: run_id.into(),
                     app_id: observation.observation.window.app_id.clone(),
-                    window_fingerprint: observation.observation.window.fingerprint.clone(),
+                    window_fingerprint: observation.observation.window.stable_fingerprint.clone(),
                     expires_at: now.saturating_add(COMPUTER_RUN_GRANT_TTL_MS),
                 },
             );
@@ -541,7 +544,7 @@ impl ComputerObservationStore {
             && self.run_grants.get(&request.run_id).is_some_and(|grant| {
                 grant.run_id == request.run_id
                     && grant.app_id == window.app_id
-                    && grant.window_fingerprint == window.fingerprint
+                    && grant.window_fingerprint == window.stable_fingerprint
                     && grant.expires_at > now
             })
     }
@@ -693,6 +696,17 @@ fn assess_observation_surface(
         });
     }
     Ok(())
+}
+
+fn truncate_model_visible_targets(
+    window: &ComputerWindow,
+    targets: Vec<ComputerTarget>,
+) -> Result<Vec<ComputerTarget>, WorkAssistantError> {
+    assess_observation_surface(window, &targets)?;
+    Ok(targets
+        .into_iter()
+        .take(MAX_COMPUTER_MODEL_TARGETS)
+        .collect())
 }
 
 fn contains_sensitive_marker(surface: &str) -> bool {
@@ -1028,6 +1042,39 @@ mod platform {
     use super::*;
 
     #[cfg(windows)]
+    fn assess_complete_accessibility_surface(
+        window: &ComputerWindow,
+        elements: &[uiautomation::UIElement],
+    ) -> Result<(), WorkAssistantError> {
+        if contains_sensitive_marker(&window.title.to_lowercase()) {
+            return Err(WorkAssistantError {
+                code: "sensitive_surface".into(),
+                message: "sensitive desktop surface is blocked".into(),
+                recoverable: true,
+            });
+        }
+
+        for element in elements {
+            let name = element.get_name().unwrap_or_default();
+            let role = element
+                .get_control_type()
+                .ok()
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_default();
+            if contains_sensitive_marker(&name.to_lowercase())
+                || contains_sensitive_marker(&role.to_lowercase())
+            {
+                return Err(WorkAssistantError {
+                    code: "sensitive_surface".into(),
+                    message: "sensitive desktop surface is blocked".into(),
+                    recoverable: true,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
     pub fn observe_foreground(now: u64) -> Result<ComputerObservation, WorkAssistantError> {
         use uiautomation::screenshots::Screenshot;
         use uiautomation::{types::TreeScope, UIAutomation};
@@ -1057,6 +1104,7 @@ mod platform {
             app_id,
             title,
             fingerprint: fingerprint(&[&window_handle, &screenshot_fingerprint]),
+            stable_fingerprint: fingerprint(&[&window_handle]),
         };
         let mut accessible_elements = vec![focused.clone()];
         accessible_elements.extend(
@@ -1067,11 +1115,15 @@ mod platform {
                         WorkAssistantError::blocked("could not inspect accessibility targets")
                     })?,
                 )
-                .unwrap_or_default(),
+                .map_err(|_| {
+                    WorkAssistantError::blocked("could not inspect the complete accessibility tree")
+                })?,
         );
+        // The complete UIA tree stays local; only the bounded target subset is persisted.
+        assess_complete_accessibility_surface(&window, &accessible_elements)?;
         let targets = accessible_elements
             .into_iter()
-            .take(96)
+            .take(MAX_COMPUTER_MODEL_TARGETS)
             .enumerate()
             .filter_map(|(index, element)| {
                 let name = element.get_name().unwrap_or_default();
@@ -1157,6 +1209,7 @@ mod platform {
             app_id,
             title,
             fingerprint: fingerprint(&[&window_handle, &screenshot_fingerprint]),
+            stable_fingerprint: fingerprint(&[&window_handle]),
         };
         let mut elements = vec![focused.clone()];
         elements.extend(
@@ -1167,11 +1220,19 @@ mod platform {
                         WorkAssistantError::blocked("could not inspect accessibility targets")
                     })?,
                 )
-                .unwrap_or_default(),
+                .map_err(|_| {
+                    WorkAssistantError::blocked("could not inspect the complete accessibility tree")
+                })?,
         );
+        // Recheck the complete native tree immediately before dispatching an action.
+        assess_complete_accessibility_surface(&dispatch_window, &elements)?;
         let mut dispatch_targets = Vec::new();
         let mut matched = None;
-        for (index, element) in elements.into_iter().take(96).enumerate() {
+        for (index, element) in elements
+            .into_iter()
+            .take(MAX_COMPUTER_MODEL_TARGETS)
+            .enumerate()
+        {
             let name = element.get_name().unwrap_or_default();
             let role = element
                 .get_control_type()
@@ -1357,6 +1418,7 @@ mod tests {
                 app_id: "app".into(),
                 title: "Window".into(),
                 fingerprint: window.into(),
+                stable_fingerprint: window.into(),
             },
             targets: vec![ComputerTarget {
                 id: "target-1".into(),
@@ -1522,12 +1584,10 @@ mod tests {
         );
         let preview = store.create_preview(request(), 102).unwrap();
         let stored = store.previews.get(&preview.id).unwrap().clone();
+        let mut refreshed_screen = observation("current", "window-v2", "target-v1", 200);
+        refreshed_screen.window.stable_fingerprint = "window-v1".into();
         let changed = store
-            .validate_execution(
-                &stored,
-                &observation("current", "window-v2", "target-v1", 200),
-                102,
-            )
+            .validate_execution(&stored, &refreshed_screen, 102)
             .unwrap_err();
         assert_eq!(changed.code, "window_changed");
     }
@@ -1564,7 +1624,8 @@ mod tests {
                 &ComputerWindow {
                     app_id: "app".into(),
                     title: "Window".into(),
-                    fingerprint: "window".into()
+                    fingerprint: "window".into(),
+                    stable_fingerprint: "window".into(),
                 },
                 &password
             )
@@ -1580,6 +1641,7 @@ mod tests {
             app_id: "browser".into(),
             title: "Checkout".into(),
             fingerprint: "window".into(),
+            stable_fingerprint: "window".into(),
         };
         let continue_button = ComputerTarget {
             id: "target-1".into(),
@@ -1613,6 +1675,39 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_accessibility_target_beyond_model_limit_is_blocked() {
+        let window = ComputerWindow {
+            app_id: "browser".into(),
+            title: "Account settings".into(),
+            fingerprint: "window".into(),
+            stable_fingerprint: "window".into(),
+        };
+        let mut targets = (0..96)
+            .map(|index| ComputerTarget {
+                id: format!("target-{index}"),
+                role: Some("Button".into()),
+                name: Some("Continue".into()),
+                fingerprint: format!("target-{index}"),
+                bounds: None,
+            })
+            .collect::<Vec<_>>();
+        targets.push(ComputerTarget {
+            id: "target-96".into(),
+            role: Some("Edit".into()),
+            name: Some("Password".into()),
+            fingerprint: "target-96".into(),
+            bounds: None,
+        });
+
+        assert_eq!(
+            truncate_model_visible_targets(&window, targets)
+                .unwrap_err()
+                .code,
+            "sensitive_surface"
+        );
+    }
+
+    #[test]
     fn renderer_observation_omits_window_titles_and_edit_names() {
         let observation = ComputerObservation {
             id: "observe-1".into(),
@@ -1620,6 +1715,7 @@ mod tests {
                 app_id: "writer".into(),
                 title: "Alice private notes".into(),
                 fingerprint: "window-1".into(),
+                stable_fingerprint: "window-1".into(),
             },
             targets: vec![
                 ComputerTarget {
@@ -1673,6 +1769,28 @@ mod tests {
     }
 
     #[test]
+    fn expired_native_run_confirmation_cannot_leave_a_run_grant() {
+        let mut store = ComputerObservationStore::default();
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 3),
+            0,
+        );
+        let mut focus = request();
+        focus.action = "computer_focus".into();
+        let preview = store.create_preview(focus, 1).unwrap();
+
+        assert_eq!(
+            store
+                .approve_after_native_confirmation(&preview.id, "run-1", "run", true, 3)
+                .unwrap_err()
+                .code,
+            "blocked"
+        );
+        assert!(!store.run_grants.contains_key("run-1"));
+    }
+
+    #[test]
     fn reversible_run_grant_applies_only_to_the_same_run_and_window() {
         let mut store = ComputerObservationStore::default();
         store.insert_for_run(
@@ -1690,6 +1808,20 @@ mod tests {
 
         let same_window = store.create_preview(focus.clone(), 3).unwrap();
         assert!(!same_window.approval_required);
+
+        let mut refreshed_window = observation("observe-2", "window-v2", "target-v2", 100_000);
+        refreshed_window.window.stable_fingerprint = "window-v1".into();
+        store.insert_for_run("run-1", refreshed_window, 3);
+        let mut refreshed_focus = focus.clone();
+        refreshed_focus.observation_id = "observe-2".into();
+        refreshed_focus.window_fingerprint = "window-v2".into();
+        refreshed_focus.target_fingerprint = "target-v2".into();
+        assert!(
+            !store
+                .create_preview(refreshed_focus, 3)
+                .unwrap()
+                .approval_required
+        );
 
         let mut high_risk = focus.clone();
         high_risk.action = "computer_click".into();
@@ -1722,6 +1854,7 @@ mod tests {
             app_id: "app".into(),
             title: "Window".into(),
             fingerprint: "window-v1".into(),
+            stable_fingerprint: "window-v1".into(),
         };
         let expected = ComputerTarget {
             id: "target-1".into(),
@@ -1749,6 +1882,7 @@ mod tests {
             app_id: "browser".into(),
             title: "Window".into(),
             fingerprint: "window-v1".into(),
+            stable_fingerprint: "window-v1".into(),
         };
         let target = ComputerTarget {
             id: "continue".into(),
