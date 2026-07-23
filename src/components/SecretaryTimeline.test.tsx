@@ -152,11 +152,11 @@ describe('SecretaryTimeline', () => {
     expect(entry).toHaveTextContent('apiKey: [已隐藏]')
     expect(entry).toHaveTextContent('password: [已隐藏]')
     expect(entry).toHaveTextContent('elementToken: [已隐藏]')
-    expect(screen.queryByText('secret-run-token')).not.toBeInTheDocument()
-    expect(screen.queryByText('secret-auth')).not.toBeInTheDocument()
-    expect(screen.queryByText('secret-api-key')).not.toBeInTheDocument()
-    expect(screen.queryByText('secret-password')).not.toBeInTheDocument()
-    expect(screen.queryByText('secret-element')).not.toBeInTheDocument()
+    expect(entry).not.toHaveTextContent('secret-run-token')
+    expect(entry).not.toHaveTextContent('secret-auth')
+    expect(entry).not.toHaveTextContent('secret-api-key')
+    expect(entry).not.toHaveTextContent('secret-password')
+    expect(entry).not.toHaveTextContent('secret-element')
   })
 
   it('redacts complete whitespace-containing authorization, cookie, token, and bearer credentials', () => {
@@ -165,7 +165,7 @@ describe('SecretaryTimeline', () => {
       'Authorization Basic direct credential secret',
       'cookie: cookie secret with spaces',
       'token: multi word token secret',
-      'Bearer standalone credential value',
+      'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature',
       '已完成。',
     ].join('\n')
     render(
@@ -188,7 +188,7 @@ describe('SecretaryTimeline', () => {
       'direct credential secret',
       'cookie secret with spaces',
       'multi word token secret',
-      'standalone credential value',
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature',
     ]
     credentialFragments.forEach((fragment) => expect(entry).not.toHaveTextContent(fragment))
   })
@@ -212,6 +212,24 @@ describe('SecretaryTimeline', () => {
     expect(entry).not.toHaveTextContent('message-secret-value')
     expect(screen.getByText('连接失败，Basic [已隐藏]')).toBeInTheDocument()
     expect(screen.queryByText('error-secret-value')).not.toBeInTheDocument()
+  })
+
+  it('preserves ordinary basic and bearer prose while still redacting credential-shaped values', () => {
+    const ordinaryProse = [
+      '这是一个 basic 计划，先整理资料。',
+      'Bearer 是授权方案的名称，不是凭证。',
+    ].join('\n')
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'running', messageText: ordinaryProse }}
+      />,
+    )
+
+    const entry = screen.getByTestId('secretary-work-assistant-message')
+    expect(entry).toHaveTextContent('这是一个 basic 计划，先整理资料。')
+    expect(entry).toHaveTextContent('Bearer 是授权方案的名称，不是凭证。')
   })
 
   it('redacts quoted and bare sensitive field variants without leaking value fragments', () => {
@@ -290,8 +308,11 @@ describe('SecretaryTimeline', () => {
       />,
     )
 
-    expect(screen.getByText(/已整理好访谈结构。 elementToken: \[已隐藏\]/)).toBeInTheDocument()
-    expect(screen.queryByText('secret-element')).not.toBeInTheDocument()
+    const renderedMessage = screen.getByText('已整理好访谈结构。 elementToken: [已隐藏]')
+    const entry = renderedMessage.closest('[data-testid="secretary-timeline-entry"]')
+    expect(entry).not.toBeNull()
+    expect(entry).toHaveTextContent('已整理好访谈结构。 elementToken: [已隐藏]')
+    expect(entry).not.toHaveTextContent('secret-element')
     expect(screen.queryByTestId('secretary-work-assistant-message')).not.toBeInTheDocument()
   })
 

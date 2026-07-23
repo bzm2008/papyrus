@@ -480,16 +480,14 @@ function publicToolCall(toolCall: AssistantToolCall): AssistantToolCall {
 
 const sensitiveDisplayFieldPattern = /(["']?)\b(elementtoken|token|secret|password|passcode|api(?:[_ -]?key)|authorization|cookie)\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi
 const authorizationSchemePattern = /\b(authorization)\s+(?:basic|bearer)\b[^\r\n]*/gi
-const basicCredentialPattern = /\bbasic\s+[^\r\n]*/gi
-const bearerCredentialPattern = /\bbearer\s+[^\r\n]*/gi
+const standaloneCredentialPattern = /\b(basic|bearer)\s+([A-Za-z0-9][A-Za-z0-9._~+/=-]{15,})(?=$|[\s,;，；)）\]}])/gi
 
 function safeSecretaryDisplayText(text: string) {
   return text
     .trim()
     .replace(sensitiveDisplayFieldPattern, (_match, _quote: string, key: string) => `${key}: [已隐藏]`)
     .replace(authorizationSchemePattern, (_match, key: string) => `${key}: [已隐藏]`)
-    .replace(basicCredentialPattern, 'Basic [已隐藏]')
-    .replace(bearerCredentialPattern, 'Bearer [已隐藏]')
+    .replace(standaloneCredentialPattern, (_match, scheme: string) => `${scheme[0].toUpperCase()}${scheme.slice(1).toLowerCase()} [已隐藏]`)
     .slice(0, 4000)
 }
 
