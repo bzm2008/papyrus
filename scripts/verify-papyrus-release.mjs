@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
-import { createPublicKey, verify } from 'node:crypto'
+import { createHash, createPublicKey, verify } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex')
-const ED25519_MINISIGN_PREFIX = Buffer.from('Ed')
+const MINISIGN_ALGORITHMS = new Set(['Ed', 'ED'])
+const TRUSTED_COMMENT_PREFIX = 'trusted comment: '
 
 function decodeBase64(value, label) {
   if (typeof value !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
@@ -27,29 +28,66 @@ function unwrapMinisignDocument(value, label) {
   return text
 }
 
-function minisignRecord(value, expectedLength, label) {
+function minisignDocumentLines(value, label) {
   const lines = unwrapMinisignDocument(value, label).replace(/\r\n/g, '\n').split('\n')
   if (lines.at(-1) === '') lines.pop()
+  return lines
+}
+
+function minisignAlgorithm(record, label) {
+  const algorithm = record.subarray(0, 2).toString('ascii')
+  if (!MINISIGN_ALGORITHMS.has(algorithm)) throw new Error(`${label} uses an unsupported minisign algorithm`)
+  return algorithm
+}
+
+function minisignPublicKeyRecord(publicKey) {
+  const label = 'Tauri updater public key'
+  const lines = minisignDocumentLines(publicKey, label)
   if (lines.length !== 2 || !lines[0].startsWith('untrusted comment:')) {
     throw new Error(`${label} must be a two-line minisign document`)
   }
   const record = decodeBase64(lines[1], `${label} record`)
-  if (record.length !== expectedLength || !record.subarray(0, 2).equals(ED25519_MINISIGN_PREFIX)) {
-    throw new Error(`${label} does not contain an Ed25519 minisign record`)
-  }
+  if (record.length !== 42) throw new Error(`${label} does not contain an Ed25519 minisign record`)
+  minisignAlgorithm(record, label)
   return record
 }
 
-function minisignPublicKeyRecord(publicKey) {
-  return minisignRecord(publicKey, 42, 'Tauri updater public key')
+function tauriUpdaterSignatureDocument(signature) {
+  const label = 'Tauri updater signature'
+  const lines = minisignDocumentLines(signature, label)
+  if (
+    lines.length !== 4 ||
+    !lines[0].startsWith('untrusted comment:') ||
+    !lines[2].startsWith(TRUSTED_COMMENT_PREFIX)
+  ) {
+    throw new Error(`${label} must be a complete four-line minisign document`)
+  }
+  const record = decodeBase64(lines[1], `${label} record`)
+  if (record.length !== 74) throw new Error(`${label} does not contain an Ed25519 minisign record`)
+  const globalSignature = decodeBase64(lines[3], `${label} global signature`)
+  if (globalSignature.length !== 64) throw new Error(`${label} does not contain an Ed25519 global signature`)
+  return {
+    algorithm: minisignAlgorithm(record, label),
+    globalSignature,
+    keyId: record.subarray(2, 10),
+    record,
+    signature: record.subarray(10),
+    trustedComment: lines[2].slice(TRUSTED_COMMENT_PREFIX.length),
+    untrustedComment: lines[0],
+  }
 }
 
 export function parseTauriUpdaterSignature(signature) {
-  return minisignRecord(signature, 74, 'Tauri updater signature')
+  return tauriUpdaterSignatureDocument(signature).record
 }
 
 export function equalTauriUpdaterSignatures(left, right) {
-  return parseTauriUpdaterSignature(left).equals(parseTauriUpdaterSignature(right))
+  const leftDocument = tauriUpdaterSignatureDocument(left)
+  const rightDocument = tauriUpdaterSignatureDocument(right)
+  return leftDocument.record.equals(rightDocument.record) &&
+    leftDocument.globalSignature.equals(rightDocument.globalSignature) &&
+    leftDocument.trustedComment === rightDocument.trustedComment &&
+    leftDocument.untrustedComment === rightDocument.untrustedComment
 }
 
 export function parseTauriUpdaterPublicKey(publicKey) {
@@ -70,11 +108,19 @@ export async function readTauriUpdaterPublicKey(configPath = new URL('../src-tau
 
 export function verifyTauriUpdaterSignature({ artifact, signature, publicKey }) {
   try {
-    const encodedSignature = parseTauriUpdaterSignature(signature)
+    const updaterSignature = tauriUpdaterSignatureDocument(signature)
     const key = parseTauriUpdaterPublicKey(publicKey)
     const encodedPublicKey = minisignPublicKeyRecord(publicKey)
-    if (!encodedPublicKey.subarray(2, 10).equals(encodedSignature.subarray(2, 10))) return false
-    return verify(null, artifact, key, encodedSignature.subarray(10))
+    if (!encodedPublicKey.subarray(2, 10).equals(updaterSignature.keyId)) return false
+    const payload = updaterSignature.algorithm === 'ED'
+      ? createHash('blake2b512').update(artifact).digest()
+      : artifact
+    if (!verify(null, payload, key, updaterSignature.signature)) return false
+    const globalPayload = Buffer.concat([
+      updaterSignature.signature,
+      Buffer.from(updaterSignature.trustedComment, 'utf8'),
+    ])
+    return verify(null, globalPayload, key, updaterSignature.globalSignature)
   } catch {
     return false
   }

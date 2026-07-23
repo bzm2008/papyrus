@@ -156,6 +156,44 @@ function runManifestBuilder(artifactsDir, output) {
   ], { encoding: 'utf8' })
 }
 
+function createTauriSigningMaterial({ keyId = Buffer.alloc(8, 7), publicKeyAlgorithm = 'Ed' } = {}) {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+  const rawPublicKey = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)
+  return {
+    privateKey,
+    keyId: Buffer.from(keyId),
+    tauriPublicKey: [
+      'untrusted comment: minisign public key',
+      Buffer.concat([Buffer.from(publicKeyAlgorithm), keyId, rawPublicKey]).toString('base64'),
+    ].join('\n'),
+  }
+}
+
+function createTauriMinisignSignature({
+  artifact,
+  signingMaterial,
+  algorithm = 'ED',
+  keyId = signingMaterial.keyId,
+  trustedComment = 'trusted comment: timestamp:1777777777\tfile:Papyrus',
+}) {
+  const payload = algorithm === 'ED'
+    ? createHash('blake2b512').update(artifact).digest()
+    : artifact
+  const primarySignature = sign(null, payload, signingMaterial.privateKey)
+  const record = Buffer.concat([Buffer.from(algorithm), keyId, primarySignature])
+  const globalPayload = Buffer.concat([
+    primarySignature,
+    Buffer.from(trustedComment.slice('trusted comment: '.length), 'utf8'),
+  ])
+  const globalSignature = sign(null, globalPayload, signingMaterial.privateKey)
+  return [
+    'untrusted comment: signature from minisign secret key',
+    record.toString('base64'),
+    trustedComment,
+    globalSignature.toString('base64'),
+  ].join('\n')
+}
+
 test('release checks pass for a complete fixture in both phases', async () => {
   const rootDir = await fixture()
   try {
@@ -458,40 +496,81 @@ test('update manifest rejects missing or empty updater sidecars', async () => {
   }
 })
 
-test('local release verification rejects an artifact forged with an unchanged updater signature', async () => {
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+test('local release verification accepts complete Tauri minisign documents in bare and wrapper forms', async () => {
   const artifact = Buffer.from('signed release artifact')
-  const keyId = Buffer.alloc(8, 7)
-  const rawPublicKey = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)
-  const tauriPublicKey = [
-    'untrusted comment: minisign public key',
-    Buffer.concat([Buffer.from('Ed'), keyId, rawPublicKey]).toString('base64'),
-  ].join('\n')
-  const minisignSignature = [
-    'untrusted comment: signature from minisign secret key',
-    Buffer.concat([Buffer.from('Ed'), keyId, sign(null, artifact, privateKey)]).toString('base64'),
-  ].join('\n')
-  const wrappedTauriPublicKey = Buffer.from(tauriPublicKey, 'utf8').toString('base64')
-  const wrappedTauriSignature = Buffer.from(minisignSignature, 'utf8').toString('base64')
-  const mismatchedKeyIdSignature = [
-    'untrusted comment: signature from another minisign key',
-    Buffer.concat([Buffer.from('Ed'), Buffer.alloc(8, 8), sign(null, artifact, privateKey)]).toString('base64'),
-  ].join('\n')
-  const ambiguousSignature = `${minisignSignature}\n${Buffer.concat([Buffer.from('Ed'), keyId, sign(null, artifact, privateKey)]).toString('base64')}`
-
+  const signingMaterial = createTauriSigningMaterial()
+  const wrappedTauriPublicKey = Buffer.from(signingMaterial.tauriPublicKey, 'utf8').toString('base64')
   const { verifyTauriUpdaterSignature } = await import('../verify-papyrus-release.mjs')
 
-  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: minisignSignature, publicKey: tauriPublicKey }), true)
-  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: minisignSignature, publicKey: wrappedTauriPublicKey }), true)
-  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: wrappedTauriSignature, publicKey: tauriPublicKey }), true)
-  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: wrappedTauriSignature, publicKey: wrappedTauriPublicKey }), true)
-  assert.equal(
-    verifyTauriUpdaterSignature({ artifact: Buffer.from('forged release artifact'), signature: minisignSignature, publicKey: tauriPublicKey }),
-    false,
-  )
-  assert.equal(verifyTauriUpdaterSignature({ artifact: Buffer.from('forged release artifact'), signature: wrappedTauriSignature, publicKey: wrappedTauriPublicKey }), false)
-  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: mismatchedKeyIdSignature, publicKey: tauriPublicKey }), false)
-  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: ambiguousSignature, publicKey: tauriPublicKey }), false)
+  for (const algorithm of ['Ed', 'ED']) {
+    const signature = createTauriMinisignSignature({ artifact, signingMaterial, algorithm })
+    const wrappedSignature = Buffer.from(signature, 'utf8').toString('base64')
+
+    assert.equal(verifyTauriUpdaterSignature({ artifact, signature, publicKey: signingMaterial.tauriPublicKey }), true)
+    assert.equal(verifyTauriUpdaterSignature({ artifact, signature, publicKey: wrappedTauriPublicKey }), true)
+    assert.equal(verifyTauriUpdaterSignature({ artifact, signature: wrappedSignature, publicKey: signingMaterial.tauriPublicKey }), true)
+    assert.equal(verifyTauriUpdaterSignature({ artifact, signature: wrappedSignature, publicKey: wrappedTauriPublicKey }), true)
+  }
+})
+
+test('local release verification rejects truncated, forged, or wrong-key Tauri minisign documents', async () => {
+  const artifact = Buffer.from('signed release artifact')
+  const signingMaterial = createTauriSigningMaterial()
+  const signature = createTauriMinisignSignature({ artifact, signingMaterial, algorithm: 'ED' })
+  const lines = signature.split('\n')
+  const trustedCommentMutation = [...lines]
+  trustedCommentMutation[2] = 'trusted comment: timestamp:0\tfile:forged'
+  const globalSignatureMutation = [...lines]
+  globalSignatureMutation[3] = Buffer.alloc(64, 9).toString('base64')
+  const wrongKeyId = createTauriMinisignSignature({
+    artifact,
+    signingMaterial,
+    algorithm: 'ED',
+    keyId: Buffer.alloc(8, 8),
+  })
+  const { verifyTauriUpdaterSignature } = await import('../verify-papyrus-release.mjs')
+
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: lines.slice(0, 3).join('\n'), publicKey: signingMaterial.tauriPublicKey }), false)
+  assert.equal(verifyTauriUpdaterSignature({ artifact: Buffer.from('forged release artifact'), signature, publicKey: signingMaterial.tauriPublicKey }), false)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: trustedCommentMutation.join('\n'), publicKey: signingMaterial.tauriPublicKey }), false)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: globalSignatureMutation.join('\n'), publicKey: signingMaterial.tauriPublicKey }), false)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: wrongKeyId, publicKey: signingMaterial.tauriPublicKey }), false)
+})
+
+test('local release verification accepts builder-wrapped complete Tauri minisign sidecars', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-update-manifest-'))
+  try {
+    const artifactsDir = path.join(rootDir, 'artifacts')
+    const output = path.join(rootDir, 'latest.json')
+    const signingMaterial = createTauriSigningMaterial()
+    const signatures = new Map()
+    await fs.mkdir(artifactsDir)
+    for (const name of UPDATER_ASSET_NAMES) {
+      const artifact = Buffer.from(`signed release ${name}`)
+      const signature = createTauriMinisignSignature({ artifact, signingMaterial, algorithm: 'ED' })
+      signatures.set(name, signature)
+      await fs.writeFile(path.join(artifactsDir, name), artifact)
+      await fs.writeFile(path.join(artifactsDir, `${name}.sig`), signature)
+    }
+
+    const result = runManifestBuilder(artifactsDir, output)
+    assert.equal(result.status, 0, result.stderr)
+    const manifest = JSON.parse(await fs.readFile(output, 'utf8'))
+    assert.equal(
+      Buffer.from(manifest.platforms['windows-x86_64'].signature, 'base64').toString('utf8'),
+      signatures.get('Papyrus_1.1.0_x64-setup.exe'),
+    )
+
+    const { verifyLocalReleaseAssets } = await import('../verify-papyrus-release.mjs')
+    await verifyLocalReleaseAssets({
+      artifactsDir,
+      manifestPath: output,
+      publicKey: signingMaterial.tauriPublicKey,
+      expectedVersion: '1.1.0',
+    })
+  } finally {
+    await cleanup(rootDir)
+  }
 })
 
 test('local release verification reads the Ed25519 updater public key from Tauri config', async () => {
