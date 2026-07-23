@@ -140,7 +140,7 @@ describe('SecretaryTimeline', () => {
           ...createEmptyWorkAssistantRun('run-1'),
           status: 'running',
           lastActivityAt: 240,
-          messageText: '{"token":"secret-run-token","authorization":"Bearer secret-auth","apiKey":"secret-api-key","password":"secret-password"} elementToken: secret-element 已完成。',
+          messageText: '{"token":"secret-run-token","authorization":"Bearer secret-auth","apiKey":"secret-api-key","password":"secret-password"} elementToken: secret-element\n已完成。',
         }}
       />,
     )
@@ -157,6 +157,93 @@ describe('SecretaryTimeline', () => {
     expect(screen.queryByText('secret-api-key')).not.toBeInTheDocument()
     expect(screen.queryByText('secret-password')).not.toBeInTheDocument()
     expect(screen.queryByText('secret-element')).not.toBeInTheDocument()
+  })
+
+  it('redacts complete whitespace-containing authorization, cookie, token, and bearer credentials', () => {
+    const credentialText = [
+      'authorization: Basic primary secret value',
+      'Authorization Basic direct credential secret',
+      'cookie: cookie secret with spaces',
+      'token: multi word token secret',
+      'Bearer standalone credential value',
+      '已完成。',
+    ].join('\n')
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'running', messageText: credentialText }}
+      />,
+    )
+
+    const entry = screen.getByTestId('secretary-work-assistant-message')
+    expect(entry).toHaveTextContent('authorization: [已隐藏]')
+    expect(entry).toHaveTextContent('Authorization: [已隐藏]')
+    expect(entry).toHaveTextContent('cookie: [已隐藏]')
+    expect(entry).toHaveTextContent('token: [已隐藏]')
+    expect(entry).toHaveTextContent('Bearer [已隐藏]')
+    expect(entry).toHaveTextContent('已完成。')
+    const credentialFragments = [
+      'primary secret value',
+      'direct credential secret',
+      'cookie secret with spaces',
+      'multi word token secret',
+      'standalone credential value',
+    ]
+    credentialFragments.forEach((fragment) => expect(entry).not.toHaveTextContent(fragment))
+  })
+
+  it('redacts quoted and bare sensitive field variants without leaking value fragments', () => {
+    const credentialText = [
+      '{"secret":"quoted secret","passcode":"quoted passcode","api_key":"quoted underscore","api-key":"quoted dash","cookie":"quoted cookie"}',
+      'secret: bare secret phrase',
+      'passcode: bare passcode phrase',
+      'api_key: bare underscore phrase',
+      'api-key: bare dash phrase',
+      'cookie: bare cookie phrase',
+    ].join('\n')
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'running', messageText: credentialText }}
+      />,
+    )
+
+    const entry = screen.getByTestId('secretary-work-assistant-message')
+    expect(entry).toHaveTextContent('secret: [已隐藏]')
+    expect(entry).toHaveTextContent('passcode: [已隐藏]')
+    expect(entry).toHaveTextContent('api_key: [已隐藏]')
+    expect(entry).toHaveTextContent('api-key: [已隐藏]')
+    expect(entry).toHaveTextContent('cookie: [已隐藏]')
+    const credentialFragments = [
+      'quoted secret',
+      'quoted passcode',
+      'quoted underscore',
+      'quoted dash',
+      'quoted cookie',
+      'secret phrase',
+      'passcode phrase',
+      'underscore phrase',
+      'dash phrase',
+      'cookie phrase',
+    ]
+    credentialFragments.forEach((fragment) => expect(entry).not.toHaveTextContent(fragment))
+  })
+
+  it('caps displayed computer-assistant text at 4000 characters', () => {
+    const longReply = 'x'.repeat(4_001)
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'running', messageText: longReply }}
+      />,
+    )
+
+    const entry = screen.getByTestId('secretary-work-assistant-message')
+    expect(entry).toHaveTextContent('x'.repeat(4_000))
+    expect(entry).not.toHaveTextContent('x'.repeat(4_001))
   })
 
   it('does not repeat a computer-assistant delta already present in Flow messages', () => {

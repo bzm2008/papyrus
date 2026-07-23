@@ -478,13 +478,15 @@ function publicToolCall(toolCall: AssistantToolCall): AssistantToolCall {
   return { ...toolCall, arguments: {} }
 }
 
-const sensitiveDisplayFieldPattern = /(["']?)\b(elementtoken|token|secret|password|passcode|api(?:[_ -]?key)|authorization|cookie)\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|bearer\s+[^\s,;，；}\]]+|[^\s,;，；}\]]+)/gi
-const bearerCredentialPattern = /\bbearer\s+[^\s,;，；}\]]+/gi
+const sensitiveDisplayFieldPattern = /(["']?)\b(elementtoken|token|secret|password|passcode|api(?:[_ -]?key)|authorization|cookie)\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi
+const authorizationSchemePattern = /\b(authorization)\s+(?:basic|bearer)\b[^\r\n]*/gi
+const bearerCredentialPattern = /\bbearer\s+[^\r\n]*/gi
 
 function safeSecretaryDisplayText(text: string) {
   return text
     .trim()
     .replace(sensitiveDisplayFieldPattern, (_match, _quote: string, key: string) => `${key}: [已隐藏]`)
+    .replace(authorizationSchemePattern, (_match, key: string) => `${key}: [已隐藏]`)
     .replace(bearerCredentialPattern, 'Bearer [已隐藏]')
     .slice(0, 4000)
 }
