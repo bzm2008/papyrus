@@ -35,6 +35,7 @@
     "tauri:check:portable": "powershell -ExecutionPolicy Bypass -File scripts/with-portable-msvc.ps1 check",
     "release:check": "powershell -ExecutionPolicy Bypass -File scripts/check-papyrus-release.ps1",
     "release:manifest": "node scripts/build-papyrus-update-manifest.mjs",
+    "release:verify-local": "node scripts/verify-papyrus-release.mjs",
     "env:activate": "powershell -ExecutionPolicy Bypass -NoExit -File scripts/activate-portable-tools.ps1",
     "git:version": ".codex-tools\\MinGit\\cmd\\git.exe --version"
   },

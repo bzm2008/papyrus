@@ -68,6 +68,8 @@ const REQUIRED_OTA_PLATFORMS = [
   'darwin-aarch64',
 ]
 
+const PRODUCTION_RELEASE_WORKFLOW = '.github/workflows/desktop-release.yml'
+
 // Runner names alone do not prove that a workflow exercises the release boundary. Keep these
 // markers deliberately small and platform-neutral so the checker works on Windows, macOS, and
 // Linux without introducing a YAML parser dependency. The workflow files remain human-readable
@@ -346,6 +348,10 @@ async function checkVersionConsistency(rootDir) {
   if (manifestScript === null || !manifestScript.includes('Papyrus ${version}')) {
     failures.push('scripts/build-papyrus-update-manifest.mjs must derive release notes from its version argument')
   }
+  const staticChecksums = await readText(rootDir, 'os-integration/debian13/SHA256SUMS')
+  if (staticChecksums?.includes(`Papyrus_${version}_`)) {
+    failures.push('os-integration/debian13/SHA256SUMS must not claim the current package version; generate release checksums from built assets')
+  }
   return failures
 }
 
@@ -389,6 +395,16 @@ async function checkWorkflowSemantics(rootDir, relativePath, requiredMarkers) {
     .map(([description, marker]) => `${relativePath} must ${description} (missing: ${marker})`)
 }
 
+async function checkWorkflowOrdering(rootDir, relativePath, beforeMarker, afterMarker, description) {
+  const text = await readText(rootDir, relativePath)
+  if (text === null) return []
+  const normalizedText = text.toLowerCase().replace(/\s+/g, ' ')
+  const before = normalizedText.indexOf(beforeMarker.toLowerCase().replace(/\s+/g, ' '))
+  const after = normalizedText.indexOf(afterMarker.toLowerCase().replace(/\s+/g, ' '))
+  if (before >= 0 && after >= 0 && before < after) return []
+  return [`${relativePath} must ${description} (expected: ${beforeMarker} before ${afterMarker})`]
+}
+
 async function checkReleaseScripts(rootDir) {
   const { value, error } = await readJson(rootDir, 'package.json')
   if (error) return [error]
@@ -419,6 +435,40 @@ async function checkReleaseWorkflows(rootDir) {
   failures.push(...await checkWorkflowSemantics(rootDir, RELEASE_WORKFLOWS[0], WORKFLOW_SEMANTIC_MARKERS[RELEASE_WORKFLOWS[0]]))
   failures.push(...await checkWorkflowSemantics(rootDir, RELEASE_WORKFLOWS[1], WORKFLOW_SEMANTIC_MARKERS[RELEASE_WORKFLOWS[1]]))
   failures.push(...await checkReleaseScripts(rootDir))
+  failures.push(...await checkWorkflowSemantics(rootDir, PRODUCTION_RELEASE_WORKFLOW, [
+    ['run the local static release gate', 'npm run release:assistant-check:local'],
+    ['generate Debian checksums from release assets', 'node scripts/write-debian-checksums.mjs --artifacts release-assets'],
+    ['cryptographically verify local signed updater assets', 'npm run release:verify-local -- --artifacts release-assets'],
+    ['verify published canonical and legacy OTA endpoints', './scripts/check-papyrus-release.ps1'],
+  ]))
+  failures.push(...await checkWorkflowOrdering(
+    rootDir,
+    PRODUCTION_RELEASE_WORKFLOW,
+    'node scripts/write-debian-checksums.mjs --artifacts release-assets',
+    '- name: Create release',
+    'generate Debian checksums from release assets before creating the GitHub release',
+  ))
+  failures.push(...await checkWorkflowOrdering(
+    rootDir,
+    PRODUCTION_RELEASE_WORKFLOW,
+    'npm run release:assistant-check:local',
+    '- name: Create release',
+    'run the local static release gate before creating the GitHub release',
+  ))
+  failures.push(...await checkWorkflowOrdering(
+    rootDir,
+    PRODUCTION_RELEASE_WORKFLOW,
+    'npm run release:verify-local -- --artifacts release-assets',
+    '- name: Create release',
+    'cryptographically verify local signed updater assets before creating the GitHub release',
+  ))
+  failures.push(...await checkWorkflowOrdering(
+    rootDir,
+    PRODUCTION_RELEASE_WORKFLOW,
+    'gh release upload',
+    './scripts/check-papyrus-release.ps1',
+    'verify published canonical and legacy OTA endpoints only after uploading GitHub release assets',
+  ))
   const overlays = {
     'src-tauri/ci/windows.json': ['nsis'],
     'src-tauri/ci/macos.json': ['app', 'dmg'],
@@ -471,6 +521,7 @@ export const _internal = {
   checkCommands,
   checkDocumentation,
   checkWorkflowSemantics,
+  checkWorkflowOrdering,
   checkReleaseScripts,
   checkReleaseWorkflows,
   validateOtaEndpointPair,

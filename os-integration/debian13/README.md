@@ -86,4 +86,5 @@ only when a complete data reset is intended.
 * Debian 13 (amd64) or a compatible Debian-based system.
 * `dpkg-deb` for `.deb` assets, or FUSE/AppImage support for AppImage assets.
 * A graphical session for the desktop entry.
-* `sha256sum` to verify the pinned assets listed in `SHA256SUMS`.
+* `sha256sum` to verify the release-specific `Papyrus_<version>_SHA256SUMS` asset. The local
+  `SHA256SUMS` file is retained only as historical evidence for previous releases.

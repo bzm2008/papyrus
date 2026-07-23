@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -45,6 +46,7 @@ async function fixture() {
   await fs.mkdir(path.join(rootDir, 'os-integration', 'debian13'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'README.md'), 'Papyrus 0.1.2\n')
   await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'install-papyrus.sh'), '# Papyrus 0.1.2\n')
+  await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'SHA256SUMS'), 'deadbeef  Papyrus_0.1.1_amd64.deb\n')
   await fs.mkdir(path.join(rootDir, 'scripts'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'scripts', 'check-papyrus-release.ps1'), '$ExpectedVersion = (Get-Content package.json | ConvertFrom-Json).version\n')
   await fs.writeFile(path.join(rootDir, 'scripts', 'build-papyrus-update-manifest.mjs'), 'notes: `Papyrus ${version}`\n')
@@ -95,6 +97,16 @@ async function fixture() {
   `
   await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-ci.yml'), desktopWorkflow)
   await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-packages.yml'), packageWorkflow)
+  await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-release.yml'), `
+    - run: node scripts/write-debian-checksums.mjs --artifacts release-assets
+    - run: npm run browser:build
+    - run: npm run release:assistant-check:local
+    - run: npm run release:verify-local -- --artifacts release-assets
+    - name: Create release
+      run: gh release create v0.1.2
+    - run: gh release upload v0.1.2
+    - run: ./scripts/check-papyrus-release.ps1
+  `)
   await fs.mkdir(path.join(rootDir, 'src-tauri', 'ci'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'ci', 'windows.json'), JSON.stringify({ bundle: { targets: ['nsis'], createUpdaterArtifacts: false } }))
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'ci', 'macos.json'), JSON.stringify({ bundle: { targets: ['app', 'dmg'], createUpdaterArtifacts: false } }))
@@ -249,6 +261,131 @@ test('release phase fails when a workflow has runners but misses required releas
   } finally {
     await cleanup(rootDir)
   }
+})
+
+test('release phase requires the production workflow to run the static release gate', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-release.yml'), '- run: npm run browser:build\n')
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('desktop-release.yml must run the local static release gate')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release phase requires pre-publish checksum and crypto gates before the remote OTA check', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-release.yml'), `
+      - run: npm run browser:build
+      - run: npm run release:assistant-check:local
+      - run: gh release upload v0.1.2
+      - run: ./scripts/check-papyrus-release.ps1
+    `)
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('generate Debian checksums from release assets before creating the GitHub release')))
+    assert.ok(report.failures.some((failure) => failure.includes('cryptographically verify local signed updater assets before creating the GitHub release')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release phase requires the remote OTA check after GitHub release upload', async () => {
+  const rootDir = await fixture()
+  try {
+    const workflowPath = path.join(rootDir, '.github', 'workflows', 'desktop-release.yml')
+    const workflow = await fs.readFile(workflowPath, 'utf8')
+    await fs.writeFile(workflowPath, workflow.replace(
+      '- run: gh release upload v0.1.2\n    - run: ./scripts/check-papyrus-release.ps1',
+      '- run: ./scripts/check-papyrus-release.ps1\n    - run: gh release upload v0.1.2',
+    ))
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('verify published canonical and legacy OTA endpoints only after uploading GitHub release assets')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('Debian checksum generation hashes the current 1.1.0 release assets', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-debian-checksum-'))
+  try {
+    const artifactsDir = path.join(rootDir, 'artifacts')
+    const bundleDir = path.join(artifactsDir, 'linux-x86_64', 'release', 'bundle')
+    await fs.mkdir(bundleDir, { recursive: true })
+    await fs.writeFile(path.join(bundleDir, 'Papyrus_1.1.0_amd64.deb'), 'new-debian-release')
+    await fs.writeFile(path.join(bundleDir, 'Papyrus_1.1.0_amd64.AppImage'), 'new-appimage-release')
+
+    const { generateDebianChecksums } = await import('../write-debian-checksums.mjs')
+    const output = await generateDebianChecksums({ artifactsDir, version: '1.1.0' })
+
+    assert.deepEqual(output.entries.map((entry) => entry.name), [
+      'Papyrus_1.1.0_amd64.deb',
+      'Papyrus_1.1.0_amd64.AppImage',
+    ])
+    assert.equal(output.entries[0].sha256, createHash('sha256').update('new-debian-release').digest('hex'))
+    assert.match(output.contents, /Papyrus_1\.1\.0_amd64\.deb/)
+    assert.doesNotMatch(output.contents, /Papyrus_1\.0\.0/)
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release checks reject a static checksum file that claims the current release version', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'SHA256SUMS'), 'deadbeef  Papyrus_0.1.2_amd64.deb\n')
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('SHA256SUMS must not claim the current package version')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('the source Debian checksum file remains the verified 1.0.0 historical manifest', async () => {
+  const checksums = await fs.readFile(new URL('../../os-integration/debian13/SHA256SUMS', import.meta.url), 'utf8')
+
+  assert.match(checksums, /^2A6ED8AB5AA65172E9624DB9B05FF14208814DD2381E8D27E05197266088D4EE  Papyrus_1\.0\.0_amd64\.deb$/m)
+  assert.match(checksums, /^8B86F8CB1F9E6E39F0A3FEF9E7B36C57EB8700F7899AD4FEBD8344D0D05531B4  Papyrus_1\.0\.0_amd64\.AppImage$/m)
+  assert.doesNotMatch(checksums, /Papyrus_1\.1\.0_/)
+})
+
+test('local release verification rejects an artifact forged with an unchanged updater signature', async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+  const artifact = Buffer.from('signed release artifact')
+  const keyId = Buffer.alloc(8, 7)
+  const rawPublicKey = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)
+  const tauriPublicKey = [
+    'untrusted comment: minisign public key',
+    Buffer.concat([Buffer.from('Ed'), keyId, rawPublicKey]).toString('base64'),
+  ].join('\n')
+  const minisignSignature = [
+    'untrusted comment: signature from minisign secret key',
+    Buffer.concat([Buffer.from('Ed'), keyId, sign(null, artifact, privateKey)]).toString('base64'),
+  ].join('\n')
+
+  const { verifyTauriUpdaterSignature } = await import('../verify-papyrus-release.mjs')
+
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: minisignSignature, publicKey: tauriPublicKey }), true)
+  assert.equal(
+    verifyTauriUpdaterSignature({ artifact: Buffer.from('forged release artifact'), signature: minisignSignature, publicKey: tauriPublicKey }),
+    false,
+  )
+})
+
+test('local release verification reads the Ed25519 updater public key from Tauri config', async () => {
+  const { parseTauriUpdaterPublicKey, readTauriUpdaterPublicKey } = await import('../verify-papyrus-release.mjs')
+
+  const tauriPublicKey = await readTauriUpdaterPublicKey()
+
+  assert.equal(typeof tauriPublicKey, 'string')
+  assert.equal(parseTauriUpdaterPublicKey(tauriPublicKey).asymmetricKeyType, 'ed25519')
+})
+
+test('online OTA verification removes downloaded artifacts in a finally block', async () => {
+  const checker = await fs.readFile(new URL('../check-papyrus-release.ps1', import.meta.url), 'utf8')
+
+  assert.match(checker, /try\s*\{[\s\S]*?finally\s*\{\s*Remove-Item -LiteralPath \$tempRoot -Recurse -Force -ErrorAction SilentlyContinue\s*\}/)
 })
 
 test('release phase fails when the aggregate script bypasses the release checker', async () => {

@@ -118,6 +118,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ startsWith(github.ref, 'refs/tags/') && github.ref || inputs.tag }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install JavaScript dependencies
+        run: npm ci
       - uses: actions/download-artifact@v4
         with:
           pattern: papyrus-*
@@ -148,13 +154,24 @@ jobs:
           find release-assets -type f -path '*/release/bundle/macos/Papyrus.app.tar.gz*' -delete
       - name: Build signed OTA manifest
         run: node scripts/build-papyrus-update-manifest.mjs --artifacts release-assets --version "${{ steps.version.outputs.version }}" --output release-assets/latest.json
+      - name: Generate Debian release checksums
+        run: node scripts/write-debian-checksums.mjs --artifacts release-assets --version "${{ steps.version.outputs.version }}"
+      - name: Run static release metadata gate
+        run: |
+          npm run browser:build
+          npm run release:assistant-check:local
+      - name: Verify local signed updater assets
+        run: npm run release:verify-local -- --artifacts release-assets --manifest release-assets/latest.json --version "${{ steps.version.outputs.version }}"
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' "Papyrus ${{ steps.version.outputs.version }} production release." 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
           mapfile -d '' release_files < <(find release-assets -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' -o -name 'Papyrus-WPS-Addin_*.zip' \) -print0)
-          gh release upload "${{ steps.version.outputs.tag }}" "${release_files[@]}" release-assets/latest.json --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload "${{ steps.version.outputs.tag }}" "${release_files[@]}" release-assets/latest.json "release-assets/Papyrus_${{ steps.version.outputs.version }}_SHA256SUMS" --repo "${GITHUB_REPOSITORY}" --clobber
+      - name: Verify published OTA endpoints
+        shell: pwsh
+        run: ./scripts/check-papyrus-release.ps1 -ExpectedVersion "${{ steps.version.outputs.version }}"
       - name: Upload Debian 13 integration bundle
         env:
           GH_TOKEN: ${{ github.token }}
