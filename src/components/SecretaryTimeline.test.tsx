@@ -131,6 +131,34 @@ describe('SecretaryTimeline', () => {
     expect(screen.queryByText('secret-run-token')).not.toBeInTheDocument()
   })
 
+  it('redacts sensitive JSON fields and element tokens from computer-assistant deltas', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'running',
+          lastActivityAt: 240,
+          messageText: '{"token":"secret-run-token","authorization":"Bearer secret-auth","apiKey":"secret-api-key","password":"secret-password"} elementToken: secret-element 已完成。',
+        }}
+      />,
+    )
+
+    const entry = screen.getByTestId('secretary-work-assistant-message')
+    expect(entry).toHaveTextContent('已完成。')
+    expect(entry).toHaveTextContent('token: [已隐藏]')
+    expect(entry).toHaveTextContent('authorization: [已隐藏]')
+    expect(entry).toHaveTextContent('apiKey: [已隐藏]')
+    expect(entry).toHaveTextContent('password: [已隐藏]')
+    expect(entry).toHaveTextContent('elementToken: [已隐藏]')
+    expect(screen.queryByText('secret-run-token')).not.toBeInTheDocument()
+    expect(screen.queryByText('secret-auth')).not.toBeInTheDocument()
+    expect(screen.queryByText('secret-api-key')).not.toBeInTheDocument()
+    expect(screen.queryByText('secret-password')).not.toBeInTheDocument()
+    expect(screen.queryByText('secret-element')).not.toBeInTheDocument()
+  })
+
   it('does not repeat a computer-assistant delta already present in Flow messages', () => {
     render(
       <SecretaryTimeline
@@ -141,6 +169,21 @@ describe('SecretaryTimeline', () => {
     )
 
     expect(screen.getAllByText('我已整理好访谈结构。')).toHaveLength(1)
+    expect(screen.queryByTestId('secretary-work-assistant-message')).not.toBeInTheDocument()
+  })
+
+  it('redacts a computer-assistant delta after it is merged into Flow messages', () => {
+    const response = '已整理好访谈结构。 elementToken: secret-element'
+    render(
+      <SecretaryTimeline
+        messages={[message(), message({ id: 'reply-1', role: 'assistant', content: response, createdAt: 240 })]}
+        runState="running"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'running', lastActivityAt: 240, messageText: response }}
+      />,
+    )
+
+    expect(screen.getByText(/已整理好访谈结构。 elementToken: \[已隐藏\]/)).toBeInTheDocument()
+    expect(screen.queryByText('secret-element')).not.toBeInTheDocument()
     expect(screen.queryByTestId('secretary-work-assistant-message')).not.toBeInTheDocument()
   })
 
@@ -236,6 +279,23 @@ describe('SecretaryTimeline', () => {
     )
     expect(screen.getByText('把访谈整理成大纲')).toBeInTheDocument()
     expect(screen.getByText('本次执行已停止')).toBeInTheDocument()
+  })
+
+  it('redacts credentials in failed computer-assistant status messages', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message({ content: '把访谈整理成大纲' })]}
+        runState="error"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'failed',
+          error: '连接失败，authorization: Bearer secret-token',
+        }}
+      />,
+    )
+
+    expect(screen.getByText('连接失败，authorization: [已隐藏]')).toBeInTheDocument()
+    expect(screen.queryByText('secret-token')).not.toBeInTheDocument()
   })
 
   it('closes the narrow project drawer from the keyboard and returns focus to its trigger', () => {

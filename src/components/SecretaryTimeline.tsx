@@ -104,7 +104,7 @@ function buildSecretaryTimelineItems({
   const latestAssistant = [...visibleMessages].reverse().find((message) => message.role === 'assistant')
   const hasVisibleReply = Boolean(latestAssistant && (!latestUser || latestAssistant.createdAt >= latestUser.createdAt))
   const showActivity = activityStates.has(runState) || Boolean(workAssistantRun && workAssistantRun.status !== 'idle')
-  const workAssistantText = safeWorkAssistantMessage(workAssistantRun?.messageText ?? '')
+  const workAssistantText = safeSecretaryDisplayText(workAssistantRun?.messageText ?? '')
   const hasWorkAssistantMessage = Boolean(
     workAssistantText
     && workAssistantRun
@@ -179,7 +179,7 @@ function buildSecretaryTimelineItems({
       order: 9,
       type: 'run-status',
       status: workAssistantRun.status,
-      message: workAssistantRun.error,
+      message: safeSecretaryDisplayText(workAssistantRun.error ?? ''),
     })
   }
 
@@ -337,13 +337,14 @@ function MessageEntry({
   onRollback?: () => void
 }) {
   const isUser = message.role === 'user'
+  const displayContent = isUser ? message.content : safeSecretaryDisplayText(message.content)
   return (
     <div className={`max-w-[880px] rounded-lg px-3.5 py-2.5 text-sm leading-7 ${isUser ? 'ml-auto bg-[#20201d] text-[#fffefa]' : 'border border-[#e1dccf] bg-[#fffdf7] text-[#2f2b22]'}`}>
       <div className={`mb-1 flex items-center gap-2 text-[11px] font-medium ${isUser ? 'text-[#d6d0c4]' : 'text-[#6f7168]'}`}>
         <span>{isUser ? '你' : '铭荼'}</span>
         {isStreaming ? <span className="text-[#a36f20]">正在回应</span> : null}
       </div>
-      <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{message.content}</div>
+      <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{displayContent}</div>
       {!isUser && isLatestAssistant && !isStreaming && (onRegenerate || onRollback) ? (
         <div className="mt-2 flex items-center gap-1 border-t border-[#e8e0d1] pt-2">
           {onRegenerate ? <IconAction label="重新生成" onClick={onRegenerate}><RotateCcw size={13} /></IconAction> : null}
@@ -477,10 +478,14 @@ function publicToolCall(toolCall: AssistantToolCall): AssistantToolCall {
   return { ...toolCall, arguments: {} }
 }
 
-function safeWorkAssistantMessage(text: string) {
+const sensitiveDisplayFieldPattern = /(["']?)\b(elementtoken|token|secret|password|passcode|api(?:[_ -]?key)|authorization|cookie)\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|bearer\s+[^\s,;，；}\]]+|[^\s,;，；}\]]+)/gi
+const bearerCredentialPattern = /\bbearer\s+[^\s,;，；}\]]+/gi
+
+function safeSecretaryDisplayText(text: string) {
   return text
     .trim()
-    .replace(/\b(token|secret|password|passcode|api[_ -]?key|authorization|cookie)\s*[:=]\s*[^\s,;，；]*/gi, '$1: [已隐藏]')
+    .replace(sensitiveDisplayFieldPattern, (_match, _quote: string, key: string) => `${key}: [已隐藏]`)
+    .replace(bearerCredentialPattern, 'Bearer [已隐藏]')
     .slice(0, 4000)
 }
 
