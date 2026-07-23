@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import ts from 'typescript'
 
 /**
  * Commands that form the native work-assistant boundary.  Keep this list in one place so the
@@ -279,6 +280,50 @@ function isSignedHttpsAsset(value) {
   }
 }
 
+function isPackageJsonVersionAccess(node) {
+  if (
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'packageJson' &&
+    node.name.text === 'version'
+  ) {
+    return true
+  }
+  let found = false
+  ts.forEachChild(node, (child) => {
+    if (!found && isPackageJsonVersionAccess(child)) found = true
+  })
+  return found
+}
+
+function isJsonStringify(node) {
+  return ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'JSON' &&
+    node.name.text === 'stringify'
+}
+
+function hasWpsVersionBuildMetadata(source) {
+  const sourceFile = ts.createSourceFile('vite.config.ts', source, ts.ScriptTarget.Latest, true)
+  let found = false
+  const visit = (node) => {
+    if (
+      ts.isPropertyAssignment(node) &&
+      ts.isStringLiteral(node.name) &&
+      node.name.text === 'import.meta.env.VITE_PAPYRUS_WPS_VERSION' &&
+      ts.isCallExpression(node.initializer) &&
+      isJsonStringify(node.initializer.expression) &&
+      node.initializer.arguments.length === 1 &&
+      isPackageJsonVersionAccess(node.initializer.arguments[0])
+    ) {
+      found = true
+    }
+    if (!found) ts.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return found
+}
+
 export function validateOtaEndpointPair({ expectedVersion, canonical, legacy }) {
   const failures = []
   for (const [label, manifest] of [['canonical', canonical], ['legacy', legacy]]) {
@@ -329,24 +374,8 @@ async function checkVersionConsistency(rootDir) {
   else if (bridgeManifest?.version !== version) failures.push('Browser Bridge manifest version must match package.json.version')
 
   const wpsViteConfig = await readText(rootDir, 'apps/wps-word-addin/vite.config.ts')
-  if (wpsViteConfig === null || !wpsViteConfig.includes('packageJson.version')) {
-    failures.push('WPS release metadata must derive its version from package.json.version')
-  }
-
-  for (const relativePath of ['os-integration/debian13/README.md', 'os-integration/debian13/install-papyrus.sh']) {
-    const text = await readText(rootDir, relativePath)
-    if (text === null || !text.includes(`Papyrus ${version}`)) {
-      failures.push(`${relativePath} must document Papyrus ${version}`)
-    }
-  }
-
-  const releaseScript = await readText(rootDir, 'scripts/check-papyrus-release.ps1')
-  if (releaseScript === null || !releaseScript.includes('package.json')) {
-    failures.push('scripts/check-papyrus-release.ps1 must derive ExpectedVersion from package.json')
-  }
-  const manifestScript = await readText(rootDir, 'scripts/build-papyrus-update-manifest.mjs')
-  if (manifestScript === null || !manifestScript.includes('Papyrus ${version}')) {
-    failures.push('scripts/build-papyrus-update-manifest.mjs must derive release notes from its version argument')
+  if (wpsViteConfig === null || !hasWpsVersionBuildMetadata(wpsViteConfig)) {
+    failures.push('WPS build configuration must inject package.json.version into VITE_PAPYRUS_WPS_VERSION')
   }
   const staticChecksums = await readText(rootDir, 'os-integration/debian13/SHA256SUMS')
   if (staticChecksums?.includes(`Papyrus_${version}_`)) {

@@ -42,7 +42,14 @@ async function fixture() {
   await fs.mkdir(path.join(rootDir, 'apps', 'browser-bridge'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'apps', 'browser-bridge', 'manifest.json'), JSON.stringify({ version: '0.1.2' }))
   await fs.mkdir(path.join(rootDir, 'apps', 'wps-word-addin'), { recursive: true })
-  await fs.writeFile(path.join(rootDir, 'apps', 'wps-word-addin', 'vite.config.ts'), 'const version = packageJson.version\n')
+  await fs.writeFile(path.join(rootDir, 'apps', 'wps-word-addin', 'vite.config.ts'), `
+    const packageJson = { version: '0.1.2' }
+    export default {
+      define: {
+        'import.meta.env.VITE_PAPYRUS_WPS_VERSION': JSON.stringify(packageJson.version ?? 'dev'),
+      },
+    }
+  `)
   await fs.mkdir(path.join(rootDir, 'os-integration', 'debian13'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'README.md'), 'Papyrus 0.1.2\n')
   await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'install-papyrus.sh'), '# Papyrus 0.1.2\n')
@@ -180,6 +187,34 @@ test('release checks fail when a desktop version or client OTA endpoint drifts',
 
     assert.ok(report.failures.some((failure) => failure.includes('src-tauri/tauri.conf.json version must match package.json.version')))
     assert.ok(report.failures.some((failure) => failure.includes('client updater must only target https://sca-hub.cn/api/papyrus/update')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release version checks do not block on documentation text', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'README.md'), 'legacy installation notes\n')
+    await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'install-papyrus.sh'), '# legacy installer\n')
+
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+
+    assert.ok(!report.failures.some((failure) => failure.includes('os-integration/debian13/README.md must document')))
+    assert.ok(!report.failures.some((failure) => failure.includes('os-integration/debian13/install-papyrus.sh must document')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release version checks require the WPS build to inject package version metadata', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'apps', 'wps-word-addin', 'vite.config.ts'), '// packageJson.version\nexport default {}\n')
+
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+
+    assert.ok(report.failures.some((failure) => failure.includes('WPS build configuration must inject package.json.version into VITE_PAPYRUS_WPS_VERSION')))
   } finally {
     await cleanup(rootDir)
   }
@@ -363,14 +398,27 @@ test('local release verification rejects an artifact forged with an unchanged up
     'untrusted comment: signature from minisign secret key',
     Buffer.concat([Buffer.from('Ed'), keyId, sign(null, artifact, privateKey)]).toString('base64'),
   ].join('\n')
+  const wrappedTauriPublicKey = Buffer.from(tauriPublicKey, 'utf8').toString('base64')
+  const wrappedTauriSignature = Buffer.from(minisignSignature, 'utf8').toString('base64')
+  const mismatchedKeyIdSignature = [
+    'untrusted comment: signature from another minisign key',
+    Buffer.concat([Buffer.from('Ed'), Buffer.alloc(8, 8), sign(null, artifact, privateKey)]).toString('base64'),
+  ].join('\n')
+  const ambiguousSignature = `${minisignSignature}\n${Buffer.concat([Buffer.from('Ed'), keyId, sign(null, artifact, privateKey)]).toString('base64')}`
 
   const { verifyTauriUpdaterSignature } = await import('../verify-papyrus-release.mjs')
 
   assert.equal(verifyTauriUpdaterSignature({ artifact, signature: minisignSignature, publicKey: tauriPublicKey }), true)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: minisignSignature, publicKey: wrappedTauriPublicKey }), true)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: wrappedTauriSignature, publicKey: tauriPublicKey }), true)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: wrappedTauriSignature, publicKey: wrappedTauriPublicKey }), true)
   assert.equal(
     verifyTauriUpdaterSignature({ artifact: Buffer.from('forged release artifact'), signature: minisignSignature, publicKey: tauriPublicKey }),
     false,
   )
+  assert.equal(verifyTauriUpdaterSignature({ artifact: Buffer.from('forged release artifact'), signature: wrappedTauriSignature, publicKey: wrappedTauriPublicKey }), false)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: mismatchedKeyIdSignature, publicKey: tauriPublicKey }), false)
+  assert.equal(verifyTauriUpdaterSignature({ artifact, signature: ambiguousSignature, publicKey: tauriPublicKey }), false)
 })
 
 test('local release verification reads the Ed25519 updater public key from Tauri config', async () => {
@@ -382,10 +430,77 @@ test('local release verification reads the Ed25519 updater public key from Tauri
   assert.equal(parseTauriUpdaterPublicKey(tauriPublicKey).asymmetricKeyType, 'ed25519')
 })
 
+test('local updater verification binds signed asset URLs and filenames to the expected version', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-updater-version-'))
+  try {
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+    const keyId = Buffer.alloc(8, 4)
+    const rawPublicKey = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32)
+    const tauriPublicKey = [
+      'untrusted comment: minisign public key',
+      Buffer.concat([Buffer.from('Ed'), keyId, rawPublicKey]).toString('base64'),
+    ].join('\n')
+    const artifact = Buffer.from('signed 1.1.0 updater')
+    const signature = [
+      'untrusted comment: signature from minisign secret key',
+      Buffer.concat([Buffer.from('Ed'), keyId, sign(null, artifact, privateKey)]).toString('base64'),
+    ].join('\n')
+    const artifactsDir = path.join(rootDir, 'artifacts')
+    await fs.mkdir(artifactsDir)
+    await fs.writeFile(path.join(artifactsDir, 'Papyrus_1.1.0_x64-setup.exe'), artifact)
+    await fs.writeFile(path.join(artifactsDir, 'Papyrus_1.1.0_x64-setup.exe.sig'), signature)
+
+    const { verifyLocalReleaseAssets } = await import('../verify-papyrus-release.mjs')
+    const manifestPath = path.join(rootDir, 'latest.json')
+    await fs.writeFile(manifestPath, JSON.stringify({
+      version: '1.1.0',
+      platforms: {
+        'windows-x86_64': {
+          url: 'https://github.com/bzm2008/papyrus/releases/download/v1.0.0/Papyrus_1.1.0_x64-setup.exe',
+          signature,
+        },
+      },
+    }))
+
+    await assert.rejects(
+      verifyLocalReleaseAssets({ artifactsDir, manifestPath, publicKey: tauriPublicKey, expectedVersion: '1.1.0' }),
+      /must target release tag v1\.1\.0/,
+    )
+
+    await fs.writeFile(path.join(artifactsDir, 'Papyrus_1.0.0_x64-setup.exe'), artifact)
+    await fs.writeFile(path.join(artifactsDir, 'Papyrus_1.0.0_x64-setup.exe.sig'), signature)
+    await fs.writeFile(manifestPath, JSON.stringify({
+      version: '1.1.0',
+      platforms: {
+        'windows-x86_64': {
+          url: 'https://github.com/bzm2008/papyrus/releases/download/v1.1.0/Papyrus_1.0.0_x64-setup.exe',
+          signature,
+        },
+      },
+    }))
+
+    await assert.rejects(
+      verifyLocalReleaseAssets({ artifactsDir, manifestPath, publicKey: tauriPublicKey, expectedVersion: '1.1.0' }),
+      /asset name must contain version 1\.1\.0/,
+    )
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
 test('online OTA verification removes downloaded artifacts in a finally block', async () => {
   const checker = await fs.readFile(new URL('../check-papyrus-release.ps1', import.meta.url), 'utf8')
 
   assert.match(checker, /try\s*\{[\s\S]*?finally\s*\{\s*Remove-Item -LiteralPath \$tempRoot -Recurse -Force -ErrorAction SilentlyContinue\s*\}/)
+})
+
+test('online OTA verification uses a Windows PowerShell compatible redirect and retry path', async () => {
+  const checker = await fs.readFile(new URL('../check-papyrus-release.ps1', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(checker, /SkipHttpErrorCheck/)
+  assert.match(checker, /function Read-Redirect[\s\S]*?\$_.Exception.Response/)
+  assert.match(checker, /Invoke-ReleaseWithRetry/)
+  assert.match(checker, /-TimeoutSec \$ReleaseRequestTimeoutSeconds/)
 })
 
 test('release phase fails when the aggregate script bypasses the release checker', async () => {

@@ -19,7 +19,7 @@
     "test:unit:watch": "vitest --config vitest.config.ts",
     "test:desktop": "npm run test:unit && node scripts/run-cargo-desktop.mjs test --locked",
     "check:desktop": "npm run lint && npm run test:desktop && npm run build && npm run tauri:check:portable",
-    "test:release-scripts": "node --test scripts/lib/release-checks.test.mjs",
+    "test:release-scripts": "node --test scripts/lib/release-checks.test.mjs && powershell -NoProfile -File scripts/lib/release-retry.test.ps1",
     "browser:package": "npm run browser:build && node scripts/package-browser-bridge.mjs",
     "browser:build": "node scripts/build-browser-bridge.mjs",
     "browser:test": "node --test scripts/browser-bridge.test.mjs",
