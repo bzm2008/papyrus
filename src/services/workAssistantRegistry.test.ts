@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { WORK_ASSISTANT_TOOLS, enabledToolDefinitions } from './workAssistantRegistry'
+import { COMPUTER_ASSISTANT_TOOLS, WORK_ASSISTANT_TOOLS, enabledToolDefinitions } from './workAssistantRegistry'
 
 describe('WORK_ASSISTANT_TOOLS', () => {
   it('contains only the controlled workspace and desktop tools', () => {
@@ -18,6 +18,35 @@ describe('WORK_ASSISTANT_TOOLS', () => {
       'desktop_open_app',
       'desktop_reveal_file',
     ])
+  })
+
+  it('registers observation-bound computer tools only when the native broker reports them available', () => {
+    expect(COMPUTER_ASSISTANT_TOOLS.map((tool) => tool.name)).toEqual([
+      'computer_observe',
+      'computer_focus',
+      'computer_click',
+      'computer_type',
+      'computer_keypress',
+      'computer_scroll',
+    ])
+
+    const unavailable = enabledToolDefinitions({
+      platform: 'linux',
+      enabledToolsets: ['computer'],
+      availability: { computer: false },
+      availableToolNames: [],
+    })
+    expect(unavailable).toEqual([])
+
+    const available = enabledToolDefinitions({
+      platform: 'linux',
+      enabledToolsets: ['computer'],
+      availability: { computer: true },
+      availableToolNames: ['computer_observe', 'computer_focus', 'computer_click', 'computer_type', 'computer_keypress', 'computer_scroll'],
+    })
+    expect(available.map((tool) => tool.name)).toEqual(COMPUTER_ASSISTANT_TOOLS.map((tool) => tool.name))
+    expect(available.find((tool) => tool.name === 'computer_observe')?.defaultRisk).toBe('read')
+    expect(available.find((tool) => tool.name === 'computer_click')?.defaultRisk).toBe('high')
   })
 
   it('filters tools by platform, enabled toolsets, and availability', () => {

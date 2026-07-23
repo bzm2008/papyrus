@@ -42,3 +42,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.59.0", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
+uiautomation = { version = "0.25", features = ["screenshot"] }

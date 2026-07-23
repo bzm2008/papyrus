@@ -86,6 +86,40 @@ describe('work assistant runtime', () => {
     await expect(promise).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
   })
 
+  it('keeps computer actions behind the existing approval boundary and sends only an observation reference', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_computer_execute') return { ok: true, summary: '已点击“保存”。' }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const events: WorkAssistantEvent[] = []
+    const promise = executeAssistantToolCall({
+      runId: 'run-computer',
+      toolCall: call('computer_click', {
+        observationId: 'observe-1',
+        windowFingerprint: 'window-v1',
+        targetId: 'target-1',
+        targetFingerprint: 'target-v1',
+      }),
+      emit: (event) => events.push(event),
+    })
+    await Promise.resolve()
+
+    const approval = events.find((event): event is Extract<WorkAssistantEvent, { type: 'approval.required' }> => event.type === 'approval.required')
+    expect(approval?.request.allowedChoices).toEqual(['once', 'deny'])
+    expect(approval && resolveAssistantApproval(approval.request.id, 'once')).toBe(true)
+    await expect(promise).resolves.toMatchObject({ ok: true, summary: '已点击“保存”。' })
+    expect(invoke).toHaveBeenCalledWith('work_assistant_computer_execute', {
+      request: {
+        action: 'computer_click',
+        observationId: 'observe-1',
+        windowFingerprint: 'window-v1',
+        targetId: 'target-1',
+        targetFingerprint: 'target-v1',
+      },
+    })
+  })
+
   it('aborts pending approval and invokes native cancellation', async () => {
     const invoke = vi.fn(async () => undefined)
     setWorkAssistantInvokerForTests(invoke)

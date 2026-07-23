@@ -1,5 +1,6 @@
 mod audit;
 pub mod browser_bridge;
+mod computer_use;
 mod desktop;
 mod doctor;
 mod file_ops;
@@ -12,6 +13,7 @@ mod workspace;
 
 pub use audit::*;
 pub use browser_bridge::*;
+pub use computer_use::*;
 pub use desktop::*;
 pub use doctor::*;
 pub use file_ops::*;
@@ -66,6 +68,7 @@ pub struct WorkAssistantState {
     pub(crate) roots: RwLock<Vec<AuthorizedRoot>>,
     pub(crate) previews: Mutex<HashMap<String, StoredPreview>>,
     pub(crate) approvals: Mutex<HashMap<String, StoredApproval>>,
+    pub(crate) computer_observations: Mutex<ComputerObservationStore>,
     pub(crate) cancelled_runs: Mutex<HashSet<String>>,
     /// Cancellation can be observed at multiple preflight/execution boundaries. Keep the audit
     /// receipt idempotent for each opaque run/preview pair.
@@ -94,6 +97,7 @@ fn load_state_from_data_dir(data_dir: &Path) -> Result<WorkAssistantState, WorkA
         roots: RwLock::new(roots),
         previews: Mutex::new(HashMap::new()),
         approvals: Mutex::new(HashMap::new()),
+        computer_observations: Mutex::new(ComputerObservationStore::default()),
         cancelled_runs: Mutex::new(HashSet::new()),
         cancelled_execution_audits: Mutex::new(HashSet::new()),
         audit_path,

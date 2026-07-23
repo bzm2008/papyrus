@@ -6,6 +6,7 @@ import type {
   AssistantToolPreview,
   NativePreviewRequest,
 } from './workAssistantProtocol'
+import type { ComputerObservation } from './computerUsePolicy'
 
 export type InvokeFn = (command: string, args?: Record<string, unknown>) => Promise<unknown>
 
@@ -34,6 +35,17 @@ export type RegisteredApplication = {
   createdAt: number
 }
 export type AuditEntry = { id: string; event: string; detail: string; at: number }
+export type ComputerActionRequest = {
+  action: 'computer_focus' | 'computer_click' | 'computer_type' | 'computer_keypress' | 'computer_scroll'
+  observationId: string
+  windowFingerprint: string
+  targetId: string
+  targetFingerprint: string
+  text?: string
+  key?: string
+  delta?: string
+}
+export type ComputerActionResponse = { ok: boolean; summary: string; errorCode?: string; recoverable?: boolean }
 
 let invokeFn: InvokeFn = (command, args) => invoke(command, args)
 
@@ -118,3 +130,9 @@ export const listWorkAssistantAudit = (offset = 0, limit = 50) =>
   invokeTyped<AuditEntry[]>('work_assistant_list_audit', { offset, limit })
 
 export const clearWorkAssistantAudit = () => invokeTyped<void>('work_assistant_clear_audit')
+
+export const computerObserve = () =>
+  invokeTyped<ComputerObservation>('work_assistant_computer_observe')
+
+export const executeComputerAction = (request: ComputerActionRequest) =>
+  invokeTyped<ComputerActionResponse>('work_assistant_computer_execute', { request })

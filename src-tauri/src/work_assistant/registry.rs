@@ -24,8 +24,30 @@ pub fn capability_statuses() -> Vec<CapabilityStatus> {
         .collect();
     capabilities.extend(file_operation_capabilities(&platform));
     capabilities.extend(desktop_capabilities(&platform));
+    capabilities.extend(computer_capabilities(&platform));
     capabilities.extend(browser_capabilities(&platform, false));
     capabilities
+}
+
+fn computer_capabilities(platform: &str) -> Vec<CapabilityStatus> {
+    let (available, reason) = crate::work_assistant::computer_capability();
+    [
+        "computer_observe",
+        "computer_focus",
+        "computer_click",
+        "computer_type",
+        "computer_keypress",
+        "computer_scroll",
+    ]
+    .into_iter()
+    .map(|name| CapabilityStatus {
+        name: name.into(),
+        toolset: "computer".into(),
+        available,
+        reason: reason.map(str::to_owned),
+        platform: platform.into(),
+    })
+    .collect()
 }
 
 fn browser_capabilities(platform: &str, paired: bool) -> Vec<CapabilityStatus> {
@@ -320,7 +342,21 @@ pub fn work_assistant_cancel_run(
     state: State<'_, WorkAssistantState>,
     run: String,
 ) -> Result<(), AssistantErrorPayload> {
-    record_cancelled_run(&state, run).map_err(Into::into)
+    cancel_run_and_clear_computer_observations(&state, run).map_err(AssistantErrorPayload::from)
+}
+
+fn cancel_run_and_clear_computer_observations(
+    state: &WorkAssistantState,
+    run: String,
+) -> Result<(), WorkAssistantError> {
+    record_cancelled_run(state, run)?;
+    state
+        .computer_observations
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))
+        ?
+        .clear();
+    Ok(())
 }
 
 fn record_cancelled_run(state: &WorkAssistantState, run: String) -> Result<(), WorkAssistantError> {
@@ -370,6 +406,7 @@ mod tests {
             roots: RwLock::new(Vec::new()),
             previews: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
+            computer_observations: Mutex::new(crate::work_assistant::ComputerObservationStore::default()),
             cancelled_runs: Mutex::new(HashSet::new()),
             cancelled_execution_audits: Mutex::new(HashSet::new()),
             audit_path: PathBuf::from("unused-audit-path"),
@@ -391,7 +428,7 @@ mod tests {
         assert!(capabilities.iter().all(|capability| {
             matches!(
                 capability.toolset.as_str(),
-                "workspace" | "desktop" | "browser" | "project"
+                "workspace" | "desktop" | "browser" | "project" | "computer"
             )
         }));
         for name in ["root_management", "audit_log", "run_cancellation"] {
@@ -490,6 +527,30 @@ mod tests {
         assert!(!runs.contains("overflow"));
         assert_eq!(overflow.code, "blocked");
         assert!(overflow.recoverable);
+    }
+
+    #[test]
+    fn cancellation_clears_ephemeral_computer_observations() {
+        let state = test_state();
+        state.computer_observations.lock().unwrap().insert(
+            crate::work_assistant::ComputerObservation {
+                id: "observe-1".into(),
+                window: crate::work_assistant::ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: "window".into() },
+                targets: Vec::new(),
+                expires_at: u64::MAX,
+            },
+            1,
+        );
+
+        cancel_run_and_clear_computer_observations(&state, "run-1".into()).unwrap();
+
+        assert!(state.computer_observations.lock().unwrap().validate(
+            &crate::work_assistant::ComputerActionRequest {
+                action: "computer_focus".into(), observation_id: "observe-1".into(), window_fingerprint: "window".into(), target_id: "missing".into(), target_fingerprint: "missing".into(), text: None, key: None, delta: None,
+            },
+            &crate::work_assistant::ComputerObservation { id: "current".into(), window: crate::work_assistant::ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: "window".into() }, targets: Vec::new(), expires_at: u64::MAX },
+            1,
+        ).is_err());
     }
 
     #[test]

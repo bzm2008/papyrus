@@ -2938,6 +2938,7 @@ mod tests {
             roots: std::sync::RwLock::new(Vec::new()),
             previews: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
+            computer_observations: Mutex::new(crate::work_assistant::ComputerObservationStore::default()),
             cancelled_runs: Mutex::new(HashSet::new()),
             cancelled_execution_audits: Mutex::new(HashSet::new()),
             audit_path: directory.join("audit.jsonl"),

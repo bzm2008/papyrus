@@ -1,6 +1,8 @@
 import {
   approveWorkAssistantAction,
   cancelWorkAssistantRun,
+  computerObserve,
+  executeComputerAction,
   executeWorkAssistantAction,
   getWorkAssistantDesktopStatus,
   inspectWorkAssistantFile,
@@ -129,6 +131,21 @@ function sanitizedToolData(toolName: string, value: unknown): Record<string, unk
       capabilities: status.capabilities,
     }
   }
+  if (toolName === 'computer_observe') {
+    const observation = value as Record<string, unknown>
+    const window = observation.window && typeof observation.window === 'object' ? observation.window as Record<string, unknown> : {}
+    const targets = Array.isArray(observation.targets) ? observation.targets : []
+    return {
+      observationId: observation.id,
+      expiresAt: observation.expiresAt,
+      window: { appId: window.appId, fingerprint: window.fingerprint },
+      targets: targets.slice(0, 12).map((target) => {
+        const item = target && typeof target === 'object' ? target as Record<string, unknown> : {}
+        return { id: item.id, fingerprint: item.fingerprint }
+      }),
+    }
+  }
+  if (toolName.startsWith('computer_')) return undefined
   return Array.isArray(value) ? { items: value } : value as Record<string, unknown>
 }
 
@@ -137,12 +154,19 @@ function safeToolFailure(error: unknown) {
   const code = typeof payload.code === 'string' ? payload.code : 'tool_failed'
   const recoverable = payload.recoverable !== false
   const summaries: Record<string, string> = {
-    stale_preview: '预览已过期，请重新生成。',
     cancelled: '运行已取消。',
     path_outside_workspace: '请求路径不在已授权工作区内。',
     blocked: '该本地操作已被安全策略阻止。',
     page_restricted: '当前页面包含密码、验证码、支付或账号安全内容，已阻止操作。',
     stale_page: '页面已经变化，请重新获取快照后再操作。',
+    stale_preview: '观察已过期，请重新读取当前窗口后再操作。',
+    observation_expired: '观察已过期，请重新读取当前窗口后再操作。',
+    window_changed: '前台窗口已经变化，请重新观察后再操作。',
+    target_missing: '目标控件已经不可用，请重新观察后再操作。',
+    target_changed: '目标控件已经变化，请重新观察后再操作。',
+    sensitive_surface: '当前页面包含密码、验证码、支付或账号安全内容，已阻止操作。',
+    computer_portal_required: '当前系统需要 AT-SPI 与桌面门户授权，已停止操作。',
+    computer_accessibility_required: '当前系统需要辅助功能授权，已停止操作。',
     browser_disconnected: '浏览器未连接，请先配对当前标签页。',
     network: '网络暂不可用，请检查连接后重试。',
     timeout: '请求超时，请稍后重试。',
@@ -166,6 +190,22 @@ async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal):
     case 'file_open': return openWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_reveal_file': return revealWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_open_app': return launchRegisteredApplication(String(args.appId ?? ''))
+    case 'computer_observe': return computerObserve()
+    case 'computer_focus':
+    case 'computer_click':
+    case 'computer_type':
+    case 'computer_keypress':
+    case 'computer_scroll':
+      return executeComputerAction({
+        action: call.name,
+        observationId: String(args.observationId ?? ''),
+        windowFingerprint: String(args.windowFingerprint ?? ''),
+        targetId: String(args.targetId ?? ''),
+        targetFingerprint: String(args.targetFingerprint ?? ''),
+        text: typeof args.text === 'string' ? args.text : undefined,
+        key: typeof args.key === 'string' ? args.key : undefined,
+        delta: typeof args.delta === 'string' ? args.delta : undefined,
+      })
     case 'web_extract': {
       const result = await extractPublicWebPage(String(args.url ?? ''), call.runId, signal)
       const extractId = `${call.runId}:${call.id}`
@@ -386,7 +426,11 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
           recoverable: actionPayload?.recoverable !== false,
           data: sanitizedToolData(call.name, data),
         }
-      : { ok: true as const, summary: resultSummary(data), data: sanitizedToolData(call.name, data) }
+      : {
+          ok: true as const,
+          summary: typeof actionPayload?.summary === 'string' ? actionPayload.summary : resultSummary(data),
+          data: sanitizedToolData(call.name, data),
+        }
     failureCounts.delete(key)
     emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
     return result

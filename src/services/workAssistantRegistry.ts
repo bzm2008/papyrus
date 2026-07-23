@@ -1,7 +1,7 @@
 import type { AssistantRiskLevel, DesktopPlatform } from './workAssistantProtocol'
 
-export type AssistantToolset = 'workspace' | 'desktop' | 'browser' | 'project'
-export type AssistantToolExecutor = 'native' | 'project' | 'browser_bridge'
+export type AssistantToolset = 'workspace' | 'desktop' | 'browser' | 'project' | 'computer'
+export type AssistantToolExecutor = 'native' | 'project' | 'browser_bridge' | 'computer'
 
 export type AssistantSchemaNode = {
   type: 'object' | 'array' | 'string'
@@ -125,6 +125,28 @@ const browserElementSchema = () => ({
   required: ['elementToken', 'pageRevision'] as const,
 })
 
+const computerReferenceSchema = (properties: Record<string, AssistantSchemaNode> = {}) => ({
+  type: 'object' as const,
+  additionalProperties: false as const,
+  properties: {
+    observationId: { type: 'string' as const, minLength: 1 },
+    windowFingerprint: { type: 'string' as const, minLength: 1 },
+    targetId: { type: 'string' as const, minLength: 1 },
+    targetFingerprint: { type: 'string' as const, minLength: 1 },
+    ...properties,
+  },
+  required: ['observationId', 'windowFingerprint', 'targetId', 'targetFingerprint'] as const,
+})
+
+export const COMPUTER_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
+  { name: 'computer_observe', toolset: 'computer', executor: 'computer', description: 'Observe the active desktop window through the native accessibility broker. Observations are short-lived and never persisted.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: emptyObjectSchema() },
+  { name: 'computer_focus', toolset: 'computer', executor: 'computer', description: 'Focus the observed foreground window after fingerprint verification.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: computerReferenceSchema() },
+  { name: 'computer_click', toolset: 'computer', executor: 'computer', description: 'Activate one verified accessibility target after a one-time confirmation. The broker blocks sensitive surfaces.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: computerReferenceSchema() },
+  { name: 'computer_type', toolset: 'computer', executor: 'computer', description: 'Type a bounded draft into one verified non-sensitive target after a one-time confirmation.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: computerReferenceSchema({ text: { type: 'string', minLength: 1, maxLength: 4000 } }) },
+  { name: 'computer_keypress', toolset: 'computer', executor: 'computer', description: 'Send one bounded, verified keyboard action after a one-time confirmation.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: computerReferenceSchema({ key: { type: 'string', minLength: 1, maxLength: 64 } }) },
+  { name: 'computer_scroll', toolset: 'computer', executor: 'computer', description: 'Scroll one verified document or list target.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: computerReferenceSchema({ delta: { type: 'string', minLength: 1, maxLength: 16 } }) },
+]
+
 export const BROWSER_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'web_extract', toolset: 'browser', executor: 'native', description: 'Extract readable text and source links from a public web page.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: { type: 'object', additionalProperties: false, properties: { url: { type: 'string', minLength: 1 } }, required: ['url'] } },
   { name: 'web_archive', toolset: 'project', executor: 'project', description: 'Archive verified web text into the active Papyrus project resources.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: { type: 'object', additionalProperties: false, properties: { extractId: { type: 'string', minLength: 1 }, resourceName: { type: 'string', minLength: 1, maxLength: 240 }, url: { type: 'string', minLength: 1 }, title: { type: 'string', maxLength: 240 }, text: { type: 'string', minLength: 1, maxLength: 100000 }, canonicalUrl: { type: 'string', minLength: 1 } }, required: ['extractId', 'resourceName'] } },
@@ -138,6 +160,7 @@ export const BROWSER_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
 
 export const ALL_WORK_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   ...WORK_ASSISTANT_TOOLS,
+  ...COMPUTER_ASSISTANT_TOOLS,
   ...BROWSER_ASSISTANT_TOOLS,
 ]
 
@@ -151,7 +174,7 @@ export function enabledToolDefinitions(input: EnabledToolDefinitionsInput): read
     // their exact model-facing name. Do not hide core secretary tools merely
     // because the native registry does not enumerate every wrapper name.
     && (input.availableToolNames === undefined
-      || (tool.toolset !== 'browser' && tool.toolset !== 'project')
+      || (tool.toolset !== 'browser' && tool.toolset !== 'project' && tool.toolset !== 'computer')
       || input.availableToolNames.includes(tool.name))
   ))
 }

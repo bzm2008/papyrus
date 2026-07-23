@@ -388,6 +388,7 @@ export async function sendFlowMessage(
         workspace: capabilityStatus.some((status) => status.toolset === 'workspace' && status.available),
         desktop: capabilityStatus.some((status) => status.toolset === 'desktop' && status.available),
         browser: capabilityStatus.some((status) => status.toolset === 'browser' && status.available),
+        computer: capabilityStatus.some((status) => status.toolset === 'computer' && status.available),
         // Project resources are a local Papyrus store. The project executor
         // still requires the same inline approval, but has no native bridge
         // health check of its own.
@@ -399,8 +400,8 @@ export async function sendFlowMessage(
           classification.domain === 'browser'
             ? ['browser', 'project']
             : classification.domain === 'mixed'
-              ? ['workspace', 'desktop', 'browser', 'project']
-              : ['workspace', 'desktop'],
+              ? ['workspace', 'desktop', 'computer', 'browser', 'project']
+              : ['workspace', 'desktop', 'computer'],
         availability,
         availableToolNames: capabilityStatus.filter((status) => status.available).map((status) => status.name),
       }).filter((tool) => classification.domain !== 'mixed' || tool.defaultRisk === 'read')
