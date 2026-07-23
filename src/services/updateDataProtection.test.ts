@@ -7,6 +7,7 @@ import {
   setUpdateDataProtectionInvokerForTests,
   UPDATE_STORAGE_KEY,
   verifyUpdateDataAfterStartup,
+  verifyUpdateDataAfterStartupOnce,
 } from './updateDataProtection'
 import { useAppStore } from '../stores/useAppStore'
 
@@ -106,6 +107,30 @@ describe('update data protection', () => {
       },
     })
     expect(useAppStore.getState().updateMessage).toContain('数据保留检查通过')
+  })
+
+  it('runs startup snapshot verification only once per desktop launch', async () => {
+    const invoke = vi.fn(async () => ({
+      pending: false,
+      status: 'none',
+      ledgerHealthy: true,
+      storagePresent: true,
+      snapshotAvailable: false,
+      message: '本地数据目录健康。',
+    }))
+    setUpdateDataProtectionInvokerForTests(invoke)
+
+    await Promise.all([
+      verifyUpdateDataAfterStartupOnce(),
+      verifyUpdateDataAfterStartupOnce(),
+    ])
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(invoke).toHaveBeenCalledWith('verify_update_snapshot', {
+      input: expect.objectContaining({
+        storageKey: UPDATE_STORAGE_KEY,
+      }),
+    })
   })
 
   it('rejects malformed persisted payloads before trusting a snapshot', async () => {

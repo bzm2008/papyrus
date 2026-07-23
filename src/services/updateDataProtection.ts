@@ -41,6 +41,7 @@ type VerifyOptions = {
 }
 
 let invokeFn: UpdateDataProtectionInvoker = (command, args) => invoke(command, args)
+let startupVerification: Promise<UpdateDataHealth> | undefined
 
 export function setUpdateDataProtectionInvokerForTests(invoker: UpdateDataProtectionInvoker) {
   invokeFn = invoker
@@ -48,6 +49,7 @@ export function setUpdateDataProtectionInvokerForTests(invoker: UpdateDataProtec
 
 export function resetUpdateDataProtectionForTests() {
   invokeFn = (command, args) => invoke(command, args)
+  startupVerification = undefined
 }
 
 export async function prepareUpdateDataSnapshot(targetVersion: string): Promise<UpdateSnapshotReceipt | UpdateDataHealth> {
@@ -201,6 +203,11 @@ export async function verifyUpdateDataAfterStartup(options: VerifyOptions = {}):
     })
   }
   return finalResult
+}
+
+export function verifyUpdateDataAfterStartupOnce(): Promise<UpdateDataHealth> {
+  startupVerification ??= verifyUpdateDataAfterStartup()
+  return startupVerification
 }
 
 export function isPersistedStoragePayload(value: string | null | undefined): value is string {

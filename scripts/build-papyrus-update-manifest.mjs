@@ -38,12 +38,15 @@ if (args.includes('--help') || args.includes('-h')) {
 }
 
 const artifactsDir = path.resolve(readArg(args, '--artifacts', 'release-assets'))
-const version = readArg(args, '--version', '')
+const packageJson = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8'))
+const packageVersion = typeof packageJson.version === 'string' ? packageJson.version.trim() : ''
+const version = readArg(args, '--version', packageVersion)
 const output = path.resolve(readArg(args, '--output', path.join(artifactsDir, 'latest.json')))
 const owner = readArg(args, '--owner', 'bzm2008')
 const repo = readArg(args, '--repo', 'papyrus')
 
 if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`invalid release version: ${version}`)
+if (version !== packageVersion) throw new Error(`release version ${version} must match package.json version ${packageVersion}`)
 
 const files = await walk(artifactsDir)
 const signatures = new Map()
@@ -70,7 +73,7 @@ if (missing.length) throw new Error(`missing signed updater assets: ${missing.jo
 
 const manifest = {
   version,
-  notes: 'Papyrus 1.0.0：文科秘书工作台、项目账本、受控电脑助手与跨平台安装支持。',
+  notes: `Papyrus ${version}：文科秘书工作台、项目账本、受控电脑助手与跨平台安装支持。`,
   pub_date: new Date().toISOString(),
   platforms,
 }

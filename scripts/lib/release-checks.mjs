@@ -59,6 +59,15 @@ const PLATFORM_MARKERS = {
   linux: ['ubuntu-24.04', 'ubuntu-latest'],
 }
 
+const CANONICAL_OTA_ENDPOINT = 'https://sca-hub.cn/api/papyrus/update'
+const LEGACY_OTA_ENDPOINT = 'https://scallion.uno/api/papyrus/update'
+const REQUIRED_OTA_PLATFORMS = [
+  'windows-x86_64',
+  'linux-x86_64',
+  'darwin-x86_64',
+  'darwin-aarch64',
+]
+
 // Runner names alone do not prove that a workflow exercises the release boundary. Keep these
 // markers deliberately small and platform-neutral so the checker works on Windows, macOS, and
 // Linux without introducing a YAML parser dependency. The workflow files remain human-readable
@@ -249,6 +258,97 @@ async function checkCsp(rootDir) {
   return failures
 }
 
+function readCargoPackageVersion(value) {
+  return value.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"\s*$/m)?.[1]
+}
+
+function isVersion(value) {
+  return typeof value === 'string' && /^\d+\.\d+\.\d+$/.test(value)
+}
+
+function isSignedHttpsAsset(value) {
+  if (!isObject(value) || typeof value.signature !== 'string' || !value.signature.trim() || typeof value.url !== 'string') {
+    return false
+  }
+  try {
+    return new URL(value.url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+export function validateOtaEndpointPair({ expectedVersion, canonical, legacy }) {
+  const failures = []
+  for (const [label, manifest] of [['canonical', canonical], ['legacy', legacy]]) {
+    if (manifest?.version !== expectedVersion) {
+      failures.push(`${label} OTA manifest version must match package.json.version (${expectedVersion})`)
+    }
+    for (const platform of REQUIRED_OTA_PLATFORMS) {
+      if (!isSignedHttpsAsset(manifest?.platforms?.[platform])) {
+        failures.push(`${label} OTA manifest is missing signed HTTPS asset for ${platform}`)
+      }
+    }
+  }
+  if (canonical?.version !== legacy?.version) {
+    failures.push('canonical and legacy OTA manifests must report the same version')
+  }
+  return failures
+}
+
+async function checkVersionConsistency(rootDir) {
+  const failures = []
+  const { value: packageJson, error: packageError } = await readJson(rootDir, 'package.json')
+  if (packageError) return [packageError]
+  const version = packageJson?.version
+  if (!isVersion(version)) return ['package.json.version must be a semantic desktop release version']
+
+  const { value: packageLock, error: packageLockError } = await readJson(rootDir, 'package-lock.json')
+  if (packageLockError) failures.push(packageLockError)
+  else if (packageLock?.version !== version || packageLock?.packages?.['']?.version !== version) {
+    failures.push('package-lock.json root version must match package.json.version')
+  }
+
+  const { value: tauriConfig, error: tauriError } = await readJson(rootDir, 'src-tauri/tauri.conf.json')
+  if (tauriError) failures.push(tauriError)
+  else {
+    if (tauriConfig?.version !== version) failures.push('src-tauri/tauri.conf.json version must match package.json.version')
+    const endpoints = tauriConfig?.plugins?.updater?.endpoints
+    if (!Array.isArray(endpoints) || endpoints.length !== 1 || endpoints[0] !== CANONICAL_OTA_ENDPOINT) {
+      failures.push(`client updater must only target ${CANONICAL_OTA_ENDPOINT}`)
+    }
+  }
+
+  const cargoToml = await readText(rootDir, 'src-tauri/Cargo.toml')
+  if (cargoToml === null) failures.push('missing src-tauri/Cargo.toml package metadata')
+  else if (readCargoPackageVersion(cargoToml) !== version) failures.push('src-tauri/Cargo.toml package version must match package.json.version')
+
+  const { value: bridgeManifest, error: bridgeError } = await readJson(rootDir, 'apps/browser-bridge/manifest.json')
+  if (bridgeError) failures.push(bridgeError)
+  else if (bridgeManifest?.version !== version) failures.push('Browser Bridge manifest version must match package.json.version')
+
+  const wpsViteConfig = await readText(rootDir, 'apps/wps-word-addin/vite.config.ts')
+  if (wpsViteConfig === null || !wpsViteConfig.includes('packageJson.version')) {
+    failures.push('WPS release metadata must derive its version from package.json.version')
+  }
+
+  for (const relativePath of ['os-integration/debian13/README.md', 'os-integration/debian13/install-papyrus.sh']) {
+    const text = await readText(rootDir, relativePath)
+    if (text === null || !text.includes(`Papyrus ${version}`)) {
+      failures.push(`${relativePath} must document Papyrus ${version}`)
+    }
+  }
+
+  const releaseScript = await readText(rootDir, 'scripts/check-papyrus-release.ps1')
+  if (releaseScript === null || !releaseScript.includes('package.json')) {
+    failures.push('scripts/check-papyrus-release.ps1 must derive ExpectedVersion from package.json')
+  }
+  const manifestScript = await readText(rootDir, 'scripts/build-papyrus-update-manifest.mjs')
+  if (manifestScript === null || !manifestScript.includes('Papyrus ${version}')) {
+    failures.push('scripts/build-papyrus-update-manifest.mjs must derive release notes from its version argument')
+  }
+  return failures
+}
+
 async function checkCommands(rootDir) {
   const text = await readText(rootDir, 'src-tauri/src/lib.rs')
   if (text === null) return ['missing src-tauri/src/lib.rs command registration']
@@ -354,6 +454,7 @@ export async function runReleaseChecks({ rootDir = process.cwd(), phase = 'local
     return { phase, failures: [`unknown release check phase: ${phase}`] }
   }
   const failures = []
+  failures.push(...await checkVersionConsistency(rootDir))
   failures.push(...await checkCsp(rootDir))
   failures.push(...await checkCommands(rootDir))
   failures.push(...await checkExtensionOutput(rootDir))
@@ -366,9 +467,11 @@ export const _internal = {
   checkManifestPermissions,
   flattenManifestPermissions,
   checkCsp,
+  checkVersionConsistency,
   checkCommands,
   checkDocumentation,
   checkWorkflowSemantics,
   checkReleaseScripts,
   checkReleaseWorkflows,
+  validateOtaEndpointPair,
 }

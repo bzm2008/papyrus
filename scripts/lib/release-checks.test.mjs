@@ -4,7 +4,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { REQUIRED_COMMANDS, runReleaseChecks } from './release-checks.mjs'
+import { _internal, REQUIRED_COMMANDS, runReleaseChecks } from './release-checks.mjs'
 
 async function fixture() {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-release-check-'))
@@ -13,8 +13,11 @@ async function fixture() {
   await fs.mkdir(path.join(rootDir, 'dist-browser-bridge'), { recursive: true })
   await fs.mkdir(path.join(rootDir, 'docs', 'testing'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), JSON.stringify({
+    version: '0.1.2',
     app: { security: { csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob: https:; font-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" } },
+    plugins: { updater: { endpoints: ['https://sca-hub.cn/api/papyrus/update'] } },
   }))
+  await fs.writeFile(path.join(rootDir, 'src-tauri', 'Cargo.toml'), '[package]\nversion = "0.1.2"\n')
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'src', 'lib.rs'), REQUIRED_COMMANDS.map((command) => `work_assistant::${command},`).join('\n'))
   await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'manifest.json'), JSON.stringify({
     manifest_version: 3,
@@ -31,6 +34,20 @@ async function fixture() {
       'check:browser': 'npm run test:browser && npm run browser:build && cargo test --manifest-path src-tauri/Cargo.toml --locked browser_bridge && cargo test --manifest-path src-tauri/Cargo.toml --locked web_extract',
     },
   }))
+  await fs.writeFile(path.join(rootDir, 'package-lock.json'), JSON.stringify({
+    version: '0.1.2',
+    packages: { '': { version: '0.1.2' } },
+  }))
+  await fs.mkdir(path.join(rootDir, 'apps', 'browser-bridge'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'apps', 'browser-bridge', 'manifest.json'), JSON.stringify({ version: '0.1.2' }))
+  await fs.mkdir(path.join(rootDir, 'apps', 'wps-word-addin'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'apps', 'wps-word-addin', 'vite.config.ts'), 'const version = packageJson.version\n')
+  await fs.mkdir(path.join(rootDir, 'os-integration', 'debian13'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'README.md'), 'Papyrus 0.1.2\n')
+  await fs.writeFile(path.join(rootDir, 'os-integration', 'debian13', 'install-papyrus.sh'), '# Papyrus 0.1.2\n')
+  await fs.mkdir(path.join(rootDir, 'scripts'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'scripts', 'check-papyrus-release.ps1'), '$ExpectedVersion = (Get-Content package.json | ConvertFrom-Json).version\n')
+  await fs.writeFile(path.join(rootDir, 'scripts', 'build-papyrus-update-manifest.mjs'), 'notes: `Papyrus ${version}`\n')
   for (const relativePath of ['docs/BROWSER_BRIDGE.md', 'docs/testing/WORK_ASSISTANT_PLATFORM_MATRIX.md', 'docs/testing/WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md']) {
     await fs.writeFile(path.join(rootDir, relativePath), '# release evidence')
   }
@@ -136,6 +153,54 @@ test('extension output version must match the application package version', asyn
   } finally {
     await cleanup(rootDir)
   }
+})
+
+test('release checks fail when a desktop version or client OTA endpoint drifts', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), JSON.stringify({
+      version: '0.1.1',
+      app: { security: { csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob: https:; font-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" } },
+      plugins: { updater: { endpoints: ['https://scallion.uno/api/papyrus/update'] } },
+    }))
+
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+
+    assert.ok(report.failures.some((failure) => failure.includes('src-tauri/tauri.conf.json version must match package.json.version')))
+    assert.ok(report.failures.some((failure) => failure.includes('client updater must only target https://sca-hub.cn/api/papyrus/update')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('OTA endpoint validation requires matching signed HTTPS assets for every platform', () => {
+  const canonical = {
+    version: '1.1.0',
+    platforms: {
+      'windows-x86_64': { url: 'https://example.test/Papyrus_1.1.0_x64-setup.exe', signature: 'windows-signature' },
+      'linux-x86_64': { url: 'https://example.test/Papyrus_1.1.0_amd64.AppImage', signature: 'linux-signature' },
+      'darwin-x86_64': { url: 'https://example.test/Papyrus_1.1.0_x64.app.tar.gz', signature: 'mac-signature' },
+      'darwin-aarch64': { url: 'https://example.test/Papyrus_1.1.0_aarch64.app.tar.gz', signature: 'arm-signature' },
+    },
+  }
+  assert.deepEqual(_internal.validateOtaEndpointPair({
+    expectedVersion: '1.1.0',
+    canonical,
+    legacy: structuredClone(canonical),
+  }), [])
+
+  const failures = _internal.validateOtaEndpointPair({
+    expectedVersion: '1.1.0',
+    canonical,
+    legacy: {
+      version: '1.0.0',
+      platforms: {
+        'windows-x86_64': { url: 'http://example.test/Papyrus_1.0.0_x64-setup.exe', signature: '' },
+      },
+    },
+  })
+  assert.ok(failures.some((failure) => failure.includes('legacy OTA manifest version must match package.json.version')))
+  assert.ok(failures.some((failure) => failure.includes('legacy OTA manifest is missing signed HTTPS asset for linux-x86_64')))
 })
 
 test('null CSP fails closed', async () => {

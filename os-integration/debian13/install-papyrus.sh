@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install Papyrus 1.0.0 on Debian 13 (and compatible Debian-based systems).
+# Install Papyrus 1.1.0 on Debian 13 (and compatible Debian-based systems).
 # The application is kept under /opt/papyrus. User data remains in the
 # standard per-user XDG directories and is never removed by this script.
 
@@ -14,7 +14,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
     cat <<'EOF'
-Usage: install-papyrus.sh [Papyrus_1.0.0_amd64.deb|Papyrus_1.0.0_amd64.AppImage]
+Usage: install-papyrus.sh [Papyrus_1.1.0_amd64.deb|Papyrus_1.1.0_amd64.AppImage]
 
 Install Papyrus into /opt/papyrus and create /usr/bin/papyrus.
 When no file is supplied, the script searches its directory and the current

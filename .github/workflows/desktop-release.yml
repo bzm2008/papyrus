@@ -152,7 +152,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' 'Papyrus 1.0.0 production release.' 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
+          gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' "Papyrus ${{ steps.version.outputs.version }} production release." 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
           mapfile -d '' release_files < <(find release-assets -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' -o -name 'Papyrus-WPS-Addin_*.zip' \) -print0)
           gh release upload "${{ steps.version.outputs.tag }}" "${release_files[@]}" release-assets/latest.json --repo "${GITHUB_REPOSITORY}" --clobber
       - name: Upload Debian 13 integration bundle
