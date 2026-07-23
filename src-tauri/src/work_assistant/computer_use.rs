@@ -1,14 +1,19 @@
 use crate::work_assistant::{AssistantErrorPayload, WorkAssistantError, WorkAssistantState};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, time::{SystemTime, UNIX_EPOCH}};
-use tauri::State;
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use uuid::Uuid;
 
 pub const COMPUTER_OBSERVATION_TTL_MS: u64 = 30_000;
 const MAX_COMPUTER_OBSERVATIONS: usize = 32;
 const MAX_COMPUTER_PREVIEWS: usize = 32;
 const COMPUTER_APPROVAL_TTL_MS: u64 = 30_000;
+const COMPUTER_RUN_GRANT_TTL_MS: u64 = 10 * 60_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +54,39 @@ pub struct ComputerObservation {
     pub expires_at: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererComputerWindow {
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererComputerTarget {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub fingerprint: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererComputerObservation {
+    pub id: String,
+    pub window: RendererComputerWindow,
+    pub targets: Vec<RendererComputerTarget>,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ComputerNativeApprovalPrompt {
+    title: String,
+    message: String,
+    requires_confirmation: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputerActionRequest {
@@ -76,6 +114,7 @@ pub struct ComputerActionPreview {
     pub target_summary: String,
     pub impact_summary: String,
     pub reversible: bool,
+    pub approval_required: bool,
     pub expires_at: u64,
 }
 
@@ -103,6 +142,7 @@ pub struct ComputerObservationStore {
     observations: HashMap<String, StoredComputerObservation>,
     previews: HashMap<String, StoredComputerPreview>,
     approvals: HashMap<String, StoredComputerApproval>,
+    run_grants: HashMap<String, StoredComputerRunGrant>,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +164,14 @@ struct StoredComputerApproval {
     token: String,
     preview_id: String,
     run_id: String,
+    expires_at: u64,
+}
+
+#[derive(Clone, Debug)]
+struct StoredComputerRunGrant {
+    run_id: String,
+    app_id: String,
+    window_fingerprint: String,
     expires_at: u64,
 }
 
@@ -157,9 +205,11 @@ impl ComputerObservationStore {
         self.prune(now);
         validate_action_request(&request)?;
         validate_action_payload(&request)?;
-        let observed = self.observations.get(&request.observation_id).cloned().ok_or_else(|| {
-            WorkAssistantError::stale_preview("computer observation has expired")
-        })?;
+        let observed = self
+            .observations
+            .get(&request.observation_id)
+            .cloned()
+            .ok_or_else(|| WorkAssistantError::stale_preview("computer observation has expired"))?;
         if observed.run_id != request.run_id {
             return Err(WorkAssistantError::blocked(
                 "computer observation belongs to a different run",
@@ -168,6 +218,8 @@ impl ComputerObservationStore {
         let target = validate_reference(&observed.observation, &request)?;
         assess_observation_surface(&observed.observation.window, &observed.observation.targets)?;
         assess_action(&request.action, &observed.observation.window, &target)?;
+        let approval_required =
+            !self.has_active_run_grant(&request, &observed.observation.window, now);
         if self.previews.len() >= MAX_COMPUTER_PREVIEWS {
             if let Some(oldest) = self
                 .previews
@@ -180,7 +232,10 @@ impl ComputerObservationStore {
         }
         let id = Uuid::new_v4().to_string();
         let risk = String::from(action_risk(&request.action));
-        let expires_at = observed.observation.expires_at.min(now.saturating_add(COMPUTER_OBSERVATION_TTL_MS));
+        let expires_at = observed
+            .observation
+            .expires_at
+            .min(now.saturating_add(COMPUTER_OBSERVATION_TTL_MS));
         self.previews.insert(
             id.clone(),
             StoredComputerPreview {
@@ -197,7 +252,11 @@ impl ComputerObservationStore {
             title: "电脑操作确认".into(),
             target_summary: "已验证的当前窗口目标".into(),
             impact_summary: action_summary(&request.action).into(),
-            reversible: matches!(request.action.as_str(), "computer_focus" | "computer_scroll"),
+            reversible: matches!(
+                request.action.as_str(),
+                "computer_focus" | "computer_scroll"
+            ),
+            approval_required,
             expires_at,
         })
     }
@@ -215,9 +274,10 @@ impl ComputerObservationStore {
                 "computer actions require one-time approval",
             ));
         }
-        let preview = self.previews.get(preview_id).ok_or_else(|| {
-            WorkAssistantError::blocked("a valid computer preview is required")
-        })?;
+        let preview = self
+            .previews
+            .get(preview_id)
+            .ok_or_else(|| WorkAssistantError::blocked("a valid computer preview is required"))?;
         if preview.run_id != run_id {
             return Err(WorkAssistantError::blocked(
                 "computer preview belongs to a different run",
@@ -243,6 +303,121 @@ impl ComputerObservationStore {
         })
     }
 
+    fn approval_prompt(
+        &mut self,
+        preview_id: &str,
+        run_id: &str,
+        scope: &str,
+        now: u64,
+    ) -> Result<ComputerNativeApprovalPrompt, WorkAssistantError> {
+        self.prune(now);
+        let preview = self
+            .previews
+            .get(preview_id)
+            .ok_or_else(|| WorkAssistantError::blocked("a valid computer preview is required"))?;
+        if preview.run_id != run_id {
+            return Err(WorkAssistantError::blocked(
+                "computer preview belongs to a different run",
+            ));
+        }
+        if !matches!(scope, "once" | "run") {
+            return Err(WorkAssistantError::blocked(
+                "computer approval scope is invalid",
+            ));
+        }
+        if scope == "run" && !is_run_grant_action(&preview.request.action) {
+            return Err(WorkAssistantError::blocked(
+                "only reversible computer actions can request a task grant",
+            ));
+        }
+        if scope == "run"
+            && self.has_active_run_grant(
+                &preview.request,
+                &self
+                    .observations
+                    .get(&preview.request.observation_id)
+                    .ok_or_else(|| {
+                        WorkAssistantError::stale_preview("computer observation has expired")
+                    })?
+                    .observation
+                    .window,
+                now,
+            )
+        {
+            return Ok(ComputerNativeApprovalPrompt {
+                title: String::new(),
+                message: String::new(),
+                requires_confirmation: false,
+            });
+        }
+        Ok(ComputerNativeApprovalPrompt {
+            title: "Papyrus 电脑操作确认".into(),
+            message: if scope == "run" {
+                format!(
+                    "{}\n\n允许本任务在当前应用中继续进行聚焦和滚动，最长 10 分钟。",
+                    action_summary(&preview.request.action)
+                )
+            } else {
+                format!(
+                    "{}\n\n此操作将在当前已验证窗口中执行。",
+                    action_summary(&preview.request.action)
+                )
+            },
+            requires_confirmation: true,
+        })
+    }
+
+    fn approve_after_native_confirmation(
+        &mut self,
+        preview_id: &str,
+        run_id: &str,
+        scope: &str,
+        confirmed: bool,
+        now: u64,
+    ) -> Result<ComputerApprovalGrant, WorkAssistantError> {
+        if !confirmed {
+            return Err(WorkAssistantError::cancelled(
+                "native computer action confirmation was declined",
+            ));
+        }
+        let preview =
+            self.previews.get(preview_id).cloned().ok_or_else(|| {
+                WorkAssistantError::blocked("a valid computer preview is required")
+            })?;
+        if preview.run_id != run_id {
+            return Err(WorkAssistantError::blocked(
+                "computer preview belongs to a different run",
+            ));
+        }
+        if scope == "run" {
+            if !is_run_grant_action(&preview.request.action) {
+                return Err(WorkAssistantError::blocked(
+                    "only reversible computer actions can receive a task grant",
+                ));
+            }
+            let observation = self
+                .observations
+                .get(&preview.request.observation_id)
+                .ok_or_else(|| {
+                    WorkAssistantError::stale_preview("computer observation has expired")
+                })?;
+            self.run_grants.insert(
+                run_id.into(),
+                StoredComputerRunGrant {
+                    run_id: run_id.into(),
+                    app_id: observation.observation.window.app_id.clone(),
+                    window_fingerprint: observation.observation.window.fingerprint.clone(),
+                    expires_at: now.saturating_add(COMPUTER_RUN_GRANT_TTL_MS),
+                },
+            );
+        } else if scope != "once" {
+            return Err(WorkAssistantError::blocked(
+                "computer approval scope is invalid",
+            ));
+        }
+        self.approve(preview_id, run_id, "once", now)
+    }
+
     /// Claims a grant before the native action starts. Removing it here makes replay impossible
     /// even if the foreground revalidation or platform dispatch subsequently fails.
     fn take_execution(
@@ -255,9 +430,10 @@ impl ComputerObservationStore {
         let approval = self.approvals.remove(approval_token).ok_or_else(|| {
             WorkAssistantError::blocked("a valid computer approval token is required")
         })?;
-        let preview = self.previews.get(preview_id).cloned().ok_or_else(|| {
-            WorkAssistantError::blocked("a valid computer preview is required")
-        })?;
+        let preview =
+            self.previews.get(preview_id).cloned().ok_or_else(|| {
+                WorkAssistantError::blocked("a valid computer preview is required")
+            })?;
         if approval.token != approval_token
             || approval.preview_id != preview_id
             || approval.run_id != preview.run_id
@@ -310,7 +486,8 @@ impl ComputerObservationStore {
     }
 
     pub fn clear_run(&mut self, run_id: &str) {
-        self.observations.retain(|_, observation| observation.run_id != run_id);
+        self.observations
+            .retain(|_, observation| observation.run_id != run_id);
         let previews = self
             .previews
             .values()
@@ -320,7 +497,9 @@ impl ComputerObservationStore {
         for preview_id in previews {
             self.remove_preview(&preview_id);
         }
-        self.approvals.retain(|_, approval| approval.run_id != run_id);
+        self.approvals
+            .retain(|_, approval| approval.run_id != run_id);
+        self.run_grants.remove(run_id);
     }
 
     pub(crate) fn has_observation_for_run(&self, run_id: &str) -> bool {
@@ -341,7 +520,9 @@ impl ComputerObservationStore {
         for preview_id in expired_previews {
             self.remove_preview(&preview_id);
         }
-        self.approvals.retain(|_, approval| approval.expires_at > now);
+        self.approvals
+            .retain(|_, approval| approval.expires_at > now);
+        self.run_grants.retain(|_, grant| grant.expires_at > now);
     }
 
     fn remove_preview(&mut self, preview_id: &str) {
@@ -349,6 +530,25 @@ impl ComputerObservationStore {
         self.approvals
             .retain(|_, approval| approval.preview_id != preview_id);
     }
+
+    fn has_active_run_grant(
+        &self,
+        request: &ComputerActionRequest,
+        window: &ComputerWindow,
+        now: u64,
+    ) -> bool {
+        is_run_grant_action(&request.action)
+            && self.run_grants.get(&request.run_id).is_some_and(|grant| {
+                grant.run_id == request.run_id
+                    && grant.app_id == window.app_id
+                    && grant.window_fingerprint == window.fingerprint
+                    && grant.expires_at > now
+            })
+    }
+}
+
+fn is_run_grant_action(action: &str) -> bool {
+    matches!(action, "computer_focus" | "computer_scroll")
 }
 
 fn validate_reference(
@@ -404,6 +604,16 @@ fn validate_dispatch_reference(
         });
     }
     Ok(())
+}
+
+fn validate_dispatch_surface(
+    action: &str,
+    window: &ComputerWindow,
+    targets: &[ComputerTarget],
+    target: &ComputerTarget,
+) -> Result<(), WorkAssistantError> {
+    assess_observation_surface(window, targets)?;
+    assess_action(action, window, target)
 }
 
 fn validate_action_request(request: &ComputerActionRequest) -> Result<(), WorkAssistantError> {
@@ -475,7 +685,7 @@ fn assess_observation_surface(
         surface.push(' ');
         surface.push_str(target.name.as_deref().unwrap_or_default());
     }
-    if contains_sensitive_marker(&surface) {
+    if contains_sensitive_marker(&surface.to_lowercase()) {
         return Err(WorkAssistantError {
             code: "sensitive_surface".into(),
             message: "sensitive desktop surface is blocked".into(),
@@ -487,22 +697,98 @@ fn assess_observation_surface(
 
 fn contains_sensitive_marker(surface: &str) -> bool {
     [
-        "password", "passcode", "otp", "one-time code", "verification", "captcha", "payment", "checkout", "card", "cvv", "bank",
-        "密码", "验证码", "支付", "结账", "银行卡", "证件",
+        "password",
+        "passcode",
+        "otp",
+        "one-time code",
+        "verification",
+        "captcha",
+        "payment",
+        "checkout",
+        "card",
+        "cvv",
+        "bank",
+        "密码",
+        "验证码",
+        "支付",
+        "结账",
+        "银行卡",
+        "证件",
     ]
     .iter()
     .any(|marker| surface.contains(marker))
 }
 
+fn renderer_observation(observation: &ComputerObservation) -> RendererComputerObservation {
+    RendererComputerObservation {
+        id: observation.id.clone(),
+        window: RendererComputerWindow {
+            fingerprint: observation.window.fingerprint.clone(),
+        },
+        targets: observation
+            .targets
+            .iter()
+            .map(|target| RendererComputerTarget {
+                id: target.id.clone(),
+                role: target.role.clone(),
+                name: safe_renderer_target_name(target),
+                fingerprint: target.fingerprint.clone(),
+            })
+            .collect(),
+        expires_at: observation.expires_at,
+    }
+}
+
+fn safe_renderer_target_name(target: &ComputerTarget) -> Option<String> {
+    let role = target.role.as_deref()?.to_ascii_lowercase();
+    if ![
+        "button",
+        "checkbox",
+        "radiobutton",
+        "menuitem",
+        "tabitem",
+        "hyperlink",
+    ]
+    .iter()
+    .any(|allowed| role.contains(allowed))
+    {
+        return None;
+    }
+    let name = target.name.as_deref()?.trim();
+    if name.is_empty()
+        || name.chars().count() > 64
+        || contains_sensitive_marker(&name.to_lowercase())
+        || name.contains('@')
+        || name
+            .chars()
+            .filter(|character| character.is_ascii_digit())
+            .count()
+            >= 6
+    {
+        return None;
+    }
+    Some(name.into())
+}
+
 pub fn validate_action_payload(request: &ComputerActionRequest) -> Result<(), WorkAssistantError> {
     if let Some(text) = request.text.as_deref() {
         if text.chars().count() > 4_000 {
-            return Err(WorkAssistantError::blocked("computer text exceeds the 4000 character limit"));
+            return Err(WorkAssistantError::blocked(
+                "computer text exceeds the 4000 character limit",
+            ));
         }
         let normalized = text.to_lowercase();
-        if ["password", "passcode", "otp", "verification code", "验证码", "密码", "支付密码"]
-            .iter()
-            .any(|marker| normalized.contains(marker))
+        if [
+            "password",
+            "passcode",
+            "otp",
+            "verification code",
+            "验证码",
+            "密码",
+            "支付密码",
+        ]
+        .iter()
+        .any(|marker| normalized.contains(marker))
         {
             return Err(WorkAssistantError {
                 code: "sensitive_surface".into(),
@@ -516,39 +802,75 @@ pub fn validate_action_payload(request: &ComputerActionRequest) -> Result<(), Wo
         {
             return Err(WorkAssistantError {
                 code: "sensitive_surface".into(),
-                message: "verification-code-like values cannot be typed by computer assistance".into(),
+                message: "verification-code-like values cannot be typed by computer assistance"
+                    .into(),
                 recoverable: true,
             });
         }
     }
     if request.action == "computer_keypress" {
-        let key = request.key.as_deref().unwrap_or_default().to_ascii_lowercase();
-        if !matches!(key.as_str(), "enter" | "tab" | "escape" | "space" | "up" | "down" | "left" | "right" | "pageup" | "pagedown" | "home" | "end") {
-            return Err(WorkAssistantError::blocked("computer keypress is not in the approved key directory"));
+        let key = request
+            .key
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !matches!(
+            key.as_str(),
+            "enter"
+                | "tab"
+                | "escape"
+                | "space"
+                | "up"
+                | "down"
+                | "left"
+                | "right"
+                | "pageup"
+                | "pagedown"
+                | "home"
+                | "end"
+        ) {
+            return Err(WorkAssistantError::blocked(
+                "computer keypress is not in the approved key directory",
+            ));
         }
     }
-    if request.action == "computer_scroll" && !matches!(request.delta.as_deref(), Some("up" | "down")) {
-        return Err(WorkAssistantError::blocked("computer scroll direction must be up or down"));
+    if request.action == "computer_scroll"
+        && !matches!(request.delta.as_deref(), Some("up" | "down"))
+    {
+        return Err(WorkAssistantError::blocked(
+            "computer scroll direction must be up or down",
+        ));
     }
     Ok(())
 }
 
 pub fn computer_capability() -> (bool, Option<&'static str>) {
     #[cfg(windows)]
-    { (true, None) }
+    {
+        (true, None)
+    }
     #[cfg(target_os = "linux")]
-    { (false, Some("需要 AT-SPI 与 GNOME Portal RemoteDesktop 授权；当前不会回退为坐标点击")) }
+    {
+        (
+            false,
+            Some("需要 AT-SPI 与 GNOME Portal RemoteDesktop 授权；当前不会回退为坐标点击"),
+        )
+    }
     #[cfg(target_os = "macos")]
-    { (false, Some("需要 macOS 辅助功能授权；当前仅提供兼容诊断")) }
+    {
+        (false, Some("需要 macOS 辅助功能授权；当前仅提供兼容诊断"))
+    }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    { (false, Some("当前平台不支持 Computer Use")) }
+    {
+        (false, Some("当前平台不支持 Computer Use"))
+    }
 }
 
 #[tauri::command]
 pub fn work_assistant_computer_observe(
     state: State<'_, WorkAssistantState>,
     run_id: String,
-) -> Result<ComputerObservation, AssistantErrorPayload> {
+) -> Result<RendererComputerObservation, AssistantErrorPayload> {
     let now = unix_millis();
     ensure_run_active(&state, &run_id).map_err(AssistantErrorPayload::from)?;
     let observation = platform::observe_foreground(now).map_err(AssistantErrorPayload::from)?;
@@ -558,7 +880,7 @@ pub fn work_assistant_computer_observe(
         .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))
         .map_err(AssistantErrorPayload::from)?
         .insert_for_run(&run_id, observation.clone(), now);
-    Ok(observation)
+    Ok(renderer_observation(&observation))
 }
 
 #[tauri::command]
@@ -578,20 +900,36 @@ pub fn work_assistant_computer_preview(
 }
 
 #[tauri::command]
-pub fn work_assistant_computer_approve(
+pub async fn work_assistant_computer_approve(
     state: State<'_, WorkAssistantState>,
+    app: AppHandle,
     preview_id: String,
     run_id: String,
-    choice: String,
+    scope: String,
 ) -> Result<ComputerApprovalGrant, AssistantErrorPayload> {
     let now = unix_millis();
+    ensure_run_active(&state, &run_id).map_err(AssistantErrorPayload::from)?;
+    let prompt = state
+        .computer_observations
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))
+        .map_err(AssistantErrorPayload::from)?
+        .approval_prompt(&preview_id, &run_id, &scope, now)
+        .map_err(AssistantErrorPayload::from)?;
+    let confirmed = if prompt.requires_confirmation {
+        native_computer_confirmation(app, prompt)
+            .await
+            .map_err(AssistantErrorPayload::from)?
+    } else {
+        true
+    };
     ensure_run_active(&state, &run_id).map_err(AssistantErrorPayload::from)?;
     state
         .computer_observations
         .lock()
         .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))
         .map_err(AssistantErrorPayload::from)?
-        .approve(&preview_id, &run_id, &choice, now)
+        .approve_after_native_confirmation(&preview_id, &run_id, &scope, confirmed, unix_millis())
         .map_err(AssistantErrorPayload::from)
 }
 
@@ -608,6 +946,11 @@ pub fn work_assistant_computer_execute(
         .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))
         .map_err(AssistantErrorPayload::from)?
         .take_execution(&preview_id, &approval_token, now)
+        .map_err(AssistantErrorPayload::from)?;
+    let _dispatch_gate = state
+        .computer_dispatch_gate
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("computer dispatch gate is unavailable"))
         .map_err(AssistantErrorPayload::from)?;
     ensure_run_active(&state, &preview.run_id).map_err(AssistantErrorPayload::from)?;
     let current = platform::observe_foreground(now).map_err(AssistantErrorPayload::from)?;
@@ -636,10 +979,31 @@ fn ensure_run_active(state: &WorkAssistantState, run_id: &str) -> Result<(), Wor
         .map_err(|_| WorkAssistantError::protocol("cancelled runs lock is unavailable"))?
         .contains(run_id);
     if cancelled {
-        Err(WorkAssistantError::cancelled("computer action run was cancelled"))
+        Err(WorkAssistantError::cancelled(
+            "computer action run was cancelled",
+        ))
     } else {
         Ok(())
     }
+}
+
+async fn native_computer_confirmation(
+    app: AppHandle,
+    prompt: ComputerNativeApprovalPrompt,
+) -> Result<bool, WorkAssistantError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(prompt.message)
+            .title(prompt.title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "继续".into(),
+                "取消".into(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| WorkAssistantError::protocol("native computer confirmation could not be shown"))
 }
 
 fn unix_millis() -> u64 {
@@ -665,18 +1029,25 @@ mod platform {
 
     #[cfg(windows)]
     pub fn observe_foreground(now: u64) -> Result<ComputerObservation, WorkAssistantError> {
-        use uiautomation::{types::TreeScope, UIAutomation};
         use uiautomation::screenshots::Screenshot;
+        use uiautomation::{types::TreeScope, UIAutomation};
 
         let automation = UIAutomation::new()
             .map_err(|_| WorkAssistantError::blocked("Windows UI Automation is unavailable"))?;
-        let focused = automation.get_focused_element()
-            .map_err(|_| WorkAssistantError::blocked("could not read the foreground accessible window"))?;
-        let window_handle = focused.get_native_window_handle().map(|value| value.to_string()).unwrap_or_default();
+        let focused = automation.get_focused_element().map_err(|_| {
+            WorkAssistantError::blocked("could not read the foreground accessible window")
+        })?;
+        let window_handle = focused
+            .get_native_window_handle()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         let title = focused.get_name().unwrap_or_default();
         let app_id = focused.get_classname().unwrap_or_default();
-        let shot = Screenshot::capture_desktop()
-            .map_err(|_| WorkAssistantError::blocked("could not capture the current desktop for observation verification"))?;
+        let shot = Screenshot::capture_desktop().map_err(|_| {
+            WorkAssistantError::blocked(
+                "could not capture the current desktop for observation verification",
+            )
+        })?;
         let screenshot_fingerprint = fingerprint(&[
             &shot.width().to_string(),
             &shot.height().to_string(),
@@ -688,26 +1059,52 @@ mod platform {
             fingerprint: fingerprint(&[&window_handle, &screenshot_fingerprint]),
         };
         let mut accessible_elements = vec![focused.clone()];
-        accessible_elements.extend(focused
-            .find_all(TreeScope::Descendants, &automation.create_true_condition().map_err(|_| WorkAssistantError::blocked("could not inspect accessibility targets"))?)
-            .unwrap_or_default());
+        accessible_elements.extend(
+            focused
+                .find_all(
+                    TreeScope::Descendants,
+                    &automation.create_true_condition().map_err(|_| {
+                        WorkAssistantError::blocked("could not inspect accessibility targets")
+                    })?,
+                )
+                .unwrap_or_default(),
+        );
         let targets = accessible_elements
             .into_iter()
             .take(96)
             .enumerate()
             .filter_map(|(index, element)| {
                 let name = element.get_name().unwrap_or_default();
-                let role = element.get_control_type().ok().map(|value| format!("{value:?}"));
-                let bounds = element.get_bounding_rectangle().ok().map(|rect| ComputerRect {
-                    x: f64::from(rect.get_left()),
-                    y: f64::from(rect.get_top()),
-                    width: f64::from(rect.get_right() - rect.get_left()),
-                    height: f64::from(rect.get_bottom() - rect.get_top()),
-                });
-                if name.is_empty() && bounds.is_none() { return None; }
+                let role = element
+                    .get_control_type()
+                    .ok()
+                    .map(|value| format!("{value:?}"));
+                let bounds = element
+                    .get_bounding_rectangle()
+                    .ok()
+                    .map(|rect| ComputerRect {
+                        x: f64::from(rect.get_left()),
+                        y: f64::from(rect.get_top()),
+                        width: f64::from(rect.get_right() - rect.get_left()),
+                        height: f64::from(rect.get_bottom() - rect.get_top()),
+                    });
+                if name.is_empty() && bounds.is_none() {
+                    return None;
+                }
                 let id = format!("target-{index}");
                 Some(ComputerTarget {
-                    fingerprint: fingerprint(&[&window.fingerprint, &id, role.as_deref().unwrap_or_default(), &name, &bounds.as_ref().map(|value| format!("{}:{}:{}:{}", value.x, value.y, value.width, value.height)).unwrap_or_default()]),
+                    fingerprint: fingerprint(&[
+                        &window.fingerprint,
+                        &id,
+                        role.as_deref().unwrap_or_default(),
+                        &name,
+                        &bounds
+                            .as_ref()
+                            .map(|value| {
+                                format!("{}:{}:{}:{}", value.x, value.y, value.width, value.height)
+                            })
+                            .unwrap_or_default(),
+                    ]),
                     id,
                     role,
                     name: (!name.is_empty()).then_some(name),
@@ -715,19 +1112,42 @@ mod platform {
                 })
             })
             .collect();
-        Ok(ComputerObservation { id: Uuid::new_v4().to_string(), window, targets, expires_at: now.saturating_add(COMPUTER_OBSERVATION_TTL_MS) })
+        Ok(ComputerObservation {
+            id: Uuid::new_v4().to_string(),
+            window,
+            targets,
+            expires_at: now.saturating_add(COMPUTER_OBSERVATION_TTL_MS),
+        })
     }
 
     #[cfg(windows)]
-    pub fn execute_action(request: &ComputerActionRequest, window: &ComputerWindow, target: &ComputerTarget) -> Result<ComputerActionResult, WorkAssistantError> {
-        use uiautomation::{patterns::UIScrollPattern, screenshots::Screenshot, types::{ScrollAmount, TreeScope}, UIAutomation};
-        let automation = UIAutomation::new().map_err(|_| WorkAssistantError::blocked("Windows UI Automation is unavailable"))?;
-        let focused = automation.get_focused_element().map_err(|_| WorkAssistantError::stale_preview("foreground accessible window is unavailable"))?;
-        let window_handle = focused.get_native_window_handle().map(|value| value.to_string()).unwrap_or_default();
+    pub fn execute_action(
+        request: &ComputerActionRequest,
+        window: &ComputerWindow,
+        target: &ComputerTarget,
+    ) -> Result<ComputerActionResult, WorkAssistantError> {
+        use uiautomation::{
+            patterns::UIScrollPattern,
+            screenshots::Screenshot,
+            types::{ScrollAmount, TreeScope},
+            UIAutomation,
+        };
+        let automation = UIAutomation::new()
+            .map_err(|_| WorkAssistantError::blocked("Windows UI Automation is unavailable"))?;
+        let focused = automation.get_focused_element().map_err(|_| {
+            WorkAssistantError::stale_preview("foreground accessible window is unavailable")
+        })?;
+        let window_handle = focused
+            .get_native_window_handle()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         let title = focused.get_name().unwrap_or_default();
         let app_id = focused.get_classname().unwrap_or_default();
-        let shot = Screenshot::capture_desktop()
-            .map_err(|_| WorkAssistantError::blocked("could not capture the current desktop for dispatch verification"))?;
+        let shot = Screenshot::capture_desktop().map_err(|_| {
+            WorkAssistantError::blocked(
+                "could not capture the current desktop for dispatch verification",
+            )
+        })?;
         let screenshot_fingerprint = fingerprint(&[
             &shot.width().to_string(),
             &shot.height().to_string(),
@@ -739,54 +1159,135 @@ mod platform {
             fingerprint: fingerprint(&[&window_handle, &screenshot_fingerprint]),
         };
         let mut elements = vec![focused.clone()];
-        elements.extend(focused.find_all(TreeScope::Descendants, &automation.create_true_condition().map_err(|_| WorkAssistantError::blocked("could not inspect accessibility targets"))?).unwrap_or_default());
-        let (dispatch_target, element) = elements.into_iter()
-            .take(96)
-            .enumerate()
-            .filter_map(|(index, element)| {
-                let name = element.get_name().unwrap_or_default();
-                let role = element.get_control_type().ok().map(|value| format!("{value:?}"));
-                let bounds = element.get_bounding_rectangle().ok().map(|rect| ComputerRect {
+        elements.extend(
+            focused
+                .find_all(
+                    TreeScope::Descendants,
+                    &automation.create_true_condition().map_err(|_| {
+                        WorkAssistantError::blocked("could not inspect accessibility targets")
+                    })?,
+                )
+                .unwrap_or_default(),
+        );
+        let mut dispatch_targets = Vec::new();
+        let mut matched = None;
+        for (index, element) in elements.into_iter().take(96).enumerate() {
+            let name = element.get_name().unwrap_or_default();
+            let role = element
+                .get_control_type()
+                .ok()
+                .map(|value| format!("{value:?}"));
+            let bounds = element
+                .get_bounding_rectangle()
+                .ok()
+                .map(|rect| ComputerRect {
                     x: f64::from(rect.get_left()),
                     y: f64::from(rect.get_top()),
                     width: f64::from(rect.get_right() - rect.get_left()),
                     height: f64::from(rect.get_bottom() - rect.get_top()),
                 });
-                if name.is_empty() && bounds.is_none() { return None; }
-                let id = format!("target-{index}");
-                let candidate = ComputerTarget {
-                    fingerprint: fingerprint(&[&dispatch_window.fingerprint, &id, role.as_deref().unwrap_or_default(), &name, &bounds.as_ref().map(|value| format!("{}:{}:{}:{}", value.x, value.y, value.width, value.height)).unwrap_or_default()]),
-                    id,
-                    role,
-                    name: (!name.is_empty()).then_some(name),
-                    bounds,
-                };
-                (candidate.id == target.id).then_some((candidate, element))
-            })
-            .next()
-            .ok_or_else(|| WorkAssistantError { code: "target_missing".into(), message: "accessibility target is no longer available".into(), recoverable: true })?;
+            if name.is_empty() && bounds.is_none() {
+                continue;
+            }
+            let id = format!("target-{index}");
+            let candidate = ComputerTarget {
+                fingerprint: fingerprint(&[
+                    &dispatch_window.fingerprint,
+                    &id,
+                    role.as_deref().unwrap_or_default(),
+                    &name,
+                    &bounds
+                        .as_ref()
+                        .map(|value| {
+                            format!("{}:{}:{}:{}", value.x, value.y, value.width, value.height)
+                        })
+                        .unwrap_or_default(),
+                ]),
+                id,
+                role,
+                name: (!name.is_empty()).then_some(name),
+                bounds,
+            };
+            if candidate.id == target.id {
+                matched = Some((candidate.clone(), element));
+            }
+            dispatch_targets.push(candidate);
+        }
+        let (dispatch_target, element) = matched.ok_or_else(|| WorkAssistantError {
+            code: "target_missing".into(),
+            message: "accessibility target is no longer available".into(),
+            recoverable: true,
+        })?;
         validate_dispatch_reference(window, target, &dispatch_window, &dispatch_target)?;
+        validate_dispatch_surface(
+            &request.action,
+            &dispatch_window,
+            &dispatch_targets,
+            &dispatch_target,
+        )?;
         match request.action.as_str() {
-            "computer_focus" => element.set_focus().map_err(|_| WorkAssistantError::stale_preview("could not focus the verified target"))?,
-            "computer_click" => element.click().map_err(|_| WorkAssistantError::stale_preview("could not activate the verified target"))?,
-            "computer_type" => element.send_text(request.text.as_deref().unwrap_or_default(), 5).map_err(|_| WorkAssistantError::stale_preview("could not type into the verified target"))?,
-            "computer_keypress" => element.send_keys(key_sequence(request.key.as_deref().unwrap_or_default())?, 5).map_err(|_| WorkAssistantError::stale_preview("could not send the verified keypress"))?,
+            "computer_focus" => element.set_focus().map_err(|_| {
+                WorkAssistantError::stale_preview("could not focus the verified target")
+            })?,
+            "computer_click" => element.click().map_err(|_| {
+                WorkAssistantError::stale_preview("could not activate the verified target")
+            })?,
+            "computer_type" => element
+                .send_text(request.text.as_deref().unwrap_or_default(), 5)
+                .map_err(|_| {
+                    WorkAssistantError::stale_preview("could not type into the verified target")
+                })?,
+            "computer_keypress" => element
+                .send_keys(key_sequence(request.key.as_deref().unwrap_or_default())?, 5)
+                .map_err(|_| {
+                    WorkAssistantError::stale_preview("could not send the verified keypress")
+                })?,
             "computer_scroll" => {
-                let amount = if request.delta.as_deref() == Some("up") { ScrollAmount::SmallDecrement } else { ScrollAmount::SmallIncrement };
-                element.get_pattern::<UIScrollPattern>().map_err(|_| WorkAssistantError::blocked("scroll is unavailable for this accessible target"))?.scroll(ScrollAmount::NoAmount, amount).map_err(|_| WorkAssistantError::stale_preview("could not scroll the verified target"))?
+                let amount = if request.delta.as_deref() == Some("up") {
+                    ScrollAmount::SmallDecrement
+                } else {
+                    ScrollAmount::SmallIncrement
+                };
+                element
+                    .get_pattern::<UIScrollPattern>()
+                    .map_err(|_| {
+                        WorkAssistantError::blocked(
+                            "scroll is unavailable for this accessible target",
+                        )
+                    })?
+                    .scroll(ScrollAmount::NoAmount, amount)
+                    .map_err(|_| {
+                        WorkAssistantError::stale_preview("could not scroll the verified target")
+                    })?
             }
             _ => return Err(WorkAssistantError::blocked("unsupported computer action")),
         }
-        Ok(ComputerActionResult { ok: true, summary: "已执行已验证的电脑操作。".into(), error_code: None, recoverable: None })
+        Ok(ComputerActionResult {
+            ok: true,
+            summary: "已执行已验证的电脑操作。".into(),
+            error_code: None,
+            recoverable: None,
+        })
     }
 
     #[cfg(windows)]
     fn key_sequence(key: &str) -> Result<&'static str, WorkAssistantError> {
         match key.to_ascii_lowercase().as_str() {
-            "enter" => Ok("{ENTER}"), "tab" => Ok("{TAB}"), "escape" => Ok("{ESC}"), "space" => Ok(" "),
-            "up" => Ok("{UP}"), "down" => Ok("{DOWN}"), "left" => Ok("{LEFT}"), "right" => Ok("{RIGHT}"),
-            "pageup" => Ok("{PGUP}"), "pagedown" => Ok("{PGDN}"), "home" => Ok("{HOME}"), "end" => Ok("{END}"),
-            _ => Err(WorkAssistantError::blocked("computer keypress is not in the approved key directory")),
+            "enter" => Ok("{ENTER}"),
+            "tab" => Ok("{TAB}"),
+            "escape" => Ok("{ESC}"),
+            "space" => Ok(" "),
+            "up" => Ok("{UP}"),
+            "down" => Ok("{DOWN}"),
+            "left" => Ok("{LEFT}"),
+            "right" => Ok("{RIGHT}"),
+            "pageup" => Ok("{PGUP}"),
+            "pagedown" => Ok("{PGDN}"),
+            "home" => Ok("{HOME}"),
+            "end" => Ok("{END}"),
+            _ => Err(WorkAssistantError::blocked(
+                "computer keypress is not in the approved key directory",
+            )),
         }
     }
 
@@ -796,28 +1297,52 @@ mod platform {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn execute_action(_request: &ComputerActionRequest, _window: &ComputerWindow, _target: &ComputerTarget) -> Result<ComputerActionResult, WorkAssistantError> {
+    pub fn execute_action(
+        _request: &ComputerActionRequest,
+        _window: &ComputerWindow,
+        _target: &ComputerTarget,
+    ) -> Result<ComputerActionResult, WorkAssistantError> {
         Err(WorkAssistantError { code: "computer_portal_required".into(), message: "Debian Wayland computer assistance is unavailable until AT-SPI and GNOME Portal authorization are granted".into(), recoverable: true })
     }
 
     #[cfg(target_os = "macos")]
     pub fn observe_foreground(_now: u64) -> Result<ComputerObservation, WorkAssistantError> {
-        Err(WorkAssistantError { code: "computer_accessibility_required".into(), message: "macOS Accessibility permission is required for computer assistance".into(), recoverable: true })
+        Err(WorkAssistantError {
+            code: "computer_accessibility_required".into(),
+            message: "macOS Accessibility permission is required for computer assistance".into(),
+            recoverable: true,
+        })
     }
 
     #[cfg(target_os = "macos")]
-    pub fn execute_action(_request: &ComputerActionRequest, _window: &ComputerWindow, _target: &ComputerTarget) -> Result<ComputerActionResult, WorkAssistantError> {
-        Err(WorkAssistantError { code: "computer_accessibility_required".into(), message: "macOS Accessibility permission is required for computer assistance".into(), recoverable: true })
+    pub fn execute_action(
+        _request: &ComputerActionRequest,
+        _window: &ComputerWindow,
+        _target: &ComputerTarget,
+    ) -> Result<ComputerActionResult, WorkAssistantError> {
+        Err(WorkAssistantError {
+            code: "computer_accessibility_required".into(),
+            message: "macOS Accessibility permission is required for computer assistance".into(),
+            recoverable: true,
+        })
     }
 
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     pub fn observe_foreground(_now: u64) -> Result<ComputerObservation, WorkAssistantError> {
-        Err(WorkAssistantError::blocked("computer assistance is not supported on this platform"))
+        Err(WorkAssistantError::blocked(
+            "computer assistance is not supported on this platform",
+        ))
     }
 
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    pub fn execute_action(_request: &ComputerActionRequest, _window: &ComputerWindow, _target: &ComputerTarget) -> Result<ComputerActionResult, WorkAssistantError> {
-        Err(WorkAssistantError::blocked("computer assistance is not supported on this platform"))
+    pub fn execute_action(
+        _request: &ComputerActionRequest,
+        _window: &ComputerWindow,
+        _target: &ComputerTarget,
+    ) -> Result<ComputerActionResult, WorkAssistantError> {
+        Err(WorkAssistantError::blocked(
+            "computer assistance is not supported on this platform",
+        ))
     }
 }
 
@@ -828,8 +1353,18 @@ mod tests {
     fn observation(id: &str, window: &str, target: &str, expires_at: u64) -> ComputerObservation {
         ComputerObservation {
             id: id.into(),
-            window: ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: window.into() },
-            targets: vec![ComputerTarget { id: "target-1".into(), role: Some("button".into()), name: Some("Save".into()), fingerprint: target.into(), bounds: None }],
+            window: ComputerWindow {
+                app_id: "app".into(),
+                title: "Window".into(),
+                fingerprint: window.into(),
+            },
+            targets: vec![ComputerTarget {
+                id: "target-1".into(),
+                role: Some("button".into()),
+                name: Some("Save".into()),
+                fingerprint: target.into(),
+                bounds: None,
+            }],
             expires_at,
         }
     }
@@ -851,11 +1386,18 @@ mod tests {
     #[test]
     fn computer_approval_is_run_bound_and_single_use() {
         let mut store = ComputerObservationStore::default();
-        store.insert_for_run("run-1", observation("observe-1", "window-v1", "target-v1", 10_000), 0);
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 10_000),
+            0,
+        );
         let preview = store.create_preview(request(), 1).unwrap();
 
         assert_eq!(
-            store.approve(&preview.id, "run-2", "once", 2).unwrap_err().code,
+            store
+                .approve(&preview.id, "run-2", "once", 2)
+                .unwrap_err()
+                .code,
             "blocked"
         );
 
@@ -863,11 +1405,17 @@ mod tests {
         let executed = store.take_execution(&preview.id, &grant.token, 3).unwrap();
         assert_eq!(executed.request.run_id, "run-1");
         assert_eq!(
-            store.approve(&preview.id, "run-1", "once", 4).unwrap_err().code,
+            store
+                .approve(&preview.id, "run-1", "once", 4)
+                .unwrap_err()
+                .code,
             "blocked"
         );
         assert_eq!(
-            store.take_execution(&preview.id, &grant.token, 4).unwrap_err().code,
+            store
+                .take_execution(&preview.id, &grant.token, 4)
+                .unwrap_err()
+                .code,
             "blocked"
         );
     }
@@ -875,16 +1423,26 @@ mod tests {
     #[test]
     fn computer_preview_rejects_cross_run_observations_and_cancelled_run_state() {
         let mut store = ComputerObservationStore::default();
-        store.insert_for_run("run-1", observation("observe-1", "window-v1", "target-v1", 10_000), 0);
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 10_000),
+            0,
+        );
         let mut cross_run = request();
         cross_run.run_id = "run-2".into();
-        assert_eq!(store.create_preview(cross_run, 1).unwrap_err().code, "blocked");
+        assert_eq!(
+            store.create_preview(cross_run, 1).unwrap_err().code,
+            "blocked"
+        );
 
         let preview = store.create_preview(request(), 1).unwrap();
         let grant = store.approve(&preview.id, "run-1", "once", 2).unwrap();
         store.clear_run("run-1");
         assert_eq!(
-            store.take_execution(&preview.id, &grant.token, 3).unwrap_err().code,
+            store
+                .take_execution(&preview.id, &grant.token, 3)
+                .unwrap_err()
+                .code,
             "blocked"
         );
     }
@@ -892,26 +1450,45 @@ mod tests {
     #[test]
     fn computer_execution_revalidates_target_and_observation_expiry() {
         let mut store = ComputerObservationStore::default();
-        store.insert_for_run("run-1", observation("observe-1", "window-v1", "target-v1", 10), 0);
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 10),
+            0,
+        );
         let preview = store.create_preview(request(), 1).unwrap();
         let grant = store.approve(&preview.id, "run-1", "once", 2).unwrap();
         let execution = store.take_execution(&preview.id, &grant.token, 3).unwrap();
         let changed = observation("current", "window-v1", "target-v2", 100);
         assert_eq!(
-            store.validate_execution(&execution, &changed, 4).unwrap_err().code,
+            store
+                .validate_execution(&execution, &changed, 4)
+                .unwrap_err()
+                .code,
             "target_changed"
         );
 
         let mut expired_store = ComputerObservationStore::default();
-        expired_store.insert_for_run("run-1", observation("observe-2", "window-v1", "target-v1", 4), 0);
+        expired_store.insert_for_run(
+            "run-1",
+            observation("observe-2", "window-v1", "target-v1", 4),
+            0,
+        );
         let mut expired_request = request();
         expired_request.observation_id = "observe-2".into();
         let preview = expired_store.create_preview(expired_request, 1).unwrap();
-        let grant = expired_store.approve(&preview.id, "run-1", "once", 2).unwrap();
-        let execution = expired_store.take_execution(&preview.id, &grant.token, 3).unwrap();
+        let grant = expired_store
+            .approve(&preview.id, "run-1", "once", 2)
+            .unwrap();
+        let execution = expired_store
+            .take_execution(&preview.id, &grant.token, 3)
+            .unwrap();
         assert_eq!(
             expired_store
-                .validate_execution(&execution, &observation("current", "window-v1", "target-v1", 100), 4)
+                .validate_execution(
+                    &execution,
+                    &observation("current", "window-v1", "target-v1", 100),
+                    4
+                )
                 .unwrap_err()
                 .code,
             "stale_preview"
@@ -921,38 +1498,103 @@ mod tests {
     #[test]
     fn validation_rejects_expired_observations_and_foreground_window_changes() {
         let mut store = ComputerObservationStore::default();
-        store.insert_for_run("run-1", observation("observe-1", "window-v1", "target-v1", 100), 0);
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 100),
+            0,
+        );
         let preview = store.create_preview(request(), 1).unwrap();
         let stored = store.previews.get(&preview.id).unwrap().clone();
 
-        let expired = store.validate_execution(&stored, &observation("current", "window-v1", "target-v1", 200), 100).unwrap_err();
+        let expired = store
+            .validate_execution(
+                &stored,
+                &observation("current", "window-v1", "target-v1", 200),
+                100,
+            )
+            .unwrap_err();
         assert_eq!(expired.code, "stale_preview");
 
-        store.insert_for_run("run-1", observation("observe-1", "window-v1", "target-v1", 200), 101);
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 200),
+            101,
+        );
         let preview = store.create_preview(request(), 102).unwrap();
         let stored = store.previews.get(&preview.id).unwrap().clone();
-        let changed = store.validate_execution(&stored, &observation("current", "window-v2", "target-v1", 200), 102).unwrap_err();
+        let changed = store
+            .validate_execution(
+                &stored,
+                &observation("current", "window-v2", "target-v1", 200),
+                102,
+            )
+            .unwrap_err();
         assert_eq!(changed.code, "window_changed");
     }
 
     #[test]
     fn validation_rejects_target_fingerprint_changes_and_sensitive_surfaces() {
         let mut store = ComputerObservationStore::default();
-        store.insert_for_run("run-1", observation("observe-1", "window-v1", "target-v1", 200), 0);
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 200),
+            0,
+        );
         let preview = store.create_preview(request(), 1).unwrap();
         let stored = store.previews.get(&preview.id).unwrap().clone();
-        let changed = store.validate_execution(&stored, &observation("current", "window-v1", "target-v2", 200), 1).unwrap_err();
+        let changed = store
+            .validate_execution(
+                &stored,
+                &observation("current", "window-v1", "target-v2", 200),
+                1,
+            )
+            .unwrap_err();
         assert_eq!(changed.code, "target_changed");
 
-        let password = ComputerTarget { id: "password".into(), role: Some("textbox".into()), name: Some("Password".into()), fingerprint: "target".into(), bounds: None };
-        assert_eq!(assess_action("computer_type", &ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: "window".into() }, &password).unwrap_err().code, "sensitive_surface");
+        let password = ComputerTarget {
+            id: "password".into(),
+            role: Some("textbox".into()),
+            name: Some("Password".into()),
+            fingerprint: "target".into(),
+            bounds: None,
+        };
+        assert_eq!(
+            assess_action(
+                "computer_type",
+                &ComputerWindow {
+                    app_id: "app".into(),
+                    title: "Window".into(),
+                    fingerprint: "window".into()
+                },
+                &password
+            )
+            .unwrap_err()
+            .code,
+            "sensitive_surface"
+        );
     }
 
     #[test]
     fn sensitive_neighbor_or_code_like_input_blocks_an_otherwise_unlabeled_control() {
-        let window = ComputerWindow { app_id: "browser".into(), title: "Checkout".into(), fingerprint: "window".into() };
-        let continue_button = ComputerTarget { id: "target-1".into(), role: Some("button".into()), name: Some("Continue".into()), fingerprint: "button".into(), bounds: None };
-        let otp_field = ComputerTarget { id: "target-2".into(), role: Some("textbox".into()), name: Some("One-time code".into()), fingerprint: "code".into(), bounds: None };
+        let window = ComputerWindow {
+            app_id: "browser".into(),
+            title: "Checkout".into(),
+            fingerprint: "window".into(),
+        };
+        let continue_button = ComputerTarget {
+            id: "target-1".into(),
+            role: Some("button".into()),
+            name: Some("Continue".into()),
+            fingerprint: "button".into(),
+            bounds: None,
+        };
+        let otp_field = ComputerTarget {
+            id: "target-2".into(),
+            role: Some("textbox".into()),
+            name: Some("One-time code".into()),
+            fingerprint: "code".into(),
+            bounds: None,
+        };
         assert_eq!(
             assess_observation_surface(&window, &[continue_button.clone(), otp_field])
                 .unwrap_err()
@@ -964,14 +1606,134 @@ mod tests {
         code_request.action = "computer_type".into();
         code_request.text = Some("123456".into());
         code_request.target_id = continue_button.id;
-        assert_eq!(validate_action_payload(&code_request).unwrap_err().code, "sensitive_surface");
+        assert_eq!(
+            validate_action_payload(&code_request).unwrap_err().code,
+            "sensitive_surface"
+        );
+    }
+
+    #[test]
+    fn renderer_observation_omits_window_titles_and_edit_names() {
+        let observation = ComputerObservation {
+            id: "observe-1".into(),
+            window: ComputerWindow {
+                app_id: "writer".into(),
+                title: "Alice private notes".into(),
+                fingerprint: "window-1".into(),
+            },
+            targets: vec![
+                ComputerTarget {
+                    id: "save".into(),
+                    role: Some("Button".into()),
+                    name: Some("Save draft".into()),
+                    fingerprint: "save-1".into(),
+                    bounds: None,
+                },
+                ComputerTarget {
+                    id: "edit".into(),
+                    role: Some("Edit".into()),
+                    name: Some("alice@example.com".into()),
+                    fingerprint: "edit-1".into(),
+                    bounds: None,
+                },
+            ],
+            expires_at: 123,
+        };
+
+        let serialized = serde_json::to_string(&renderer_observation(&observation)).unwrap();
+        assert!(!serialized.contains("Alice private notes"));
+        assert!(!serialized.contains("alice@example.com"));
+        assert!(serialized.contains("Save draft"));
+    }
+
+    #[test]
+    fn approval_token_is_only_issued_after_native_confirmation_result() {
+        let mut store = ComputerObservationStore::default();
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 10_000),
+            0,
+        );
+        let preview = store.create_preview(request(), 1).unwrap();
+
+        assert_eq!(
+            store
+                .approve_after_native_confirmation(&preview.id, "run-1", "once", false, 2)
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
+        assert_eq!(
+            store
+                .approve_after_native_confirmation(&preview.id, "run-1", "once", true, 2)
+                .unwrap()
+                .preview_id,
+            preview.id
+        );
+    }
+
+    #[test]
+    fn reversible_run_grant_applies_only_to_the_same_run_and_window() {
+        let mut store = ComputerObservationStore::default();
+        store.insert_for_run(
+            "run-1",
+            observation("observe-1", "window-v1", "target-v1", 100_000),
+            0,
+        );
+        let mut focus = request();
+        focus.action = "computer_focus".into();
+        let first = store.create_preview(focus.clone(), 1).unwrap();
+        assert!(first.approval_required);
+        store
+            .approve_after_native_confirmation(&first.id, "run-1", "run", true, 2)
+            .unwrap();
+
+        let same_window = store.create_preview(focus.clone(), 3).unwrap();
+        assert!(!same_window.approval_required);
+
+        let mut high_risk = focus.clone();
+        high_risk.action = "computer_click".into();
+        assert!(
+            store
+                .create_preview(high_risk, 3)
+                .unwrap()
+                .approval_required
+        );
+
+        store.insert_for_run(
+            "run-1",
+            observation("observe-2", "window-v2", "target-v1", 100_000),
+            3,
+        );
+        let mut other_window = focus;
+        other_window.observation_id = "observe-2".into();
+        other_window.window_fingerprint = "window-v2".into();
+        assert!(
+            store
+                .create_preview(other_window, 4)
+                .unwrap()
+                .approval_required
+        );
     }
 
     #[test]
     fn dispatch_revalidation_rejects_a_reenumerated_target_with_a_different_fingerprint() {
-        let window = ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: "window-v1".into() };
-        let expected = ComputerTarget { id: "target-1".into(), role: Some("button".into()), name: Some("Save".into()), fingerprint: "target-v1".into(), bounds: None };
-        let changed = ComputerTarget { fingerprint: "target-v2".into(), ..expected.clone() };
+        let window = ComputerWindow {
+            app_id: "app".into(),
+            title: "Window".into(),
+            fingerprint: "window-v1".into(),
+        };
+        let expected = ComputerTarget {
+            id: "target-1".into(),
+            role: Some("button".into()),
+            name: Some("Save".into()),
+            fingerprint: "target-v1".into(),
+            bounds: None,
+        };
+        let changed = ComputerTarget {
+            fingerprint: "target-v2".into(),
+            ..expected.clone()
+        };
 
         assert_eq!(
             validate_dispatch_reference(&window, &expected, &window, &changed)
@@ -982,15 +1744,56 @@ mod tests {
     }
 
     #[test]
+    fn final_dispatch_surface_check_blocks_a_new_sensitive_neighbor() {
+        let window = ComputerWindow {
+            app_id: "browser".into(),
+            title: "Window".into(),
+            fingerprint: "window-v1".into(),
+        };
+        let target = ComputerTarget {
+            id: "continue".into(),
+            role: Some("Button".into()),
+            name: Some("Continue".into()),
+            fingerprint: "continue-v1".into(),
+            bounds: None,
+        };
+        let payment_field = ComputerTarget {
+            id: "card".into(),
+            role: Some("Edit".into()),
+            name: Some("Card number".into()),
+            fingerprint: "card-v1".into(),
+            bounds: None,
+        };
+
+        assert_eq!(
+            validate_dispatch_surface(
+                "computer_click",
+                &window,
+                &[target.clone(), payment_field],
+                &target
+            )
+            .unwrap_err()
+            .code,
+            "sensitive_surface"
+        );
+    }
+
+    #[test]
     fn action_payload_rejects_sensitive_text_and_unbounded_keypresses() {
         let mut typing = request();
         typing.action = "computer_type".into();
         typing.text = Some("my password is not for automation".into());
-        assert_eq!(validate_action_payload(&typing).unwrap_err().code, "sensitive_surface");
+        assert_eq!(
+            validate_action_payload(&typing).unwrap_err().code,
+            "sensitive_surface"
+        );
 
         let mut keypress = request();
         keypress.action = "computer_keypress".into();
         keypress.key = Some("{WIN}R".into());
-        assert_eq!(validate_action_payload(&keypress).unwrap_err().code, "blocked");
+        assert_eq!(
+            validate_action_payload(&keypress).unwrap_err().code,
+            "blocked"
+        );
     }
 }

@@ -349,12 +349,15 @@ fn cancel_run_and_clear_computer_observations(
     state: &WorkAssistantState,
     run: String,
 ) -> Result<(), WorkAssistantError> {
+    let _dispatch_gate = state
+        .computer_dispatch_gate
+        .lock()
+        .map_err(|_| WorkAssistantError::protocol("computer dispatch gate is unavailable"))?;
     record_cancelled_run(state, run.clone())?;
     state
         .computer_observations
         .lock()
-        .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))
-        ?
+        .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))?
         .clear_run(&run);
     Ok(())
 }
@@ -406,7 +409,10 @@ mod tests {
             roots: RwLock::new(Vec::new()),
             previews: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
-            computer_observations: Mutex::new(crate::work_assistant::ComputerObservationStore::default()),
+            computer_observations: Mutex::new(
+                crate::work_assistant::ComputerObservationStore::default(),
+            ),
+            computer_dispatch_gate: Mutex::new(()),
             cancelled_runs: Mutex::new(HashSet::new()),
             cancelled_execution_audits: Mutex::new(HashSet::new()),
             audit_path: PathBuf::from("unused-audit-path"),
@@ -532,19 +538,29 @@ mod tests {
     #[test]
     fn cancellation_clears_ephemeral_computer_observations() {
         let state = test_state();
-        state.computer_observations.lock().unwrap().insert_for_run("run-1",
+        state.computer_observations.lock().unwrap().insert_for_run(
+            "run-1",
             crate::work_assistant::ComputerObservation {
                 id: "observe-1".into(),
-                window: crate::work_assistant::ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: "window".into() },
+                window: crate::work_assistant::ComputerWindow {
+                    app_id: "app".into(),
+                    title: "Window".into(),
+                    fingerprint: "window".into(),
+                },
                 targets: Vec::new(),
                 expires_at: u64::MAX,
             },
             1,
         );
-        state.computer_observations.lock().unwrap().insert_for_run("run-2",
+        state.computer_observations.lock().unwrap().insert_for_run(
+            "run-2",
             crate::work_assistant::ComputerObservation {
                 id: "observe-2".into(),
-                window: crate::work_assistant::ComputerWindow { app_id: "app".into(), title: "Other window".into(), fingerprint: "window-2".into() },
+                window: crate::work_assistant::ComputerWindow {
+                    app_id: "app".into(),
+                    title: "Other window".into(),
+                    fingerprint: "window-2".into(),
+                },
                 targets: Vec::new(),
                 expires_at: u64::MAX,
             },

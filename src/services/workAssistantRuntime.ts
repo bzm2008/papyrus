@@ -359,15 +359,21 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
 
     if (preview) {
       const risk = effectiveRisk(manifest.defaultRisk, preview.risk)
-      const request: AssistantApprovalRequest = {
-        ...preview,
-        runId: input.runId,
-        toolCallId: call.id,
-        reason: preview.impactSummary,
-        allowedChoices: manifest.executor === 'computer' ? ['once', 'deny'] : approvalChoices(risk),
+      const hasComputerTaskGrant = manifest.executor === 'computer' && preview.approvalRequired === false
+      let choice: AssistantApprovalChoice = 'run'
+      if (!hasComputerTaskGrant) {
+        const request: AssistantApprovalRequest = {
+          ...preview,
+          runId: input.runId,
+          toolCallId: call.id,
+          reason: preview.impactSummary,
+          allowedChoices: manifest.executor === 'computer'
+            ? preview.reversible ? ['once', 'run', 'deny'] : ['once', 'deny']
+            : approvalChoices(risk),
+        }
+        emit({ type: 'approval.required', runId: input.runId, request, at: now() })
+        choice = await waitForApproval(request, input.signal)
       }
-      emit({ type: 'approval.required', runId: input.runId, request, at: now() })
-      const choice = await waitForApproval(request, input.signal)
       await ensureRunIsNotAborted(input.signal, input.runId)
       if (choice === 'deny') {
         if (manifest.executor === 'browser_bridge') {
@@ -422,7 +428,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         return result
       }
       if (manifest.executor === 'computer') {
-        const grant = await approveComputerAction(preview.id, input.runId, choice)
+        const grant = await approveComputerAction(preview.id, input.runId, choice === 'run' ? 'run' : 'once')
         const data = await executeApprovedComputerAction(grant.previewId, grant.token)
         const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
         const result = actionPayload?.ok === false

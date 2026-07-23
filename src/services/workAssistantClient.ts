@@ -141,8 +141,8 @@ export const previewComputerAction = (request: ComputerActionRequest) =>
 export const approveComputerAction = (
   previewId: string,
   runId: string,
-  choice: AssistantApprovalChoice,
-) => invokeTyped<ApprovalGrant>('work_assistant_computer_approve', { previewId, runId, choice })
+  scope: Extract<AssistantApprovalChoice, 'once' | 'run'>,
+) => invokeTyped<ApprovalGrant>('work_assistant_computer_approve', { previewId, runId, scope })
 
 export const executeApprovedComputerAction = (previewId: string, approvalToken: string) =>
   invokeTyped<ComputerActionResponse>('work_assistant_computer_execute', { previewId, approvalToken })

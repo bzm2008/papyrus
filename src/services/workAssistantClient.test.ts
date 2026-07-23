@@ -62,7 +62,7 @@ describe('workAssistantClient', () => {
         targetFingerprint: 'target-v1',
       },
     })
-    expect(invoke).toHaveBeenNthCalledWith(3, 'work_assistant_computer_approve', { previewId: 'preview-1', runId: 'run-1', choice: 'once' })
+    expect(invoke).toHaveBeenNthCalledWith(3, 'work_assistant_computer_approve', { previewId: 'preview-1', runId: 'run-1', scope: 'once' })
     expect(invoke).toHaveBeenNthCalledWith(4, 'work_assistant_computer_execute', { previewId: 'preview-1', approvalToken: 'approval-1' })
   })
 })

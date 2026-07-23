@@ -156,7 +156,7 @@ describe('work assistant runtime', () => {
     expect(invoke).toHaveBeenCalledWith('work_assistant_computer_approve', {
       previewId: 'computer-preview-1',
       runId: 'run-computer',
-      choice: 'once',
+      scope: 'once',
     })
     expect(invoke).toHaveBeenCalledWith('work_assistant_computer_execute', {
       previewId: 'computer-preview-1',
@@ -188,6 +188,33 @@ describe('work assistant runtime', () => {
     expect(invoke).not.toHaveBeenCalledWith('work_assistant_computer_approve', expect.anything())
     expect(invoke).not.toHaveBeenCalledWith('work_assistant_computer_execute', expect.anything())
     expect(invoke).toHaveBeenCalledWith('work_assistant_cancel_run', { run: 'run-computer-cancel' })
+  })
+
+  it('uses an existing native task grant for a reversible computer action without another renderer approval', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_computer_preview') {
+        return { id: 'computer-preview-granted', revision: 'observe-1', risk: 'reversible', title: '电脑操作确认', targetSummary: '已验证的当前窗口目标', impactSummary: '滚动当前已验证内容。', reversible: true, approvalRequired: false, expiresAt: 999 }
+      }
+      if (command === 'work_assistant_computer_approve') return { token: 'computer-token-granted', previewId: 'computer-preview-granted', expires: 999 }
+      if (command === 'work_assistant_computer_execute') return { ok: true, summary: '已滚动。' }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const events: WorkAssistantEvent[] = []
+
+    const result = await executeAssistantToolCall({
+      runId: 'run-computer-granted',
+      toolCall: call('computer_scroll', { observationId: 'observe-1', windowFingerprint: 'window-v1', targetId: 'target-1', targetFingerprint: 'target-v1', delta: 'down' }),
+      emit: (event) => events.push(event),
+    })
+
+    expect(result).toMatchObject({ ok: true, summary: '已滚动。' })
+    expect(events.some((event) => event.type === 'approval.required')).toBe(false)
+    expect(invoke).toHaveBeenCalledWith('work_assistant_computer_approve', {
+      previewId: 'computer-preview-granted',
+      runId: 'run-computer-granted',
+      scope: 'run',
+    })
   })
 
   it('aborts pending approval and invokes native cancellation', async () => {

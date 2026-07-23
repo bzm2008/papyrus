@@ -12,7 +12,7 @@ export type ComputerTarget = {
 
 export type ComputerObservation = {
   id: string
-  window: { appId: string; title: string; fingerprint: string }
+  window: { appId?: string; title?: string; fingerprint: string }
   targets: ComputerTarget[]
   expiresAt: number
 }
