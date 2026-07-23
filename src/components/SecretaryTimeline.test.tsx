@@ -1,0 +1,205 @@
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+
+import { createEmptyWorkAssistantRun, type AssistantApprovalRequest, type AssistantToolCall } from '../services/workAssistantProtocol'
+import type { AgentTodo, FlowMessage, FlowTrace, SecretaryPlanDraft } from '../stores/useAppStore'
+import { SecretaryContextDrawer, SecretaryTimeline } from './SecretaryTimeline'
+
+const message = (patch: Partial<FlowMessage> = {}): FlowMessage => ({
+  id: 'message-1',
+  role: 'user',
+  content: '你好，铭荼',
+  createdAt: 100,
+  ...patch,
+})
+
+const toolCall = (patch: Partial<AssistantToolCall> = {}): AssistantToolCall => ({
+  id: 'tool-1',
+  runId: 'run-1',
+  name: 'workspace_scan',
+  intent: '检查项目资料',
+  arguments: { token: 'do-not-show', path: 'project/brief.md' },
+  status: 'completed',
+  startedAt: 300,
+  ...patch,
+})
+
+const approval = (patch: Partial<AssistantApprovalRequest> = {}): AssistantApprovalRequest => ({
+  id: 'approval-1',
+  revision: '1',
+  risk: 'reversible',
+  title: '移动资料到项目目录',
+  targetSummary: '项目资料',
+  impactSummary: '移动 2 个文件',
+  reversible: true,
+  expiresAt: 10_000,
+  runId: 'run-1',
+  toolCallId: 'tool-1',
+  reason: '需要你的确认',
+  allowedChoices: ['once', 'deny'],
+  ...patch,
+})
+
+const todo = (patch: Partial<AgentTodo> = {}): AgentTodo => ({
+  id: 'todo-1',
+  title: '不应显示',
+  detail: 'simple greeting must remain quiet',
+  status: 'pending',
+  agentId: 'writer',
+  createdAt: 200,
+  updatedAt: 200,
+  ...patch,
+})
+
+const trace = (patch: Partial<FlowTrace> = {}): FlowTrace => ({
+  id: 'trace-1',
+  kind: 'tool',
+  title: '项目扫描',
+  detail: 'secret internal trace details',
+  status: 'completed',
+  startedAt: 320,
+  ...patch,
+})
+
+const plan = (patch: Partial<SecretaryPlanDraft> = {}): SecretaryPlanDraft => ({
+  id: 'plan-1',
+  request: '整理访谈素材',
+  executionPrompt: '整理访谈素材',
+  planText: '1. 汇总资料\n2. 写出大纲',
+  status: 'draft',
+  feedback: [],
+  createdAt: 200,
+  updatedAt: 200,
+  ...patch,
+})
+
+describe('SecretaryTimeline', () => {
+  it('keeps a simple greeting as a quiet conversation without todos or tools', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message(), message({ id: 'reply-1', role: 'assistant', content: '你好，我在。', createdAt: 120 })]}
+        todos={[todo()]}
+        traces={[trace()]}
+        runState="idle"
+      />,
+    )
+
+    expect(screen.getByText('你好，我在。')).toBeInTheDocument()
+    expect(screen.queryByText('不应显示')).not.toBeInTheDocument()
+    expect(screen.queryByText('项目扫描')).not.toBeInTheDocument()
+  })
+
+  it('places streaming secretary prose before later tool activity and keeps tool detail collapsed', () => {
+    render(
+      <SecretaryTimeline
+        messages={[
+          message(),
+          message({ id: 'reply-1', role: 'assistant', content: '我先检查现有资料。', createdAt: 200 }),
+        ]}
+        runState="running"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'running', messageText: '我先检查现有资料。', toolCalls: { 'tool-1': toolCall() } }}
+      />,
+    )
+
+    const entries = screen.getAllByTestId('secretary-timeline-entry')
+    expect(entries.map((entry) => entry.textContent)).toEqual(expect.arrayContaining([
+      expect.stringContaining('我先检查现有资料。'),
+      expect.stringContaining('检查项目资料'),
+    ]))
+    expect(entries.findIndex((entry) => entry.textContent?.includes('我先检查现有资料。')))
+      .toBeLessThan(entries.findIndex((entry) => entry.textContent?.includes('检查项目资料')))
+    expect(screen.queryByText('do-not-show')).not.toBeInTheDocument()
+    expect(screen.queryByText('project/brief.md')).not.toBeInTheDocument()
+  })
+
+  it('renders an approval inline on the same timeline and exposes only safe approval context', () => {
+    const onApprove = vi.fn()
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'awaiting_approval',
+          toolCalls: {
+            'tool-1': toolCall({ status: 'awaiting_approval', preview: approval() }),
+          },
+        }}
+        onApprove={onApprove}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: '执行一次' })).toBeInTheDocument()
+    expect(screen.getByText('移动 2 个文件')).toBeInTheDocument()
+    expect(screen.queryByText('do-not-show')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '执行一次' }))
+    expect(onApprove).toHaveBeenCalledWith('approval-1', 'once')
+  })
+
+  it('keeps the public plan and its execution controls in the timeline', () => {
+    const onExecutePlan = vi.fn()
+    const onCancelPlan = vi.fn()
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        planDraft={plan()}
+        runState="idle"
+        onExecutePlan={onExecutePlan}
+        onCancelPlan={onCancelPlan}
+      />,
+    )
+
+    expect(screen.getByText('公开计划')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '开始执行' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消计划' }))
+    expect(onExecutePlan).toHaveBeenCalledTimes(1)
+    expect(onCancelPlan).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains the original request when the run fails or is cancelled', () => {
+    const { rerender } = render(
+      <SecretaryTimeline
+        messages={[message({ content: '把访谈整理成大纲' })]}
+        runState="error"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'failed', error: '网络暂时不可用' }}
+      />,
+    )
+    expect(screen.getByText('把访谈整理成大纲')).toBeInTheDocument()
+    expect(screen.getByText('网络暂时不可用')).toBeInTheDocument()
+
+    rerender(
+      <SecretaryTimeline
+        messages={[message({ content: '把访谈整理成大纲' })]}
+        runState="idle"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'cancelled' }}
+      />,
+    )
+    expect(screen.getByText('把访谈整理成大纲')).toBeInTheDocument()
+    expect(screen.getByText('本次执行已停止')).toBeInTheDocument()
+  })
+
+  it('closes the narrow project drawer from the keyboard and returns focus to its trigger', () => {
+    const onClose = vi.fn()
+    const trigger = document.createElement('button')
+    trigger.textContent = '项目上下文'
+    document.body.append(trigger)
+    trigger.focus()
+
+    render(
+      <SecretaryContextDrawer
+        open
+        activeSection="project"
+        onSectionChange={vi.fn()}
+        onClose={onClose}
+      >
+        <div>项目内容</div>
+      </SecretaryContextDrawer>,
+    )
+
+    expect(screen.getByRole('dialog', { name: '项目上下文' })).toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole('dialog', { name: '项目上下文' }), { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(document.activeElement).toBe(trigger)
+    trigger.remove()
+  })
+})

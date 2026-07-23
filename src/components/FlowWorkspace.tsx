@@ -4,6 +4,10 @@ import {
   Copy,
   ExternalLink,
   FileText,
+  FolderKanban,
+  History,
+  LibraryBig,
+  ListTodo,
   PanelLeftOpen,
   MessageSquare,
   PenLine,
@@ -27,7 +31,6 @@ import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import { formatScallionPlanName } from '../services/scallionModelCatalog'
 import { getScallionQuotaDisplay } from '../services/scallionAccountService'
-import { shouldShowSecretaryPartialReply } from '../services/secretaryPartialReply'
 import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
 import {
   buildSecretaryLedgerResumePrompt,
@@ -37,7 +40,6 @@ import {
 import { cancelSecretaryRun, pauseSecretaryRun } from '../services/secretaryRunController'
 import { selectNextAutoStartSecretaryTask } from '../services/secretaryTaskScheduler'
 import { resolveAssistantApproval } from '../services/workAssistantRuntime'
-import type { AssistantApprovalRequest } from '../services/workAssistantProtocol'
 import {
   type AgentStep,
   type AgentTodo,
@@ -65,29 +67,22 @@ import { SecretaryTaskCenter } from './SecretaryTaskCenter'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { applySlashCommand, resolveSlashCommandPrompt, type SlashCommand } from './slashCommands'
 import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
-import { SecretaryToolStep } from './SecretaryToolStep'
 import { SecretaryFileWorkbench } from './SecretaryFileWorkbench'
 import { SecretaryBrowserWorkbench } from './SecretaryBrowserWorkbench'
-import { SecretaryPartialReply } from './SecretaryPartialReply'
+import { SecretaryContextDrawer, SecretaryTimeline, type SecretaryContextSection } from './SecretaryTimeline'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type AgentTodos = AgentTodo[]
-type ReceiptSnapshot = {
-  todos: AgentTodo[]
-  steps: AgentStep[]
-  traces: FlowTrace[]
-  changeStat?: ReturnType<typeof useAppStore.getState>['documentChangeStats'][number]
-}
-
 export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
   const [inlineWorkbenchView, setInlineWorkbenchView] = useState<WorkbenchView>('run')
-  const [taskCenterDrawerOpen, setTaskCenterDrawerOpen] = useState(false)
-  const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
+  const [contextDrawerOpen, setContextDrawerOpen] = useState(false)
+  const [contextSection, setContextSection] = useState<SecretaryContextSection>('project')
+  const [contextRailCollapsed, setContextRailCollapsed] = useState(false)
+  const [resultDrawerOpen, setResultDrawerOpen] = useState(false)
   const processingQueuedIdRef = useRef<string | null>(null)
   const autoStartTaskIdRef = useRef<string | null>(null)
   const pendingPersistentTaskRef = useRef<{ task: { id: string; request: string }; recovery?: SecretaryLedgerRecoveryItem } | null>(null)
-  const receiptRunStateRef = useRef(useAppStore.getState().llmRunState)
   const flowMessages = useAppStore((state) => state.flowMessages)
   const setFlowMessages = useAppStore((state) => state.setFlowMessages)
   const agentTodos = useAppStore((state) => state.agentTodos)
@@ -119,14 +114,12 @@ export function FlowWorkspace() {
     scallionPlan?.name ??
     scallionPlan?.key ??
     (scallionToken ? '套餐同步中' : '未登录')
-  const activeAgentRunId = useAppStore((state) => state.activeAgentRunId)
   const activeWorkAssistantRunId = useWorkAssistantStore((state) => state.activeRunId)
   const activeWorkAssistantRun = useWorkAssistantStore((state) => activeWorkAssistantRunId ? state.runs[activeWorkAssistantRunId] : undefined)
   const selectWorkAssistantTool = useWorkAssistantStore((state) => state.selectToolCall)
   const selectedWorkAssistantToolId = useWorkAssistantStore((state) => state.selectedToolCallId)
   const activeWorkAssistantCalls = activeWorkAssistantRun ? Object.values(activeWorkAssistantRun.toolCalls) : []
   const selectedWorkAssistantCall = activeWorkAssistantCalls.find((call) => call.id === selectedWorkAssistantToolId)
-  const showCancelledPartialReply = shouldShowSecretaryPartialReply(activeWorkAssistantRun, activeAgentRunId)
   const filePlanCall = selectedWorkAssistantCall?.name === 'file_plan_batch' ? selectedWorkAssistantCall : [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_plan_batch')
   const fileApplyCall = [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_apply_batch')
   const updateSecretaryGoal = useAppStore((state) => state.updateSecretaryGoal)
@@ -137,55 +130,14 @@ export function FlowWorkspace() {
     : []
   useAgentStream()
 
-  const visibleMessages = flowMessages.filter(
-    (message) => message.role === 'user' || !message.agentId || message.agentId === 'writer',
-  )
-  const latestAssistantId = [...visibleMessages]
+  const latestAssistantMessage = [...flowMessages]
     .reverse()
-    .find((message) => message.role === 'assistant')?.id
-  const latestAssistantMessage = latestAssistantId
-    ? visibleMessages.find((message) => message.id === latestAssistantId)
-    : undefined
-  const latestUserMessage = [...visibleMessages].reverse().find((message) => message.role === 'user')
-  const shouldShowPendingThinking =
-    (llmRunState === 'running' || llmRunState === 'reconnecting') &&
-    (!latestAssistantMessage || (latestUserMessage?.createdAt ?? 0) > latestAssistantMessage.createdAt)
+    .find((message) => message.role === 'assistant' && (!message.agentId || message.agentId === 'writer'))
   const latestChangeStat = documentChangeStats[0]
   const latestRunChangeStat =
     latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
       ? latestChangeStat
       : undefined
-  const showInlineWorkbench =
-    inlineWorkbenchView !== 'run' ||
-    Boolean(activeWorkAssistantRun) ||
-    agentTodos.length > 0 ||
-    agentSteps.length > 0 ||
-    flowTraces.length > 0
-  useEffect(() => {
-    const previousRunState = receiptRunStateRef.current
-    const hasRunData = agentTodos.length > 0 || agentSteps.length > 0 || flowTraces.length > 0
-
-    const wasBusy = previousRunState === 'running' || previousRunState === 'reconnecting'
-    const isBusy = llmRunState === 'running' || llmRunState === 'reconnecting'
-
-    if (wasBusy && !isBusy && latestAssistantId && hasRunData) {
-      setReceiptSnapshots((current) => {
-        const nextEntries = Object.entries({
-          ...current,
-          [latestAssistantId]: {
-            todos: agentTodos,
-            steps: agentSteps,
-            traces: flowTraces,
-            changeStat: latestRunChangeStat,
-          },
-        }).slice(-20)
-
-        return Object.fromEntries(nextEntries)
-      })
-    }
-
-    receiptRunStateRef.current = llmRunState
-  }, [agentSteps, agentTodos, flowTraces, latestAssistantId, latestRunChangeStat, llmRunState])
 
   const runGoalCycle = useCallback(async (
     goal: SecretaryGoal,
@@ -295,7 +247,7 @@ export function FlowWorkspace() {
       return
     }
 
-    setTaskCenterDrawerOpen(false)
+    setContextDrawerOpen(false)
     const executionPrompt = recovery ? buildSecretaryLedgerResumePrompt(recovery) : task.request
     void dispatchPrompt(executionPrompt, { ledgerTaskId: task.id })
   }, [dispatchPrompt, llmRunState])
@@ -452,26 +404,20 @@ export function FlowWorkspace() {
 
   return (
     <section className="flex h-full min-h-0 bg-transparent">
-      <div className="hidden min-h-0 xl:flex">
-        <SecretaryTaskCenter
-          onStartTask={startPersistentTask}
-          onPauseActiveTask={() => pauseSecretaryRun()}
-          onCancelActiveTask={() => cancelSecretaryRun()}
-          onOpenMaterials={() => {
-            setInlineWorkbenchView('files')
-          }}
-        />
-      </div>
+      <aside className={`hidden shrink-0 flex-col border-r border-[#e1dccf] bg-[#f8f5ed] py-2 transition-[width] xl:flex ${contextRailCollapsed ? 'w-0 overflow-hidden border-r-0' : 'w-12'}`}>
+        <ContextRailAction icon={FolderKanban} label="项目上下文" onClick={() => { setContextSection('project'); setContextDrawerOpen(true) }} />
+        <ContextRailAction icon={LibraryBig} label="项目资料" onClick={() => { setContextSection('materials'); setContextDrawerOpen(true) }} />
+        <ContextRailAction icon={Clipboard} label="项目记忆" onClick={() => { setContextSection('memory'); setContextDrawerOpen(true) }} />
+        <ContextRailAction icon={History} label="历史与恢复" onClick={() => { setContextSection('history'); setContextDrawerOpen(true) }} />
+        <ContextRailAction icon={ListTodo} label="后台队列" onClick={() => { setContextSection('queue'); setContextDrawerOpen(true) }} />
+      </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="papyrus-toolbar flex h-11 shrink-0 items-center justify-between border-b px-4">
           <div className="flex min-w-0 items-center gap-2.5">
-            <button
-              type="button"
-              title="打开项目现场"
-              aria-label="打开项目现场"
-              onClick={() => setTaskCenterDrawerOpen(true)}
-              className="papyrus-icon-button size-7 shrink-0 rounded-md xl:hidden"
-            >
+            <button type="button" title="打开项目上下文" aria-label="打开项目上下文" onClick={() => { setContextSection('project'); setContextDrawerOpen(true) }} className="papyrus-icon-button size-7 shrink-0 rounded-md xl:hidden">
+              <PanelLeftOpen size={14} />
+            </button>
+            <button type="button" title={contextRailCollapsed ? '展开项目上下文入口' : '收起项目上下文入口'} aria-label={contextRailCollapsed ? '展开项目上下文入口' : '收起项目上下文入口'} onClick={() => setContextRailCollapsed((value) => !value)} className="papyrus-icon-button hidden size-7 shrink-0 rounded-md xl:grid">
               <PanelLeftOpen size={14} />
             </button>
             <div className="grid size-7 place-items-center rounded-md bg-[#20201d] text-[#fffefa]">
@@ -491,102 +437,37 @@ export function FlowWorkspace() {
                   <ExternalLink size={10} />
                 </a>
               </div>
-              <div className="truncate text-[11px] text-[#6f7168]">
-                规划、检索、写作和校对在同一条执行线上推进
-              </div>
+              <div className="truncate text-[11px] text-[#6f7168]">铭荼会把规划、检索、写作和校对留在同一条对话线上。</div>
             </div>
           </div>
-
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              title={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
-              aria-label={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
-              onClick={() => {
-                setInlineWorkbenchView((view) => (view === 'manuscript' ? 'run' : 'manuscript'))
-              }}
-              className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
-            >
-              <FileText size={14} />
-              <span className="hidden sm:inline">{inlineWorkbenchView === 'manuscript' ? '收起文稿' : '文稿'}</span>
-            </button>
-          </div>
+          <button type="button" title="查看成果" aria-label="查看成果" onClick={() => { setInlineWorkbenchView('manuscript'); setResultDrawerOpen(true) }} className="papyrus-icon-button grid size-7 shrink-0 place-items-center rounded-md">
+            <FileText size={14} />
+          </button>
         </header>
 
         <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 [scrollbar-gutter:stable]">
           <div className="mx-auto flex min-h-full w-full max-w-[920px] flex-col">
-            {secretaryPlanDraft ? (
-              <SecretaryPlanCard
-                draft={secretaryPlanDraft}
-                onExecute={executePlan}
-                onCancel={clearSecretaryPlanDraft}
+            <SecretaryUsageOverview collapsed={isUsageCollapsed} onToggle={() => setUsageCollapsed(!isUsageCollapsed)} />
+            <div className="flex-1 py-3">
+              <SecretaryTimeline
+                messages={flowMessages}
+                todos={agentTodos}
+                steps={agentSteps}
+                traces={flowTraces}
+                runState={llmRunState}
+                planDraft={secretaryPlanDraft}
+                pendingPatch={pendingDocumentPatch}
+                changeStat={latestRunChangeStat}
+                workAssistantRun={activeWorkAssistantRun}
+                onExecutePlan={executePlan}
+                onCancelPlan={clearSecretaryPlanDraft}
+                onApprove={(approvalId, choice) => resolveAssistantApproval(approvalId, choice)}
+                onSelectTool={selectWorkAssistantTool}
+                onRetryTool={(toolCall) => setPrompt(toolCall.result?.errorCode === 'stale_preview' ? '请根据当前文件状态重新生成预览' : `请重试：${toolCall.intent}`)}
+                onRegenerate={regenerateLast}
+                onRollback={rollbackLast}
               />
-            ) : null}
-            {pendingDocumentPatch ? <PendingPatchReview /> : null}
-            <SecretaryUsageOverview
-              collapsed={isUsageCollapsed}
-              onToggle={() => setUsageCollapsed(!isUsageCollapsed)}
-            />
-
-            <div className="flex-1 space-y-3">
-              <AnimatePresence initial={false}>
-                {visibleMessages.map((message) => {
-                  const isLatest = message.id === latestAssistantId
-                  const receiptSnapshot = receiptSnapshots[message.id]
-
-                  return (
-                    <ChatBubble
-                      key={message.id}
-                      message={message}
-                      showReceipt={isLatest || Boolean(receiptSnapshot)}
-                      todos={receiptSnapshot?.todos ?? (isLatest ? agentTodos : [])}
-                      steps={receiptSnapshot?.steps ?? (isLatest ? agentSteps : [])}
-                      traces={receiptSnapshot?.traces ?? (isLatest ? flowTraces : [])}
-                      runState={isLatest ? llmRunState : 'idle'}
-                      changeStat={receiptSnapshot?.changeStat ?? (isLatest ? latestRunChangeStat : undefined)}
-                      isLatestAssistant={isLatest}
-                      actionsDisabled={llmRunState === 'running' || llmRunState === 'reconnecting'}
-                      onRegenerate={regenerateLast}
-                      onRollback={rollbackLast}
-                    />
-                  )
-                })}
-                {shouldShowPendingThinking ? (
-                  <ThinkingBubble key="thinking" todos={agentTodos} steps={agentSteps} runState={llmRunState} />
-                ) : null}
-                {showCancelledPartialReply ? <SecretaryPartialReply text={activeWorkAssistantRun?.messageText ?? ''} /> : null}
-                {activeWorkAssistantRun && ['running', 'awaiting_approval', 'completed', 'failed', 'cancelled'].includes(activeWorkAssistantRun.status)
-                  ? Object.values(activeWorkAssistantRun.toolCalls).map((toolCall) => (
-                      <SecretaryToolStep
-                        key={toolCall.id}
-                        toolCall={toolCall}
-                        approval={toolCall.status === 'awaiting_approval' ? toolCall.preview as AssistantApprovalRequest : undefined}
-                        onApprove={(choice) => toolCall.preview && resolveAssistantApproval(toolCall.preview.id, choice)}
-                        onSelect={() => selectWorkAssistantTool(toolCall.id)}
-                        onRetry={toolCall.result?.recoverable ? () => setPrompt(toolCall.result?.errorCode === 'stale_preview' ? '请根据当前文件状态重新生成预览' : `请重试：${toolCall.intent}`) : undefined}
-                      />
-                    ))
-                  : null}
-              </AnimatePresence>
             </div>
-            {showInlineWorkbench ? (
-              <div className="mt-4">
-                <SecretaryWorkbenchPanel
-                  inline
-                  todos={agentTodos}
-                  steps={agentSteps}
-                  traces={flowTraces}
-                  runState={llmRunState}
-                  pinned={false}
-                  activeView={inlineWorkbenchView}
-                  onViewChange={setInlineWorkbenchView}
-                  changeStat={latestRunChangeStat}
-                  manuscript={<div className="h-[34rem]"><EditorPane /></div>}
-                  files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
-                  browser={<SecretaryBrowserWorkbench />}
-                />
-              </div>
-            ) : null}
           </div>
         </div>
 
@@ -598,23 +479,12 @@ export function FlowWorkspace() {
                 checkpoints={activeGoalCheckpoints}
                 running={llmRunState === 'running' || llmRunState === 'reconnecting'}
                 onContinue={() => continueGoal(activeSecretaryGoal)}
-                onPause={() =>
-                  updateSecretaryGoal(activeSecretaryGoal.id, {
-                    status: activeSecretaryGoal.status === 'paused' ? 'active' : 'paused',
-                  })
-                }
+                onPause={() => updateSecretaryGoal(activeSecretaryGoal.id, { status: activeSecretaryGoal.status === 'paused' ? 'active' : 'paused' })}
                 onCancel={clearSecretaryGoal}
               />
             </div>
           ) : null}
-          {queuedUserInputs.length ? (
-            <QueuedInputBar
-              inputs={queuedUserInputs}
-              onRemove={removeQueuedUserInput}
-              onEdit={(id, content) => updateQueuedUserInput(id, { content })}
-              onGuide={(id) => sendQueuedInputAsGuidance(id)}
-            />
-          ) : null}
+          {queuedUserInputs.length ? <QueuedInputBar inputs={queuedUserInputs} onRemove={removeQueuedUserInput} onEdit={(id, content) => updateQueuedUserInput(id, { content })} onGuide={(id) => sendQueuedInputAsGuidance(id)} /> : null}
           <SecretaryRunStatusStack run={activeWorkAssistantRun} todos={agentTodos} queuedCount={queuedUserInputs.filter((input) => input.status === 'queued').length} />
           <form onSubmit={submitFlowPrompt} className="papyrus-command-bar mx-auto max-w-[920px] rounded-xl p-2">
             <div className="mb-1.5 flex flex-wrap items-center gap-1.5 px-1">
@@ -629,13 +499,7 @@ export function FlowWorkspace() {
                 aria-label="秘书模式指令"
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
-                placeholder={
-                  llmRunState === 'running' || llmRunState === 'reconnecting'
-                    ? llmRunState === 'reconnecting'
-                      ? '连接恢复中，输入后按 Enter 加入队列...'
-                      : 'AI 工作中，输入后按 Enter 加入队列...'
-                    : '写章节、改作文、查资料，或输入 /plan、/goal...'
-                }
+                placeholder={llmRunState === 'running' || llmRunState === 'reconnecting' ? llmRunState === 'reconnecting' ? '连接恢复中，输入后按 Enter 加入队列...' : 'AI 工作中，输入后按 Enter 加入队列...' : '写章节、改作文、查资料，或输入 /plan、/goal...'}
                 rows={1}
                 className="max-h-32 min-h-9 min-w-0 flex-1 resize-none border-none bg-transparent px-2 py-1.5 text-sm leading-6 text-[#2f2b22] outline-none placeholder:text-[#8f897a]"
                 onKeyDown={(event) => {
@@ -645,22 +509,11 @@ export function FlowWorkspace() {
                   }
                 }}
               />
-              <button
-                type="submit"
-                title={llmRunState === 'running' || llmRunState === 'reconnecting' ? '加入队列' : '发送给秘书长'}
-                disabled={!prompt.trim()}
-                className="papyrus-primary-button grid size-9 shrink-0 place-items-center rounded-lg disabled:cursor-not-allowed disabled:opacity-50"
-              >
+              <button type="submit" title={llmRunState === 'running' || llmRunState === 'reconnecting' ? '加入队列' : '发送给秘书长'} disabled={!prompt.trim()} className="papyrus-primary-button grid size-9 shrink-0 place-items-center rounded-lg disabled:cursor-not-allowed disabled:opacity-50">
                 <Send size={15} />
               </button>
               {activeWorkAssistantRun && (activeWorkAssistantRun.status === 'running' || activeWorkAssistantRun.status === 'awaiting_approval') ? (
-                <button
-                  type="button"
-                  title="停止电脑助手"
-                  aria-label="停止电脑助手"
-                  onClick={cancelSecretaryRun}
-                  className="papyrus-control grid size-9 shrink-0 place-items-center rounded-lg text-[#8b4138]"
-                >
+                <button type="button" title="停止电脑助手" aria-label="停止电脑助手" onClick={cancelSecretaryRun} className="papyrus-control grid size-9 shrink-0 place-items-center rounded-lg text-[#8b4138]">
                   <Square size={14} fill="currentColor" />
                 </button>
               ) : null}
@@ -669,45 +522,74 @@ export function FlowWorkspace() {
         </div>
       </div>
 
+      <SecretaryContextDrawer open={contextDrawerOpen} activeSection={contextSection} onSectionChange={setContextSection} onClose={() => setContextDrawerOpen(false)}>
+        {contextSection === 'materials' ? (
+          <SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />
+        ) : contextSection === 'queue' ? (
+          <div className="p-3">
+            <SecretaryRunStatusStack run={activeWorkAssistantRun} todos={agentTodos} queuedCount={queuedUserInputs.filter((input) => input.status === 'queued').length} />
+            {queuedUserInputs.length ? <QueuedInputBar inputs={queuedUserInputs} onRemove={removeQueuedUserInput} onEdit={(id, content) => updateQueuedUserInput(id, { content })} onGuide={(id) => sendQueuedInputAsGuidance(id)} /> : <p className="mt-3 text-sm text-[#817a6d]">后台队列为空。</p>}
+          </div>
+        ) : (
+          <SecretaryTaskCenter
+            compact
+            onStartTask={startPersistentTask}
+            onPauseActiveTask={() => pauseSecretaryRun()}
+            onCancelActiveTask={() => cancelSecretaryRun()}
+            onOpenMaterials={() => {
+              setInlineWorkbenchView('files')
+              setResultDrawerOpen(true)
+              setContextDrawerOpen(false)
+            }}
+            onClose={() => setContextDrawerOpen(false)}
+          />
+        )}
+      </SecretaryContextDrawer>
+
       <AnimatePresence initial={false}>
-        {taskCenterDrawerOpen ? (
-          <motion.div
-            key="secretary-task-center-drawer"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-[#201f1a]/18 p-3 pt-14 xl:hidden"
-            onMouseDown={() => setTaskCenterDrawerOpen(false)}
-          >
-            <motion.div
-              initial={{ opacity: 0, x: -18 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -18 }}
-              transition={{ type: 'spring', stiffness: 440, damping: 42, mass: 0.75 }}
-              className="h-full max-w-[360px] overflow-hidden rounded-lg border border-[#e1dccf] bg-[#fffefa] shadow-[0_24px_80px_rgba(43,34,19,0.18)]"
-              onMouseDown={(event) => event.stopPropagation()}
-            >
-              <SecretaryTaskCenter
-                compact
-                onStartTask={startPersistentTask}
-                onPauseActiveTask={() => pauseSecretaryRun()}
-                onCancelActiveTask={() => cancelSecretaryRun()}
-                onOpenMaterials={() => {
-                  setInlineWorkbenchView('files')
-                  setTaskCenterDrawerOpen(false)
-                }}
-                onClose={() => setTaskCenterDrawerOpen(false)}
+        {resultDrawerOpen ? (
+          <motion.div key="secretary-result-drawer" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#201f1a]/20 p-3 sm:p-4" onMouseDown={() => setResultDrawerOpen(false)}>
+            <motion.div role="dialog" aria-modal="true" aria-label="秘书成果" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }} transition={{ type: 'spring', stiffness: 420, damping: 42, mass: 0.8 }} className="mx-auto h-full max-w-[960px]" onMouseDown={(event) => event.stopPropagation()}>
+              <SecretaryWorkbenchPanel
+                inline
+                todos={agentTodos}
+                steps={agentSteps}
+                traces={flowTraces}
+                runState={llmRunState}
+                pinned={false}
+                activeView={inlineWorkbenchView}
+                onViewChange={setInlineWorkbenchView}
+                onClose={() => setResultDrawerOpen(false)}
+                changeStat={latestRunChangeStat}
+                manuscript={<div className="h-[34rem]"><EditorPane /></div>}
+                files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
+                browser={<SecretaryBrowserWorkbench />}
               />
             </motion.div>
           </motion.div>
         ) : null}
       </AnimatePresence>
-
     </section>
   )
 }
 
-function PendingPatchReview() {
+function ContextRailAction({
+  icon: Icon,
+  label,
+  onClick,
+}: {
+  icon: typeof PanelLeftOpen
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <button type="button" title={label} aria-label={label} onClick={onClick} className="papyrus-icon-button mx-auto grid size-8 shrink-0 place-items-center rounded-md">
+      <Icon size={15} />
+    </button>
+  )
+}
+
+export function PendingPatchReview() {
   const patch = useAppStore((state) => state.pendingDocumentPatch)
 
   if (!patch || patch.status === 'rejected') {
@@ -732,7 +614,7 @@ function PendingPatchReview() {
   )
 }
 
-function SecretaryPlanCard({
+export function SecretaryPlanCard({
   draft,
   onExecute,
   onCancel,
@@ -1074,7 +956,7 @@ function ThinkingEffortControl({
 }) {
   const shouldReduceMotion = useReducedMotion()
   const options: Array<{ value: FlowThinkingEffort; label: string }> = [
-    { value: 'low', label: 'low' },
+    { value: 'low', label: '单体秘书' },
     { value: 'medium', label: 'medium' },
     { value: 'high', label: 'high' },
     { value: 'ultra_hive', label: 'ultra+hive' },
@@ -1142,7 +1024,7 @@ function ThinkingEffortControl({
             type="button"
             title={
               option.value === 'low'
-                ? 'low：快速完成当前任务，不调用子 Agent。'
+                ? '单体秘书：快速完成当前任务，不调用子 Agent。'
                 : isHive
                   ? hiveTitle
                   : `思考强度：${option.label}`
@@ -1181,7 +1063,7 @@ function ThinkingEffortControl({
     </div>
   )
 }
-function ChatBubble({
+export function ChatBubble({
   message,
   showReceipt,
   todos,
@@ -1325,7 +1207,7 @@ function MessageActionBar({
     </div>
   )
 }
-function ThinkingBubble({
+export function ThinkingBubble({
   todos,
   steps,
   runState,

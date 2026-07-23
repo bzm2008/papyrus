@@ -6,6 +6,7 @@ import type { AssistantApprovalChoice, AssistantApprovalRequest, AssistantToolCa
 type Props = {
   toolCall: AssistantToolCall
   approval?: AssistantApprovalRequest
+  defaultExpanded?: boolean
   onApprove?: (choice: AssistantApprovalChoice) => void
   onSelect?: () => void
   onRetry?: () => void
@@ -46,8 +47,8 @@ function impactCount(call: AssistantToolCall) {
   return Array.isArray(items) ? items.length : undefined
 }
 
-export function SecretaryToolStep({ toolCall, approval, onApprove, onSelect, onRetry, onDismiss }: Props) {
-  const [expanded, setExpanded] = useState(false)
+export function SecretaryToolStep({ toolCall, approval, defaultExpanded = false, onApprove, onSelect, onRetry, onDismiss }: Props) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
   const count = impactCount(toolCall)
   const recoverable = toolCall.status === 'failed' && toolCall.result?.recoverable
   const retryLabel = toolCall.result?.errorCode === 'stale_preview' ? '重新生成预览' : '重试'
