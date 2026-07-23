@@ -1,8 +1,9 @@
 import {
   approveWorkAssistantAction,
+  approveComputerAction,
   cancelWorkAssistantRun,
   computerObserve,
-  executeComputerAction,
+  executeApprovedComputerAction,
   executeWorkAssistantAction,
   getWorkAssistantDesktopStatus,
   inspectWorkAssistantFile,
@@ -11,6 +12,7 @@ import {
   openWorkAssistantFile,
   openWorkAssistantUrl,
   previewWorkAssistantAction,
+  previewComputerAction,
   revealWorkAssistantFile,
   scanWorkAssistantDownloads,
   scanWorkAssistantRoot,
@@ -37,6 +39,10 @@ import type {
   WorkAssistantEvent,
 } from './workAssistantProtocol'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
+import {
+  attachEphemeralComputerObservationContext,
+  createEphemeralComputerObservationContext,
+} from './computerObservationContext'
 
 type PendingApproval = {
   resolve: (choice: AssistantApprovalChoice) => void
@@ -87,6 +93,12 @@ function waitForApproval(request: AssistantApprovalRequest, signal?: AbortSignal
       abort: () => signal?.removeEventListener('abort', onAbort),
     })
   })
+}
+
+async function ensureRunIsNotAborted(signal: AbortSignal | undefined, runId: string) {
+  if (!signal?.aborted) return
+  await cancelWorkAssistantRun(runId).catch(() => undefined)
+  throw new DOMException('Run cancelled', 'AbortError')
 }
 
 function stableArguments(value: Record<string, unknown>) {
@@ -190,22 +202,7 @@ async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal):
     case 'file_open': return openWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_reveal_file': return revealWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_open_app': return launchRegisteredApplication(String(args.appId ?? ''))
-    case 'computer_observe': return computerObserve()
-    case 'computer_focus':
-    case 'computer_click':
-    case 'computer_type':
-    case 'computer_keypress':
-    case 'computer_scroll':
-      return executeComputerAction({
-        action: call.name,
-        observationId: String(args.observationId ?? ''),
-        windowFingerprint: String(args.windowFingerprint ?? ''),
-        targetId: String(args.targetId ?? ''),
-        targetFingerprint: String(args.targetFingerprint ?? ''),
-        text: typeof args.text === 'string' ? args.text : undefined,
-        key: typeof args.key === 'string' ? args.key : undefined,
-        delta: typeof args.delta === 'string' ? args.delta : undefined,
-      })
+    case 'computer_observe': return computerObserve(call.runId)
     case 'web_extract': {
       const result = await extractPublicWebPage(String(args.url ?? ''), call.runId, signal)
       const extractId = `${call.runId}:${call.id}`
@@ -344,6 +341,18 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       webArchivePreviewCache.set(archivePreview.id, { result: archiveInput.result, preview: archivePreview })
     } else if (manifest.executor === 'browser_bridge' && manifest.defaultRisk !== 'read') {
       preview = await previewBrowserBridgeAction(call)
+    } else if (manifest.executor === 'computer' && manifest.previewRequired) {
+      preview = await previewComputerAction({
+        runId: input.runId,
+        action: call.name,
+        observationId: String(call.arguments.observationId ?? ''),
+        windowFingerprint: String(call.arguments.windowFingerprint ?? ''),
+        targetId: String(call.arguments.targetId ?? ''),
+        targetFingerprint: String(call.arguments.targetFingerprint ?? ''),
+        text: typeof call.arguments.text === 'string' ? call.arguments.text : undefined,
+        key: typeof call.arguments.key === 'string' ? call.arguments.key : undefined,
+        delta: typeof call.arguments.delta === 'string' ? call.arguments.delta : undefined,
+      })
     } else if (manifest.defaultRisk !== 'read') {
       preview = syntheticPreview(call, manifest.defaultRisk)
     }
@@ -355,10 +364,11 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         runId: input.runId,
         toolCallId: call.id,
         reason: preview.impactSummary,
-        allowedChoices: approvalChoices(risk),
+        allowedChoices: manifest.executor === 'computer' ? ['once', 'deny'] : approvalChoices(risk),
       }
       emit({ type: 'approval.required', runId: input.runId, request, at: now() })
       const choice = await waitForApproval(request, input.signal)
+      await ensureRunIsNotAborted(input.signal, input.runId)
       if (choice === 'deny') {
         if (manifest.executor === 'browser_bridge') {
           await rejectBrowserAction(preview.id, input.runId).catch(() => undefined)
@@ -411,6 +421,21 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
       }
+      if (manifest.executor === 'computer') {
+        const grant = await approveComputerAction(preview.id, input.runId, choice)
+        const data = await executeApprovedComputerAction(grant.previewId, grant.token)
+        const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
+        const result = actionPayload?.ok === false
+          ? {
+              ok: false as const,
+              summary: typeof actionPayload.summary === 'string' ? actionPayload.summary : '电脑操作被安全策略阻止。',
+              errorCode: typeof actionPayload.errorCode === 'string' ? actionPayload.errorCode : 'blocked',
+              recoverable: actionPayload.recoverable !== false,
+            }
+          : { ok: true as const, summary: typeof actionPayload?.summary === 'string' ? actionPayload.summary : '已执行已验证的电脑操作。' }
+        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        return result
+      }
     }
 
     const data = manifest.executor === 'browser_bridge'
@@ -418,7 +443,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       : await executeNativeTool(call, input.signal)
     const actionPayload = data && typeof data === 'object' ? data as Record<string, unknown> : undefined
     const actionFailure = actionPayload?.ok === false
-    const result = actionFailure
+    const eventResult = actionFailure
       ? {
           ok: false as const,
           summary: typeof actionPayload?.summary === 'string' ? actionPayload.summary : '浏览器动作被安全策略阻止。',
@@ -431,8 +456,11 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
           summary: typeof actionPayload?.summary === 'string' ? actionPayload.summary : resultSummary(data),
           data: sanitizedToolData(call.name, data),
         }
+    const result = call.name === 'computer_observe'
+      ? attachEphemeralComputerObservationContext(eventResult, createEphemeralComputerObservationContext(data))
+      : eventResult
     failureCounts.delete(key)
-    emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+    emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: eventResult, at: now() })
     return result
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {

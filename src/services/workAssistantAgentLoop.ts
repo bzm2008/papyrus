@@ -1,5 +1,6 @@
 import type { ChatMessage } from './llmClient'
 import type { AssistantToolCall, AssistantToolResult, WorkAssistantEvent } from './workAssistantProtocol'
+import { getEphemeralComputerObservationContext } from './computerObservationContext'
 
 export type WorkAssistantDecision =
   | { kind: 'tool_call'; tool: { name: string; arguments: Record<string, unknown> }; note: string }
@@ -62,8 +63,20 @@ function stableArguments(argumentsValue: Record<string, unknown>) {
   return JSON.stringify(Object.keys(argumentsValue).sort().map((key) => [key, argumentsValue[key]]))
 }
 
+function modelToolResult(result: AssistantToolResult) {
+  const ephemeralContext = getEphemeralComputerObservationContext(result)
+  return {
+    ok: result.ok,
+    summary: result.summary,
+    errorCode: result.errorCode,
+    recoverable: result.recoverable,
+    data: result.data,
+    ...(ephemeralContext ? { ephemeralContext } : {}),
+  }
+}
+
 function toolReceipt(results: WorkAssistantLoopResult['toolResults']) {
-  return results.map(({ call, result }) => JSON.stringify({ tool: call.name, ok: result.ok, summary: result.summary, errorCode: result.errorCode, data: result.data })).join('\n')
+  return results.map(({ call, result }) => JSON.stringify({ tool: call.name, ...modelToolResult(result) })).join('\n')
 }
 
 export async function runWorkAssistantAgentLoop(input: WorkAssistantAgentLoopInput): Promise<WorkAssistantLoopResult> {
@@ -141,7 +154,7 @@ export async function runWorkAssistantAgentLoop(input: WorkAssistantAgentLoopInp
       if (!result.ok) failedSignatures.set(signature, (failedSignatures.get(signature) ?? 0) + 1)
       else failedSignatures.delete(signature)
       messages.push({ role: 'assistant', content: JSON.stringify(decision) })
-      messages.push({ role: 'user', content: JSON.stringify({ toolResult: { ok: result.ok, summary: result.summary, errorCode: result.errorCode, recoverable: result.recoverable, data: result.data } }) })
+      messages.push({ role: 'user', content: JSON.stringify({ toolResult: modelToolResult(result) }) })
     }
     throw new Error('工作助手循环异常结束。')
   } catch (error) {

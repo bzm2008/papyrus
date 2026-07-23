@@ -349,13 +349,13 @@ fn cancel_run_and_clear_computer_observations(
     state: &WorkAssistantState,
     run: String,
 ) -> Result<(), WorkAssistantError> {
-    record_cancelled_run(state, run)?;
+    record_cancelled_run(state, run.clone())?;
     state
         .computer_observations
         .lock()
         .map_err(|_| WorkAssistantError::protocol("computer observation store is unavailable"))
         ?
-        .clear();
+        .clear_run(&run);
     Ok(())
 }
 
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn cancellation_clears_ephemeral_computer_observations() {
         let state = test_state();
-        state.computer_observations.lock().unwrap().insert(
+        state.computer_observations.lock().unwrap().insert_for_run("run-1",
             crate::work_assistant::ComputerObservation {
                 id: "observe-1".into(),
                 window: crate::work_assistant::ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: "window".into() },
@@ -541,16 +541,21 @@ mod tests {
             },
             1,
         );
+        state.computer_observations.lock().unwrap().insert_for_run("run-2",
+            crate::work_assistant::ComputerObservation {
+                id: "observe-2".into(),
+                window: crate::work_assistant::ComputerWindow { app_id: "app".into(), title: "Other window".into(), fingerprint: "window-2".into() },
+                targets: Vec::new(),
+                expires_at: u64::MAX,
+            },
+            1,
+        );
 
         cancel_run_and_clear_computer_observations(&state, "run-1".into()).unwrap();
 
-        assert!(state.computer_observations.lock().unwrap().validate(
-            &crate::work_assistant::ComputerActionRequest {
-                action: "computer_focus".into(), observation_id: "observe-1".into(), window_fingerprint: "window".into(), target_id: "missing".into(), target_fingerprint: "missing".into(), text: None, key: None, delta: None,
-            },
-            &crate::work_assistant::ComputerObservation { id: "current".into(), window: crate::work_assistant::ComputerWindow { app_id: "app".into(), title: "Window".into(), fingerprint: "window".into() }, targets: Vec::new(), expires_at: u64::MAX },
-            1,
-        ).is_err());
+        let observations = state.computer_observations.lock().unwrap();
+        assert!(!observations.has_observation_for_run("run-1"));
+        assert!(observations.has_observation_for_run("run-2"));
     }
 
     #[test]

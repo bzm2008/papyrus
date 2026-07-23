@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { runWorkAssistantAgentLoop } from './workAssistantAgentLoop'
+import { attachEphemeralComputerObservationContext } from './computerObservationContext'
 
 const toolDecision = (name: string, args: Record<string, unknown>) => JSON.stringify({ kind: 'tool_call', tool: { name, arguments: args }, note: name })
 const finalDecision = (response: string) => JSON.stringify({ kind: 'final', response })
@@ -53,6 +54,37 @@ describe('runWorkAssistantAgentLoop', () => {
       executeTool: vi.fn(),
     })
     expect(normalMessages[0]?.content).not.toContain('Never request passwords')
+  })
+
+  it('passes an in-memory computer target summary to the current tool loop without adding it to persistent data', async () => {
+    const decisions = [
+      toolDecision('computer_observe', {}),
+      finalDecision('已找到保存草稿按钮。'),
+    ]
+    const modelCall = vi.fn(async (messages) => {
+      if (messages.length > 2) {
+        expect(messages.at(-1)?.content).toContain('ephemeralContext')
+        expect(messages.at(-1)?.content).toContain('Save draft')
+      }
+      return decisions.shift()!
+    })
+    const result = attachEphemeralComputerObservationContext(
+      { ok: true, summary: '已读取当前窗口。', data: { observationId: 'observe-1' } },
+      {
+        observationId: 'observe-1',
+        windowFingerprint: 'window-1',
+        expiresAt: 999,
+        targets: [{ id: 'target-save', role: 'Button', name: 'Save draft', fingerprint: 'target-1' }],
+      },
+    )
+
+    await runWorkAssistantAgentLoop({
+      runId: 'r-computer',
+      prompt: '保存当前草稿',
+      toolNames: ['computer_observe'],
+      modelCall,
+      executeTool: async () => result,
+    })
   })
 
   it('stops duplicate failed arguments before a third execution', async () => {

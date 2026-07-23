@@ -36,6 +36,7 @@ export type RegisteredApplication = {
 }
 export type AuditEntry = { id: string; event: string; detail: string; at: number }
 export type ComputerActionRequest = {
+  runId: string
   action: 'computer_focus' | 'computer_click' | 'computer_type' | 'computer_keypress' | 'computer_scroll'
   observationId: string
   windowFingerprint: string
@@ -131,8 +132,17 @@ export const listWorkAssistantAudit = (offset = 0, limit = 50) =>
 
 export const clearWorkAssistantAudit = () => invokeTyped<void>('work_assistant_clear_audit')
 
-export const computerObserve = () =>
-  invokeTyped<ComputerObservation>('work_assistant_computer_observe')
+export const computerObserve = (runId: string) =>
+  invokeTyped<ComputerObservation>('work_assistant_computer_observe', { runId })
 
-export const executeComputerAction = (request: ComputerActionRequest) =>
-  invokeTyped<ComputerActionResponse>('work_assistant_computer_execute', { request })
+export const previewComputerAction = (request: ComputerActionRequest) =>
+  invokeTyped<AssistantToolPreview>('work_assistant_computer_preview', { request })
+
+export const approveComputerAction = (
+  previewId: string,
+  runId: string,
+  choice: AssistantApprovalChoice,
+) => invokeTyped<ApprovalGrant>('work_assistant_computer_approve', { previewId, runId, choice })
+
+export const executeApprovedComputerAction = (previewId: string, approvalToken: string) =>
+  invokeTyped<ComputerActionResponse>('work_assistant_computer_execute', { previewId, approvalToken })

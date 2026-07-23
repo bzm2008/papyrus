@@ -12,6 +12,7 @@ import {
 import type { AssistantToolCall, WorkAssistantEvent } from './workAssistantProtocol'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 import { useAppStore } from '../stores/useAppStore'
+import { getEphemeralComputerObservationContext } from './computerObservationContext'
 
 const call = (name: string, args: Record<string, unknown> = {}, id = `call-${name}`): AssistantToolCall => ({
   id, runId: 'run-1', name, intent: name, arguments: args, status: 'queued', startedAt: 1,
@@ -86,8 +87,41 @@ describe('work assistant runtime', () => {
     await expect(promise).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
   })
 
-  it('keeps computer actions behind the existing approval boundary and sends only an observation reference', async () => {
+  it('keeps computer target semantics in current-run memory instead of the emitted tool receipt', async () => {
+    const invoke = vi.fn(async () => ({
+      id: 'observe-1',
+      expiresAt: 999,
+      window: { appId: 'word', title: 'Private notes - Alice', fingerprint: 'window-1' },
+      targets: [{ id: 'target-save', role: 'Button', name: 'Save draft', fingerprint: 'target-1' }],
+    }))
+    setWorkAssistantInvokerForTests(invoke)
+    const events: WorkAssistantEvent[] = []
+
+    const result = await executeAssistantToolCall({ runId: 'run-1', toolCall: call('computer_observe'), emit: (event) => events.push(event) })
+
+    expect(getEphemeralComputerObservationContext(result)).toMatchObject({
+      observationId: 'observe-1',
+      targets: [{ id: 'target-save', name: 'Save draft' }],
+    })
+    expect(JSON.stringify(events)).not.toContain('Private notes')
+    expect(JSON.stringify(events)).not.toContain('Save draft')
+  })
+
+  it('executes computer actions through an opaque native preview and single-use approval', async () => {
     const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_computer_preview') {
+        return {
+          id: 'computer-preview-1',
+          revision: 'observe-1',
+          risk: 'high',
+          title: '电脑操作确认',
+          targetSummary: '已验证的当前窗口目标',
+          impactSummary: '激活当前已验证的界面控件。',
+          reversible: false,
+          expiresAt: 999,
+        }
+      }
+      if (command === 'work_assistant_computer_approve') return { token: 'computer-token-1', previewId: 'computer-preview-1', expires: 999 }
       if (command === 'work_assistant_computer_execute') return { ok: true, summary: '已点击“保存”。' }
       return undefined
     })
@@ -109,8 +143,9 @@ describe('work assistant runtime', () => {
     expect(approval?.request.allowedChoices).toEqual(['once', 'deny'])
     expect(approval && resolveAssistantApproval(approval.request.id, 'once')).toBe(true)
     await expect(promise).resolves.toMatchObject({ ok: true, summary: '已点击“保存”。' })
-    expect(invoke).toHaveBeenCalledWith('work_assistant_computer_execute', {
+    expect(invoke).toHaveBeenCalledWith('work_assistant_computer_preview', {
       request: {
+        runId: 'run-computer',
         action: 'computer_click',
         observationId: 'observe-1',
         windowFingerprint: 'window-v1',
@@ -118,6 +153,41 @@ describe('work assistant runtime', () => {
         targetFingerprint: 'target-v1',
       },
     })
+    expect(invoke).toHaveBeenCalledWith('work_assistant_computer_approve', {
+      previewId: 'computer-preview-1',
+      runId: 'run-computer',
+      choice: 'once',
+    })
+    expect(invoke).toHaveBeenCalledWith('work_assistant_computer_execute', {
+      previewId: 'computer-preview-1',
+      approvalToken: 'computer-token-1',
+    })
+  })
+
+  it('cancels a computer action after approval but before native execution', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_computer_preview') {
+        return { id: 'computer-preview-2', revision: 'observe-1', risk: 'high', title: '电脑操作确认', targetSummary: '已验证的当前窗口目标', impactSummary: '激活当前已验证的界面控件。', reversible: false, expiresAt: 999 }
+      }
+      if (command === 'work_assistant_computer_approve') return { token: 'computer-token-2', previewId: 'computer-preview-2', expires: 999 }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    const controller = new AbortController()
+    const promise = executeAssistantToolCall({
+      runId: 'run-computer-cancel',
+      toolCall: call('computer_click', { observationId: 'observe-1', windowFingerprint: 'window-v1', targetId: 'target-1', targetFingerprint: 'target-v1' }),
+      signal: controller.signal,
+    })
+    await Promise.resolve()
+
+    expect(resolveAssistantApproval('computer-preview-2', 'once')).toBe(true)
+    controller.abort()
+
+    await expect(promise).resolves.toMatchObject({ ok: false, errorCode: 'cancelled' })
+    expect(invoke).not.toHaveBeenCalledWith('work_assistant_computer_approve', expect.anything())
+    expect(invoke).not.toHaveBeenCalledWith('work_assistant_computer_execute', expect.anything())
+    expect(invoke).toHaveBeenCalledWith('work_assistant_cancel_run', { run: 'run-computer-cancel' })
   })
 
   it('aborts pending approval and invokes native cancellation', async () => {
