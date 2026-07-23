@@ -70,6 +70,7 @@ import { SecretaryRunStatusStack } from './SecretaryRunStatusStack'
 import { SecretaryFileWorkbench } from './SecretaryFileWorkbench'
 import { SecretaryBrowserWorkbench } from './SecretaryBrowserWorkbench'
 import { SecretaryContextDrawer, SecretaryTimeline, type SecretaryContextSection } from './SecretaryTimeline'
+import { SecretaryResultDrawer } from './SecretaryResultDrawer'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type AgentTodos = AgentTodo[]
@@ -546,29 +547,23 @@ export function FlowWorkspace() {
         )}
       </SecretaryContextDrawer>
 
-      <AnimatePresence initial={false}>
-        {resultDrawerOpen ? (
-          <motion.div key="secretary-result-drawer" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-50 bg-[#201f1a]/20 p-3 sm:p-4" onMouseDown={() => setResultDrawerOpen(false)}>
-            <motion.div role="dialog" aria-modal="true" aria-label="秘书成果" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }} transition={{ type: 'spring', stiffness: 420, damping: 42, mass: 0.8 }} className="mx-auto h-full max-w-[960px]" onMouseDown={(event) => event.stopPropagation()}>
-              <SecretaryWorkbenchPanel
-                inline
-                todos={agentTodos}
-                steps={agentSteps}
-                traces={flowTraces}
-                runState={llmRunState}
-                pinned={false}
-                activeView={inlineWorkbenchView}
-                onViewChange={setInlineWorkbenchView}
-                onClose={() => setResultDrawerOpen(false)}
-                changeStat={latestRunChangeStat}
-                manuscript={<div className="h-[34rem]"><EditorPane /></div>}
-                files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
-                browser={<SecretaryBrowserWorkbench />}
-              />
-            </motion.div>
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
+      <SecretaryResultDrawer open={resultDrawerOpen} onClose={() => setResultDrawerOpen(false)}>
+        <SecretaryWorkbenchPanel
+          inline
+          todos={agentTodos}
+          steps={agentSteps}
+          traces={flowTraces}
+          runState={llmRunState}
+          pinned={false}
+          activeView={inlineWorkbenchView}
+          onViewChange={setInlineWorkbenchView}
+          onClose={() => setResultDrawerOpen(false)}
+          changeStat={latestRunChangeStat}
+          manuscript={<div className="h-[34rem]"><EditorPane /></div>}
+          files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
+          browser={<SecretaryBrowserWorkbench />}
+        />
+      </SecretaryResultDrawer>
     </section>
   )
 }

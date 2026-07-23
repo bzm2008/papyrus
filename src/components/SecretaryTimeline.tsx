@@ -68,6 +68,7 @@ type TimelineItem =
   | { id: string; at: number; order: number; type: 'subagent'; title: string; status: string }
   | { id: string; at: number; order: number; type: 'patch'; patch: DocumentPatch }
   | { id: string; at: number; order: number; type: 'change'; changeStat: DocumentChangeStat }
+  | { id: string; at: number; order: number; type: 'work-assistant-message'; text: string; status: WorkAssistantRun['status'] }
   | { id: string; at: number; order: number; type: 'run-status'; status: 'failed' | 'cancelled'; message?: string }
 
 const contextSections: Array<{ id: SecretaryContextSection; label: string; Icon: typeof FolderKanban }> = [
@@ -103,9 +104,27 @@ function buildSecretaryTimelineItems({
   const latestAssistant = [...visibleMessages].reverse().find((message) => message.role === 'assistant')
   const hasVisibleReply = Boolean(latestAssistant && (!latestUser || latestAssistant.createdAt >= latestUser.createdAt))
   const showActivity = activityStates.has(runState) || Boolean(workAssistantRun && workAssistantRun.status !== 'idle')
+  const workAssistantText = safeWorkAssistantMessage(workAssistantRun?.messageText ?? '')
+  const hasWorkAssistantMessage = Boolean(
+    workAssistantText
+    && workAssistantRun
+    && workAssistantRun.status !== 'idle'
+    && !visibleMessages.some((message) => message.role === 'assistant' && sameAssistantMessage(message.content, workAssistantRun.messageText)),
+  )
 
-  if (showActivity && !hasVisibleReply && runState !== 'error') {
+  if (showActivity && !hasVisibleReply && !hasWorkAssistantMessage && runState !== 'error') {
     items.push({ id: 'thinking', at: Math.max(latestUser?.createdAt ?? 0, workAssistantRun?.lastActivityAt ?? 0), order: 1, type: 'thinking' })
+  }
+
+  if (hasWorkAssistantMessage && workAssistantRun) {
+    items.push({
+      id: `work-assistant-message:${workAssistantRun.id}`,
+      at: Math.max(latestUser?.createdAt ?? 0, workAssistantRun.lastActivityAt),
+      order: 1,
+      type: 'work-assistant-message',
+      text: workAssistantText,
+      status: workAssistantRun.status,
+    })
   }
 
   if (planDraft && planDraft.status !== 'rejected') {
@@ -222,6 +241,7 @@ export function SecretaryTimeline({
           {item.type === 'subagent' ? <SubagentEntry title={item.title} status={item.status} /> : null}
           {item.type === 'patch' ? <PatchEntry patch={item.patch} /> : null}
           {item.type === 'change' ? <ChangeEntry changeStat={item.changeStat} /> : null}
+          {item.type === 'work-assistant-message' ? <WorkAssistantMessageEntry text={item.text} status={item.status} /> : null}
           {item.type === 'run-status' ? <RunStatusEntry status={item.status} message={item.message} /> : null}
         </article>
       ))}
@@ -343,6 +363,29 @@ function ThinkingEntry({ runState }: { runState: LlmRunState }) {
   )
 }
 
+function WorkAssistantMessageEntry({ text, status }: { text: string; status: WorkAssistantRun['status'] }) {
+  const streaming = status === 'running'
+  const statusLabel = status === 'cancelled'
+    ? '电脑助手 · 已停止'
+    : status === 'failed'
+      ? '电脑助手 · 未完成'
+      : status === 'completed'
+        ? '电脑助手 · 已完成'
+        : status === 'awaiting_approval'
+          ? '电脑助手 · 等待确认'
+          : '电脑助手 · 实时回应'
+
+  return (
+    <div data-testid="secretary-work-assistant-message" className={`max-w-[880px] rounded-lg border px-3.5 py-2.5 text-sm leading-7 ${status === 'cancelled' || status === 'failed' ? 'border-[#e8c9bf] bg-[#fff8f4] text-[#2f2b22]' : 'border-[#e1dccf] bg-[#fffdf7] text-[#2f2b22]'}`}>
+      <div className={`mb-1 text-[11px] font-medium ${status === 'cancelled' || status === 'failed' ? 'text-[#9a4338]' : 'text-[#6f7168]'}`}>{statusLabel}</div>
+      <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+        {text}
+        {streaming ? <span data-testid="secretary-stream-cursor" aria-hidden="true" className="ml-0.5 inline-block h-4 w-1 rounded-full bg-[#d7aa4f]" /> : null}
+      </div>
+    </div>
+  )
+}
+
 function PlanEntry({ plan, onExecute, onCancel }: { plan: SecretaryPlanDraft; onExecute?: () => void; onCancel?: () => void }) {
   return (
     <section className="max-w-[880px] border-l-2 border-[#7c9273] py-1 pl-3 text-sm text-[#2f2b22]">
@@ -432,6 +475,21 @@ function IconAction({ label, onClick, children }: { label: string; onClick: () =
 
 function publicToolCall(toolCall: AssistantToolCall): AssistantToolCall {
   return { ...toolCall, arguments: {} }
+}
+
+function safeWorkAssistantMessage(text: string) {
+  return text
+    .trim()
+    .replace(/\b(token|secret|password|passcode|api[_ -]?key|authorization|cookie)\s*[:=]\s*[^\s,;，；]*/gi, '$1: [已隐藏]')
+    .slice(0, 4000)
+}
+
+function sameAssistantMessage(flowText: string, workAssistantText: string) {
+  return normalizeAssistantMessage(flowText) === normalizeAssistantMessage(workAssistantText)
+}
+
+function normalizeAssistantMessage(text: string) {
+  return text.replace(/\s+/g, ' ').trim()
 }
 
 function approvalFor(toolCall: AssistantToolCall): AssistantApprovalRequest | undefined {

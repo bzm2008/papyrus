@@ -112,6 +112,66 @@ describe('SecretaryTimeline', () => {
     expect(screen.queryByText('project/brief.md')).not.toBeInTheDocument()
   })
 
+  it('shows one redacted computer-assistant delta with a streaming cursor', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'running',
+          lastActivityAt: 240,
+          messageText: '我已整理好访谈结构。\nToken: secret-run-token',
+        }}
+      />,
+    )
+
+    expect(screen.getByTestId('secretary-work-assistant-message')).toHaveTextContent('我已整理好访谈结构。')
+    expect(screen.getByTestId('secretary-stream-cursor')).toBeInTheDocument()
+    expect(screen.queryByText('secret-run-token')).not.toBeInTheDocument()
+  })
+
+  it('does not repeat a computer-assistant delta already present in Flow messages', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message(), message({ id: 'reply-1', role: 'assistant', content: '我已整理好访谈结构。', createdAt: 240 })]}
+        runState="running"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'running', lastActivityAt: 240, messageText: '我已整理好访谈结构。' }}
+      />,
+    )
+
+    expect(screen.getAllByText('我已整理好访谈结构。')).toHaveLength(1)
+    expect(screen.queryByTestId('secretary-work-assistant-message')).not.toBeInTheDocument()
+  })
+
+  it('retains a redacted computer-assistant partial reply after cancellation or failure', () => {
+    const { rerender } = render(
+      <SecretaryTimeline
+        messages={[message({ content: '把访谈整理成大纲' })]}
+        runState="idle"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'cancelled',
+          lastActivityAt: 260,
+          messageText: '已完成摘要。\npassword: should-not-leak',
+        }}
+      />,
+    )
+    expect(screen.getByTestId('secretary-work-assistant-message')).toHaveTextContent('电脑助手 · 已停止')
+    expect(screen.getByTestId('secretary-work-assistant-message')).toHaveTextContent('已完成摘要。')
+    expect(screen.queryByText('should-not-leak')).not.toBeInTheDocument()
+
+    rerender(
+      <SecretaryTimeline
+        messages={[message({ content: '把访谈整理成大纲' })]}
+        runState="error"
+        workAssistantRun={{ ...createEmptyWorkAssistantRun('run-1'), status: 'failed', lastActivityAt: 270, messageText: '已完成摘要。' }}
+      />,
+    )
+    expect(screen.getByTestId('secretary-work-assistant-message')).toHaveTextContent('电脑助手 · 未完成')
+    expect(screen.getByText('已完成摘要。')).toBeInTheDocument()
+  })
+
   it('renders an approval inline on the same timeline and exposes only safe approval context', () => {
     const onApprove = vi.fn()
     render(
