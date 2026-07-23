@@ -480,6 +480,7 @@ function publicToolCall(toolCall: AssistantToolCall): AssistantToolCall {
 
 const sensitiveDisplayFieldPattern = /(["']?)\b(elementtoken|token|secret|password|passcode|api(?:[_ -]?key)|authorization|cookie)\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi
 const authorizationSchemePattern = /\b(authorization)\s+(?:basic|bearer)\b[^\r\n]*/gi
+const basicCredentialPattern = /\bbasic\s+[^\r\n]*/gi
 const bearerCredentialPattern = /\bbearer\s+[^\r\n]*/gi
 
 function safeSecretaryDisplayText(text: string) {
@@ -487,6 +488,7 @@ function safeSecretaryDisplayText(text: string) {
     .trim()
     .replace(sensitiveDisplayFieldPattern, (_match, _quote: string, key: string) => `${key}: [已隐藏]`)
     .replace(authorizationSchemePattern, (_match, key: string) => `${key}: [已隐藏]`)
+    .replace(basicCredentialPattern, 'Basic [已隐藏]')
     .replace(bearerCredentialPattern, 'Bearer [已隐藏]')
     .slice(0, 4000)
 }

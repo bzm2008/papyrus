@@ -193,6 +193,27 @@ describe('SecretaryTimeline', () => {
     credentialFragments.forEach((fragment) => expect(entry).not.toHaveTextContent(fragment))
   })
 
+  it('redacts standalone Basic credentials in assistant deltas and failed run errors', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message({ content: '整理这份资料' })]}
+        runState="error"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'failed',
+          messageText: 'Basic message-secret-value',
+          error: '连接失败，Basic error-secret-value',
+        }}
+      />,
+    )
+
+    const entry = screen.getByTestId('secretary-work-assistant-message')
+    expect(entry).toHaveTextContent('Basic [已隐藏]')
+    expect(entry).not.toHaveTextContent('message-secret-value')
+    expect(screen.getByText('连接失败，Basic [已隐藏]')).toBeInTheDocument()
+    expect(screen.queryByText('error-secret-value')).not.toBeInTheDocument()
+  })
+
   it('redacts quoted and bare sensitive field variants without leaking value fragments', () => {
     const credentialText = [
       '{"secret":"quoted secret","passcode":"quoted passcode","api_key":"quoted underscore","api-key":"quoted dash","cookie":"quoted cookie"}',
