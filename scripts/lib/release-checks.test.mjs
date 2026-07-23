@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import { _internal, REQUIRED_COMMANDS, runReleaseChecks } from './release-checks.mjs'
 
@@ -123,6 +125,35 @@ async function fixture() {
 
 async function cleanup(rootDir) {
   await fs.rm(rootDir, { recursive: true, force: true })
+}
+
+const UPDATER_ASSET_NAMES = [
+  'Papyrus_1.1.0_x64-setup.exe',
+  'Papyrus_1.1.0_amd64.AppImage',
+  'Papyrus_1.1.0_x64.app.tar.gz',
+  'Papyrus_1.1.0_aarch64.app.tar.gz',
+]
+
+const MINISIGN_SIDECAR = [
+  'untrusted comment: signature from minisign secret key',
+  'RWQAAAAAAAAAAABzdGFuZGFsb25lLXRlc3Qtc2lnbmF0dXJlLXJlY29yZA==',
+].join('\n') + '\n'
+
+async function writeUpdaterAssets(artifactsDir, { omittedSidecar, emptySidecar } = {}) {
+  for (const name of UPDATER_ASSET_NAMES) {
+    await fs.writeFile(path.join(artifactsDir, name), `fixture ${name}`)
+    if (name === omittedSidecar) continue
+    await fs.writeFile(path.join(artifactsDir, `${name}.sig`), name === emptySidecar ? '' : MINISIGN_SIDECAR)
+  }
+}
+
+function runManifestBuilder(artifactsDir, output) {
+  return spawnSync(process.execPath, [
+    fileURLToPath(new URL('../build-papyrus-update-manifest.mjs', import.meta.url)),
+    '--artifacts', artifactsDir,
+    '--version', '1.1.0',
+    '--output', output,
+  ], { encoding: 'utf8' })
 }
 
 test('release checks pass for a complete fixture in both phases', async () => {
@@ -383,6 +414,48 @@ test('the source Debian checksum file remains the verified 1.0.0 historical mani
   assert.match(checksums, /^2A6ED8AB5AA65172E9624DB9B05FF14208814DD2381E8D27E05197266088D4EE  Papyrus_1\.0\.0_amd64\.deb$/m)
   assert.match(checksums, /^8B86F8CB1F9E6E39F0A3FEF9E7B36C57EB8700F7899AD4FEBD8344D0D05531B4  Papyrus_1\.0\.0_amd64\.AppImage$/m)
   assert.doesNotMatch(checksums, /Papyrus_1\.1\.0_/)
+})
+
+test('update manifest base64-wraps the complete minisign sidecar for Tauri', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-update-manifest-'))
+  try {
+    const artifactsDir = path.join(rootDir, 'artifacts')
+    const output = path.join(rootDir, 'latest.json')
+    await fs.mkdir(artifactsDir)
+    await writeUpdaterAssets(artifactsDir)
+
+    const result = runManifestBuilder(artifactsDir, output)
+
+    assert.equal(result.status, 0, result.stderr)
+    const manifest = JSON.parse(await fs.readFile(output, 'utf8'))
+    const signature = manifest.platforms['windows-x86_64'].signature
+    assert.notEqual(signature, MINISIGN_SIDECAR)
+    assert.equal(Buffer.from(signature, 'base64').toString('base64'), signature)
+    assert.equal(Buffer.from(signature, 'base64').toString('utf8'), MINISIGN_SIDECAR)
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('update manifest rejects missing or empty updater sidecars', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-update-manifest-'))
+  try {
+    const missingArtifacts = path.join(rootDir, 'missing')
+    await fs.mkdir(missingArtifacts)
+    await writeUpdaterAssets(missingArtifacts, { omittedSidecar: 'Papyrus_1.1.0_x64-setup.exe' })
+    const missingResult = runManifestBuilder(missingArtifacts, path.join(rootDir, 'missing.json'))
+    assert.notEqual(missingResult.status, 0)
+    assert.match(missingResult.stderr, /missing signed updater assets: windows-x86_64/)
+
+    const emptyArtifacts = path.join(rootDir, 'empty')
+    await fs.mkdir(emptyArtifacts)
+    await writeUpdaterAssets(emptyArtifacts, { emptySidecar: 'Papyrus_1.1.0_x64-setup.exe' })
+    const emptyResult = runManifestBuilder(emptyArtifacts, path.join(rootDir, 'empty.json'))
+    assert.notEqual(emptyResult.status, 0)
+    assert.match(emptyResult.stderr, /empty updater signature: .*Papyrus_1\.1\.0_x64-setup\.exe\.sig/)
+  } finally {
+    await cleanup(rootDir)
+  }
 })
 
 test('local release verification rejects an artifact forged with an unchanged updater signature', async () => {

@@ -51,7 +51,7 @@ if (version !== packageVersion) throw new Error(`release version ${version} must
 const files = await walk(artifactsDir)
 const signatures = new Map()
 for (const file of files) {
-  if (file.toLowerCase().endsWith('.sig')) signatures.set(file.slice(0, -4), (await fs.readFile(file, 'utf8')).trim())
+  if (file.toLowerCase().endsWith('.sig')) signatures.set(file.slice(0, -4), await fs.readFile(file, 'utf8'))
 }
 
 const platforms = {}
@@ -62,7 +62,7 @@ for (const [assetPath, signature] of signatures) {
   if (!platform) continue
   if (platforms[platform]) throw new Error(`duplicate updater asset for ${platform}: ${name}`)
   platforms[platform] = {
-    signature,
+    signature: Buffer.from(signature, 'utf8').toString('base64'),
     url: `https://github.com/${owner}/${repo}/releases/download/v${version}/${encodeURIComponent(name)}`,
   }
 }
