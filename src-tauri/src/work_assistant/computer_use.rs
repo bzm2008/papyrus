@@ -733,6 +733,27 @@ fn contains_sensitive_marker(surface: &str) -> bool {
     .any(|marker| surface.contains(marker))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PasswordMetadata {
+    NotPassword,
+    Password,
+    Unavailable,
+}
+
+fn assess_password_metadata(metadata: PasswordMetadata) -> Result<(), WorkAssistantError> {
+    match metadata {
+        PasswordMetadata::NotPassword => Ok(()),
+        PasswordMetadata::Password => Err(WorkAssistantError {
+            code: "sensitive_surface".into(),
+            message: "password desktop surfaces are blocked".into(),
+            recoverable: true,
+        }),
+        PasswordMetadata::Unavailable => Err(WorkAssistantError::blocked(
+            "could not read accessibility password metadata",
+        )),
+    }
+}
+
 fn renderer_observation(observation: &ComputerObservation) -> RendererComputerObservation {
     RendererComputerObservation {
         id: observation.id.clone(),
@@ -1042,6 +1063,47 @@ mod platform {
     use super::*;
 
     #[cfg(windows)]
+    fn foreground_window_root(
+        automation: &uiautomation::UIAutomation,
+    ) -> Result<(uiautomation::UIElement, String), WorkAssistantError> {
+        use uiautomation::types::Handle;
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            return Err(WorkAssistantError::blocked(
+                "could not read the native foreground window",
+            ));
+        }
+        let window_handle = format!("{:p}", hwnd.0);
+        let root = automation
+            .element_from_handle(Handle::from(hwnd))
+            .map_err(|_| WorkAssistantError::blocked("could not read the foreground window"))?;
+        Ok((root, window_handle))
+    }
+
+    #[cfg(windows)]
+    fn complete_window_tree(
+        automation: &uiautomation::UIAutomation,
+        root: &uiautomation::UIElement,
+    ) -> Result<Vec<uiautomation::UIElement>, WorkAssistantError> {
+        use uiautomation::types::TreeScope;
+
+        let condition = automation
+            .create_true_condition()
+            .map_err(|_| WorkAssistantError::blocked("could not inspect accessibility targets"))?;
+        let descendants = root
+            .find_all(TreeScope::Descendants, &condition)
+            .map_err(|_| {
+                WorkAssistantError::blocked("could not inspect the complete accessibility tree")
+            })?;
+        let mut elements = Vec::with_capacity(descendants.len().saturating_add(1));
+        elements.push(root.clone());
+        elements.extend(descendants);
+        Ok(elements)
+    }
+
+    #[cfg(windows)]
     fn assess_complete_accessibility_surface(
         window: &ComputerWindow,
         elements: &[uiautomation::UIElement],
@@ -1055,6 +1117,12 @@ mod platform {
         }
 
         for element in elements {
+            let password_metadata = match element.is_password() {
+                Ok(true) => PasswordMetadata::Password,
+                Ok(false) => PasswordMetadata::NotPassword,
+                Err(_) => PasswordMetadata::Unavailable,
+            };
+            assess_password_metadata(password_metadata)?;
             let name = element.get_name().unwrap_or_default();
             let role = element
                 .get_control_type()
@@ -1077,19 +1145,13 @@ mod platform {
     #[cfg(windows)]
     pub fn observe_foreground(now: u64) -> Result<ComputerObservation, WorkAssistantError> {
         use uiautomation::screenshots::Screenshot;
-        use uiautomation::{types::TreeScope, UIAutomation};
+        use uiautomation::UIAutomation;
 
         let automation = UIAutomation::new()
             .map_err(|_| WorkAssistantError::blocked("Windows UI Automation is unavailable"))?;
-        let focused = automation.get_focused_element().map_err(|_| {
-            WorkAssistantError::blocked("could not read the foreground accessible window")
-        })?;
-        let window_handle = focused
-            .get_native_window_handle()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let title = focused.get_name().unwrap_or_default();
-        let app_id = focused.get_classname().unwrap_or_default();
+        let (root, window_handle) = foreground_window_root(&automation)?;
+        let title = root.get_name().unwrap_or_default();
+        let app_id = root.get_classname().unwrap_or_default();
         let shot = Screenshot::capture_desktop().map_err(|_| {
             WorkAssistantError::blocked(
                 "could not capture the current desktop for observation verification",
@@ -1106,24 +1168,11 @@ mod platform {
             fingerprint: fingerprint(&[&window_handle, &screenshot_fingerprint]),
             stable_fingerprint: fingerprint(&[&window_handle]),
         };
-        let mut accessible_elements = vec![focused.clone()];
-        accessible_elements.extend(
-            focused
-                .find_all(
-                    TreeScope::Descendants,
-                    &automation.create_true_condition().map_err(|_| {
-                        WorkAssistantError::blocked("could not inspect accessibility targets")
-                    })?,
-                )
-                .map_err(|_| {
-                    WorkAssistantError::blocked("could not inspect the complete accessibility tree")
-                })?,
-        );
+        let accessible_elements = complete_window_tree(&automation, &root)?;
         // The complete UIA tree stays local; only the bounded target subset is persisted.
         assess_complete_accessibility_surface(&window, &accessible_elements)?;
         let targets = accessible_elements
             .into_iter()
-            .take(MAX_COMPUTER_MODEL_TARGETS)
             .enumerate()
             .filter_map(|(index, element)| {
                 let name = element.get_name().unwrap_or_default();
@@ -1163,6 +1212,7 @@ mod platform {
                     bounds,
                 })
             })
+            .take(MAX_COMPUTER_MODEL_TARGETS)
             .collect();
         Ok(ComputerObservation {
             id: Uuid::new_v4().to_string(),
@@ -1179,22 +1229,13 @@ mod platform {
         target: &ComputerTarget,
     ) -> Result<ComputerActionResult, WorkAssistantError> {
         use uiautomation::{
-            patterns::UIScrollPattern,
-            screenshots::Screenshot,
-            types::{ScrollAmount, TreeScope},
-            UIAutomation,
+            patterns::UIScrollPattern, screenshots::Screenshot, types::ScrollAmount, UIAutomation,
         };
         let automation = UIAutomation::new()
             .map_err(|_| WorkAssistantError::blocked("Windows UI Automation is unavailable"))?;
-        let focused = automation.get_focused_element().map_err(|_| {
-            WorkAssistantError::stale_preview("foreground accessible window is unavailable")
-        })?;
-        let window_handle = focused
-            .get_native_window_handle()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let title = focused.get_name().unwrap_or_default();
-        let app_id = focused.get_classname().unwrap_or_default();
+        let (root, window_handle) = foreground_window_root(&automation)?;
+        let title = root.get_name().unwrap_or_default();
+        let app_id = root.get_classname().unwrap_or_default();
         let shot = Screenshot::capture_desktop().map_err(|_| {
             WorkAssistantError::blocked(
                 "could not capture the current desktop for dispatch verification",
@@ -1211,28 +1252,12 @@ mod platform {
             fingerprint: fingerprint(&[&window_handle, &screenshot_fingerprint]),
             stable_fingerprint: fingerprint(&[&window_handle]),
         };
-        let mut elements = vec![focused.clone()];
-        elements.extend(
-            focused
-                .find_all(
-                    TreeScope::Descendants,
-                    &automation.create_true_condition().map_err(|_| {
-                        WorkAssistantError::blocked("could not inspect accessibility targets")
-                    })?,
-                )
-                .map_err(|_| {
-                    WorkAssistantError::blocked("could not inspect the complete accessibility tree")
-                })?,
-        );
+        let elements = complete_window_tree(&automation, &root)?;
         // Recheck the complete native tree immediately before dispatching an action.
         assess_complete_accessibility_surface(&dispatch_window, &elements)?;
         let mut dispatch_targets = Vec::new();
         let mut matched = None;
-        for (index, element) in elements
-            .into_iter()
-            .take(MAX_COMPUTER_MODEL_TARGETS)
-            .enumerate()
-        {
+        for (index, element) in elements.into_iter().enumerate() {
             let name = element.get_name().unwrap_or_default();
             let role = element
                 .get_control_type()
@@ -1273,6 +1298,9 @@ mod platform {
                 matched = Some((candidate.clone(), element));
             }
             dispatch_targets.push(candidate);
+            if dispatch_targets.len() >= MAX_COMPUTER_MODEL_TARGETS {
+                break;
+            }
         }
         let (dispatch_target, element) = matched.ok_or_else(|| WorkAssistantError {
             code: "target_missing".into(),
@@ -1632,6 +1660,23 @@ mod tests {
             .unwrap_err()
             .code,
             "sensitive_surface"
+        );
+    }
+
+    #[test]
+    fn native_password_metadata_blocks_passwords_and_missing_values() {
+        assert!(assess_password_metadata(PasswordMetadata::NotPassword).is_ok());
+        assert_eq!(
+            assess_password_metadata(PasswordMetadata::Password)
+                .unwrap_err()
+                .code,
+            "sensitive_surface"
+        );
+        assert_eq!(
+            assess_password_metadata(PasswordMetadata::Unavailable)
+                .unwrap_err()
+                .code,
+            "blocked"
         );
     }
 
