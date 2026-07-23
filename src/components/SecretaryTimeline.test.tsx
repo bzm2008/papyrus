@@ -159,6 +159,29 @@ describe('SecretaryTimeline', () => {
     expect(entry).not.toHaveTextContent('secret-element')
   })
 
+  it('redacts quoted compound token fields from computer-assistant deltas', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message()]}
+        runState="running"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'running',
+          lastActivityAt: 240,
+          messageText: '{"accessToken":"message-access-token","refresh_token":"message-refresh-token","id-token":"message-id-token"}',
+        }}
+      />,
+    )
+
+    const entry = screen.getByTestId('secretary-work-assistant-message')
+    expect(entry).toHaveTextContent('accessToken: [已隐藏]')
+    expect(entry).toHaveTextContent('refresh_token: [已隐藏]')
+    expect(entry).toHaveTextContent('id-token: [已隐藏]')
+    expect(entry).not.toHaveTextContent('message-access-token')
+    expect(entry).not.toHaveTextContent('message-refresh-token')
+    expect(entry).not.toHaveTextContent('message-id-token')
+  })
+
   it('redacts complete whitespace-containing authorization, cookie, token, and bearer credentials', () => {
     const credentialText = [
       'authorization: Basic primary secret value',
@@ -425,6 +448,23 @@ describe('SecretaryTimeline', () => {
 
     expect(screen.getByText('连接失败，authorization: [已隐藏]')).toBeInTheDocument()
     expect(screen.queryByText('secret-token')).not.toBeInTheDocument()
+  })
+
+  it('redacts compound token fields in failed computer-assistant status messages', () => {
+    render(
+      <SecretaryTimeline
+        messages={[message({ content: '把访谈整理成大纲' })]}
+        runState="error"
+        workAssistantRun={{
+          ...createEmptyWorkAssistantRun('run-1'),
+          status: 'failed',
+          error: '连接失败，{"refreshToken":"failed-refresh-token"}',
+        }}
+      />,
+    )
+
+    expect(screen.getByText('连接失败，{refreshToken: [已隐藏]}')).toBeInTheDocument()
+    expect(screen.queryByText('failed-refresh-token')).not.toBeInTheDocument()
   })
 
   it('closes the narrow project drawer from the keyboard and returns focus to its trigger', () => {

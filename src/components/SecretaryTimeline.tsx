@@ -478,7 +478,7 @@ function publicToolCall(toolCall: AssistantToolCall): AssistantToolCall {
   return { ...toolCall, arguments: {} }
 }
 
-const sensitiveDisplayFieldPattern = /(["']?)\b(elementtoken|token|secret|password|passcode|api(?:[_ -]?key)|authorization|cookie)\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi
+const sensitiveDisplayFieldPattern = /(["']?)\b(elementtoken|access(?:[_ -]?token)|refresh(?:[_ -]?token)|id(?:[_ -]?token)|token|secret|password|passcode|api(?:[_ -]?key)|authorization|cookie)\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)/gi
 const authorizationSchemePattern = /\b(authorization)\s+(?:basic|bearer)\b[^\r\n]*/gi
 const standaloneCredentialPattern = /\b(basic|bearer)\s+([A-Za-z0-9][A-Za-z0-9._~+/=-]{15,})(?=$|[\s,;，；)）\]}])/gi
 
