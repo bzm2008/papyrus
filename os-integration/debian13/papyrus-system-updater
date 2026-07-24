@@ -76,10 +76,10 @@ leaf = parsed.path.rsplit("/", 1)[-1]
 if not (leaf.startswith("Papyrus_") and leaf.endswith("_amd64.deb")):
     raise SystemExit("Linux system updater accepts only Papyrus amd64 .deb assets")
 with open(metadata_path, "w", encoding="utf-8") as handle:
-    handle.write(version + "\\t" + url + "\\t" + signature)
+    handle.write(version + "\t" + url + "\t" + signature)
 PY
 
-IFS="$(printf '\\t')" read -r target_version artifact_url manifest_signature <"$metadata"
+IFS="$(printf '\t')" read -r target_version artifact_url manifest_signature <"$metadata"
 
 if ! dpkg --compare-versions "$target_version" gt "$installed_version"; then
     echo "Papyrus is already at $installed_version; refusing downgrade or reinstall to $target_version."
