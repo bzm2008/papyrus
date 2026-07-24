@@ -64,6 +64,14 @@ Papyrus stores per-user data using the XDG layout:
   checkpoints, and other durable application data.
 * `~/.config/uno.scallion.papyrus` contains user preferences and configuration.
 
+The integration also installs a root-owned `/usr/libexec/papyrus-system-updater`,
+its Polkit action, and the updater public key. It only reads the canonical
+`https://sca-hub.cn/api/papyrus/update` manifest, accepts the official Papyrus
+amd64 `.deb`, verifies its minisign signature, and refuses downgrades. It does
+not accept a URL, local path, shell command, or arbitrary package. Use
+`papyrus-system-updater --dry-run` through the Polkit action to inspect a
+pending signed update before installation.
+
 Do not run the application with `sudo`; doing so can create root-owned data
 and make the normal user's history appear to be missing. The installation
 script only writes system locations and does not touch these directories.

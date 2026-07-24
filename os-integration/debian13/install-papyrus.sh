@@ -10,6 +10,9 @@ APP_ROOT=${PAPYRUS_INSTALL_ROOT:-${SYSTEM_ROOT}/opt/papyrus}
 BIN_LINK=${PAPYRUS_BIN_LINK:-${SYSTEM_ROOT}/usr/bin/papyrus}
 DESKTOP_DIR=${PAPYRUS_DESKTOP_DIR:-${SYSTEM_ROOT}/usr/share/applications}
 ICON_DIR=${PAPYRUS_ICON_DIR:-${SYSTEM_ROOT}/usr/share/icons/hicolor/128x128/apps}
+LIBEXEC_DIR=${PAPYRUS_LIBEXEC_DIR:-${SYSTEM_ROOT}/usr/libexec}
+POLKIT_DIR=${PAPYRUS_POLKIT_DIR:-${SYSTEM_ROOT}/usr/share/polkit-1/actions}
+SHARE_DIR=${PAPYRUS_SHARE_DIR:-${SYSTEM_ROOT}/usr/share/papyrus}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 usage() {
@@ -80,7 +83,7 @@ case "$source_file" in
 esac
 
 source_file=$(readlink -f -- "$source_file")
-mkdir -p "$APP_ROOT" "$(dirname "$BIN_LINK")" "$DESKTOP_DIR" "$ICON_DIR"
+mkdir -p "$APP_ROOT" "$(dirname "$BIN_LINK")" "$DESKTOP_DIR" "$ICON_DIR" "$LIBEXEC_DIR" "$POLKIT_DIR" "$SHARE_DIR"
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/papyrus-install.XXXXXX")
 cleanup() {
@@ -99,6 +102,14 @@ fi
 # Copy only the staged application. Existing files are left in place when not
 # present in the new asset, and no user data directory is removed.
 cp -a "$stage/." "$APP_ROOT/"
+
+# System updates are separate from the application and only use the canonical
+# signed manifest. The helper rejects arbitrary URLs, paths, commands, and
+# downgrade attempts.
+install -Dm755 "$SCRIPT_DIR/papyrus-system-updater" "$LIBEXEC_DIR/papyrus-system-updater"
+install -Dm644 "$SCRIPT_DIR/uno.scallion.papyrus.policy" "$POLKIT_DIR/uno.scallion.papyrus.policy"
+install -Dm644 "$SCRIPT_DIR/papyrus-updater.key.pub" "$SHARE_DIR/papyrus-updater.key.pub"
+printf '%s\n' "1.1.0" >"$APP_ROOT/VERSION"
 
 cat >"$APP_ROOT/launch-papyrus" <<'EOF'
 #!/bin/sh
@@ -173,5 +184,6 @@ fi
 
 echo "Papyrus installed at $APP_ROOT."
 echo "Launch with: papyrus"
+echo "Signed system updater: $LIBEXEC_DIR/papyrus-system-updater"
 echo "User data is preserved in ~/.local/share/uno.scallion.papyrus"
 echo "Configuration is preserved in ~/.config/uno.scallion.papyrus"

@@ -1,0 +1,121 @@
+#!/bin/sh
+# Root-owned Papyrus Debian updater helper.
+# Fixed-scope by design: no arbitrary URL, path, command, or downgrade support.
+
+set -eu
+
+CANONICAL_MANIFEST_URL="https://sca-hub.cn/api/papyrus/update"
+APP_ROOT=${PAPYRUS_INSTALL_ROOT:-/opt/papyrus}
+VERSION_FILE="$APP_ROOT/VERSION"
+PUBLIC_KEY=${PAPYRUS_UPDATER_PUBLIC_KEY:-/usr/share/papyrus/papyrus-updater.key.pub}
+WORK_DIR=${PAPYRUS_UPDATE_WORK_DIR:-/var/cache/papyrus-updater}
+MODE=${1:---install-latest}
+
+if [ "$MODE" != "--install-latest" ] && [ "$MODE" != "--dry-run" ]; then
+    echo "Usage: papyrus-system-updater [--install-latest|--dry-run]" >&2
+    exit 2
+fi
+
+need() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "Missing required command: $1" >&2
+        exit 1
+    fi
+}
+
+need curl
+need python3
+need sha256sum
+need dpkg
+need dpkg-deb
+need minisign
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "papyrus-system-updater must be invoked through Polkit as root." >&2
+    exit 1
+fi
+
+if [ ! -r "$PUBLIC_KEY" ]; then
+    echo "Papyrus updater public key is missing: $PUBLIC_KEY" >&2
+    exit 1
+fi
+
+installed_version=0.0.0
+if [ -r "$VERSION_FILE" ]; then
+    installed_version=$(tr -cd '0-9.' <"$VERSION_FILE" | head -c 32)
+fi
+
+mkdir -p "$WORK_DIR"
+manifest="$WORK_DIR/manifest.json"
+metadata="$WORK_DIR/metadata.tsv"
+artifact="$WORK_DIR/Papyrus_latest_amd64.deb"
+signature="$artifact.minisig"
+
+curl --fail --silent --show-error --location "$CANONICAL_MANIFEST_URL" --output "$manifest"
+
+python3 - "$manifest" "$metadata" <<'PY'
+import json
+import sys
+from urllib.parse import urlparse
+
+manifest_path, metadata_path = sys.argv[1:3]
+data = json.load(open(manifest_path, encoding="utf-8"))
+version = str(data.get("version", ""))
+platforms = data.get("platforms") or {}
+linux = platforms.get("linux-x86_64") or platforms.get("linux-amd64") or {}
+url = str(linux.get("url", ""))
+signature = str(linux.get("signature", ""))
+parsed = urlparse(url)
+if not version or not url or not signature:
+    raise SystemExit("manifest missing Linux version, URL, or signature")
+if parsed.scheme != "https" or parsed.netloc != "github.com":
+    raise SystemExit("Linux update URL must be an official HTTPS GitHub release asset")
+if "/bzm2008/papyrus/releases/download/v" not in parsed.path:
+    raise SystemExit("Linux update URL must point to the Papyrus GitHub release namespace")
+leaf = parsed.path.rsplit("/", 1)[-1]
+if not (leaf.startswith("Papyrus_") and leaf.endswith("_amd64.deb")):
+    raise SystemExit("Linux system updater accepts only Papyrus amd64 .deb assets")
+with open(metadata_path, "w", encoding="utf-8") as handle:
+    handle.write(version + "\\t" + url + "\\t" + signature)
+PY
+
+IFS="$(printf '\\t')" read -r target_version artifact_url manifest_signature <"$metadata"
+
+if ! dpkg --compare-versions "$target_version" gt "$installed_version"; then
+    echo "Papyrus is already at $installed_version; refusing downgrade or reinstall to $target_version."
+    exit 0
+fi
+
+curl --fail --silent --show-error --location "$artifact_url" --output "$artifact"
+printf '%s\n' "$manifest_signature" >"$signature"
+minisign_pubkey=$(python3 - "$PUBLIC_KEY" <<'PY'
+import base64
+import sys
+
+raw = open(sys.argv[1], "rb").read().strip()
+try:
+    text = base64.b64decode(raw, validate=True).decode("utf-8")
+except Exception:
+    text = raw.decode("utf-8")
+for line in text.splitlines():
+    line = line.strip()
+    if line.startswith("RW"):
+        print(line)
+        break
+else:
+    raise SystemExit("Papyrus updater public key is invalid")
+PY
+)
+minisign -Vm "$artifact" -P "$minisign_pubkey" -x "$signature" >/dev/null
+dpkg-deb --info "$artifact" >/dev/null
+
+if [ "$MODE" = "--dry-run" ]; then
+    sha256sum "$artifact"
+    echo "Papyrus $installed_version can be upgraded to $target_version."
+    exit 0
+fi
+
+dpkg -i "$artifact"
+mkdir -p "$APP_ROOT"
+printf '%s\n' "$target_version" >"$VERSION_FILE"
+echo "Papyrus upgraded to $target_version."

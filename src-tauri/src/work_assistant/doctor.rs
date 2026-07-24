@@ -10,6 +10,7 @@ use crate::work_assistant::{
 };
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     env, fs,
     net::TcpListener,
     path::{Path, PathBuf},
@@ -56,6 +57,10 @@ pub struct DoctorProbes {
     pub downloads_directory: Option<PathBuf>,
     pub path_entries: Vec<PathBuf>,
     pub loopback_error: Option<String>,
+    pub env_vars: HashMap<String, String>,
+    pub webkit_candidates: Vec<PathBuf>,
+    pub system_update_helper_path: PathBuf,
+    pub polkit_policy_path: PathBuf,
 }
 
 impl DoctorProbes {
@@ -67,6 +72,17 @@ impl DoctorProbes {
         let loopback_error = TcpListener::bind(("127.0.0.1", 0))
             .err()
             .map(|error| error.to_string());
+        let env_vars = [
+            "XDG_SESSION_TYPE",
+            "XDG_CURRENT_DESKTOP",
+            "WAYLAND_DISPLAY",
+            "DISPLAY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "AT_SPI_BUS_ADDRESS",
+        ]
+        .into_iter()
+        .filter_map(|key| env::var(key).ok().map(|value| (key.into(), value)))
+        .collect();
 
         Self {
             platform: platform.clone(),
@@ -75,6 +91,12 @@ impl DoctorProbes {
             downloads_directory: downloads_directory_for_platform(&platform),
             path_entries,
             loopback_error,
+            env_vars,
+            webkit_candidates: default_webkit_candidates(&platform),
+            system_update_helper_path: PathBuf::from("/usr/libexec/papyrus-system-updater"),
+            polkit_policy_path: PathBuf::from(
+                "/usr/share/polkit-1/actions/uno.scallion.papyrus.policy",
+            ),
         }
     }
 }
@@ -125,6 +147,7 @@ pub fn run_doctor_with_browser_and_probes(
     checks.push(check_external_opener(probes));
     checks.push(check_registered_applications(app_data));
     checks.push(check_loopback(probes));
+    checks.extend(platform_specific_checks(probes));
 
     checks.push(check_browser_bridge(browser, probes.now));
 
@@ -450,6 +473,165 @@ fn check_loopback(probes: &DoctorProbes) -> DoctorCheck {
     }
 }
 
+fn platform_specific_checks(probes: &DoctorProbes) -> Vec<DoctorCheck> {
+    if probes.platform == "linux" {
+        vec![
+            check_webkit_runtime(probes),
+            check_sqlite_runtime(),
+            check_linux_session(probes),
+            check_at_spi(probes),
+            check_desktop_portal(probes),
+            check_system_update_helper(probes),
+        ]
+    } else {
+        vec![check_sqlite_runtime()]
+    }
+}
+
+fn check_webkit_runtime(probes: &DoctorProbes) -> DoctorCheck {
+    let found = probes
+        .webkit_candidates
+        .iter()
+        .find(|candidate| fs::metadata(candidate).map(|metadata| metadata.is_file()).unwrap_or(false));
+    match found {
+        Some(path) => DoctorCheck {
+            id: "webkit_runtime".into(),
+            label: "WebKit 运行库".into(),
+            status: DoctorStatus::Ok,
+            message: path.to_string_lossy().into_owned(),
+        },
+        None => DoctorCheck {
+            id: "webkit_runtime".into(),
+            label: "WebKit 运行库".into(),
+            status: DoctorStatus::Warning,
+            message: "未发现 WebKitGTK 4.1/6.0 运行库；Debian 13 安装包需要系统提供 WebKit。".into(),
+        },
+    }
+}
+
+fn check_sqlite_runtime() -> DoctorCheck {
+    match rusqlite::Connection::open_in_memory()
+        .and_then(|connection| connection.query_row("SELECT sqlite_version()", [], |row| row.get::<_, String>(0)))
+    {
+        Ok(version) => DoctorCheck {
+            id: "sqlite_runtime".into(),
+            label: "SQLite / FTS5".into(),
+            status: DoctorStatus::Ok,
+            message: format!("SQLite {version} 可用；秘书账本使用 bundled SQLite。"),
+        },
+        Err(error) => DoctorCheck {
+            id: "sqlite_runtime".into(),
+            label: "SQLite / FTS5".into(),
+            status: DoctorStatus::Error,
+            message: format!("SQLite 初始化失败：{error}"),
+        },
+    }
+}
+
+fn check_linux_session(probes: &DoctorProbes) -> DoctorCheck {
+    let session = env_probe(probes, "XDG_SESSION_TYPE").unwrap_or("unknown");
+    let desktop = env_probe(probes, "XDG_CURRENT_DESKTOP").unwrap_or("unknown");
+    let is_wayland = session.eq_ignore_ascii_case("wayland") || env_probe(probes, "WAYLAND_DISPLAY").is_some();
+    let is_gnome = desktop.to_ascii_lowercase().contains("gnome");
+    if is_wayland && is_gnome {
+        DoctorCheck {
+            id: "linux_session".into(),
+            label: "Debian 会话".into(),
+            status: DoctorStatus::Ok,
+            message: format!("{desktop} / {session}，匹配 Debian 13 GNOME Wayland 发布门。"),
+        }
+    } else {
+        DoctorCheck {
+            id: "linux_session".into(),
+            label: "Debian 会话".into(),
+            status: DoctorStatus::Warning,
+            message: format!(
+                "当前会话为 {desktop} / {session}；完整 Computer Use 认证以 Debian 13 GNOME Wayland 为准。"
+            ),
+        }
+    }
+}
+
+fn check_at_spi(probes: &DoctorProbes) -> DoctorCheck {
+    if env_probe(probes, "AT_SPI_BUS_ADDRESS").is_some() {
+        return DoctorCheck {
+            id: "at_spi".into(),
+            label: "AT-SPI 辅助功能".into(),
+            status: DoctorStatus::Ok,
+            message: "已发现 AT-SPI 总线环境。".into(),
+        };
+    }
+    DoctorCheck {
+        id: "at_spi".into(),
+        label: "AT-SPI 辅助功能".into(),
+        status: DoctorStatus::Warning,
+        message: "未发现 AT-SPI 总线；请在 GNOME 设置中开启辅助功能后重试 Computer Use。".into(),
+    }
+}
+
+fn check_desktop_portal(probes: &DoctorProbes) -> DoctorCheck {
+    let has_session_bus = env_probe(probes, "DBUS_SESSION_BUS_ADDRESS").is_some();
+    let has_portal = executable_on_paths("xdg-desktop-portal", &probes.path_entries, &probes.platform);
+    let has_gnome_portal =
+        executable_on_paths("xdg-desktop-portal-gnome", &probes.path_entries, &probes.platform);
+    match (has_session_bus, has_portal, has_gnome_portal) {
+        (true, true, true) => DoctorCheck {
+            id: "desktop_portal".into(),
+            label: "GNOME Portal".into(),
+            status: DoctorStatus::Ok,
+            message: "已发现 D-Bus 会话、xdg-desktop-portal 和 GNOME portal。".into(),
+        },
+        _ => DoctorCheck {
+            id: "desktop_portal".into(),
+            label: "GNOME Portal".into(),
+            status: DoctorStatus::Warning,
+            message: "Computer Use 需要 D-Bus 会话、xdg-desktop-portal 和 GNOME RemoteDesktop/ScreenCast 授权。".into(),
+        },
+    }
+}
+
+fn check_system_update_helper(probes: &DoctorProbes) -> DoctorCheck {
+    let helper_ok = fs::metadata(&probes.system_update_helper_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+    let policy_ok = fs::metadata(&probes.polkit_policy_path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false);
+    match (helper_ok, policy_ok) {
+        (true, true) => DoctorCheck {
+            id: "system_update_helper".into(),
+            label: "系统更新助手".into(),
+            status: DoctorStatus::Ok,
+            message: "Polkit 授权助手已安装，仅允许验证并升级 canonical Papyrus .deb。".into(),
+        },
+        _ => DoctorCheck {
+            id: "system_update_helper".into(),
+            label: "系统更新助手".into(),
+            status: DoctorStatus::Warning,
+            message: "未完整安装 Polkit 系统更新助手；系统级 .deb 更新需使用安装包或重新集成 rootfs 文件。".into(),
+        },
+    }
+}
+
+fn env_probe<'a>(probes: &'a DoctorProbes, key: &str) -> Option<&'a str> {
+    probes.env_vars.get(key).map(String::as_str)
+}
+
+fn default_webkit_candidates(platform: &str) -> Vec<PathBuf> {
+    if platform != "linux" {
+        return Vec::new();
+    }
+    [
+        "/usr/lib/x86_64-linux-gnu/libwebkit2gtk-4.1.so.0",
+        "/usr/lib/x86_64-linux-gnu/libwebkitgtk-6.0.so.4",
+        "/usr/lib/aarch64-linux-gnu/libwebkit2gtk-4.1.so.0",
+        "/usr/lib/aarch64-linux-gnu/libwebkitgtk-6.0.so.4",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -479,6 +661,21 @@ mod tests {
             cancelled_execution_audits: Mutex::new(HashSet::new()),
             audit_path: path,
             audit_guard: Mutex::new(()),
+        }
+    }
+
+    fn linux_probes(now: u64) -> DoctorProbes {
+        DoctorProbes {
+            platform: "linux".into(),
+            architecture: "x86_64".into(),
+            now,
+            downloads_directory: None,
+            path_entries: Vec::new(),
+            loopback_error: None,
+            env_vars: HashMap::new(),
+            webkit_candidates: Vec::new(),
+            system_update_helper_path: PathBuf::from("/missing/papyrus-system-updater"),
+            polkit_policy_path: PathBuf::from("/missing/uno.scallion.papyrus.policy"),
         }
     }
 
@@ -560,12 +757,9 @@ mod tests {
             created_at: 1,
         });
         let probes = DoctorProbes {
-            platform: "linux".into(),
-            architecture: "x86_64".into(),
             now: 42,
             downloads_directory: Some(directory.join("missing-downloads")),
-            path_entries: Vec::new(),
-            loopback_error: None,
+            ..linux_probes(42)
         };
         let before_entries = directory_entries(&directory);
         let before_audit = std::fs::read(&audit_path).unwrap();
@@ -588,6 +782,15 @@ mod tests {
             DoctorStatus::Warning
         );
         assert_eq!(check(&report, "loopback_port").status, DoctorStatus::Ok);
+        assert_eq!(check(&report, "sqlite_runtime").status, DoctorStatus::Ok);
+        assert_eq!(check(&report, "webkit_runtime").status, DoctorStatus::Warning);
+        assert_eq!(check(&report, "linux_session").status, DoctorStatus::Warning);
+        assert_eq!(check(&report, "at_spi").status, DoctorStatus::Warning);
+        assert_eq!(check(&report, "desktop_portal").status, DoctorStatus::Warning);
+        assert_eq!(
+            check(&report, "system_update_helper").status,
+            DoctorStatus::Warning
+        );
         assert_eq!(report.platform, "linux");
         assert_eq!(report.architecture, "x86_64");
         assert_eq!(report.generated_at, 42);
@@ -608,12 +811,8 @@ mod tests {
         let state = state(directory.join("audit.jsonl"));
 
         let available = DoctorProbes {
-            platform: "linux".into(),
-            architecture: "x86_64".into(),
-            now: 100,
-            downloads_directory: None,
             path_entries: vec![fake_bin],
-            loopback_error: None,
+            ..linux_probes(100)
         };
         let report = run_doctor_with_browser_and_probes(&state, None, &available).unwrap();
         assert_eq!(check(&report, "external_opener").status, DoctorStatus::Ok);
@@ -673,6 +872,54 @@ mod tests {
             check_browser_bridge_status(None, 42).status,
             DoctorStatus::Warning
         );
+    }
+
+    #[test]
+    fn debian13_doctor_checks_release_gate_inputs_without_mutating_system() {
+        let directory = std::env::temp_dir().join(format!(
+            "papyrus-doctor-debian-gate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let bin = directory.join("bin");
+        let lib = directory.join("libwebkit2gtk-4.1.so.0");
+        let helper = directory.join("papyrus-system-updater");
+        let policy = directory.join("uno.scallion.papyrus.policy");
+        std::fs::create_dir_all(&bin).unwrap();
+        for executable in ["xdg-desktop-portal", "xdg-desktop-portal-gnome"] {
+            std::fs::write(bin.join(executable), b"not executed").unwrap();
+        }
+        std::fs::write(&lib, b"fake webkit").unwrap();
+        std::fs::write(&helper, b"fake helper").unwrap();
+        std::fs::write(&policy, b"fake policy").unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("XDG_SESSION_TYPE".into(), "wayland".into());
+        env_vars.insert("XDG_CURRENT_DESKTOP".into(), "GNOME".into());
+        env_vars.insert("WAYLAND_DISPLAY".into(), "wayland-0".into());
+        env_vars.insert("DBUS_SESSION_BUS_ADDRESS".into(), "unix:path=/tmp/bus".into());
+        env_vars.insert("AT_SPI_BUS_ADDRESS".into(), "unix:path=/tmp/at-spi".into());
+        let probes = DoctorProbes {
+            path_entries: vec![bin],
+            env_vars,
+            webkit_candidates: vec![lib],
+            system_update_helper_path: helper,
+            polkit_policy_path: policy,
+            ..linux_probes(200)
+        };
+        let state = state(directory.join("audit.jsonl"));
+
+        let report = run_doctor_with_browser_and_probes(&state, None, &probes).unwrap();
+
+        assert_eq!(check(&report, "webkit_runtime").status, DoctorStatus::Ok);
+        assert_eq!(check(&report, "linux_session").status, DoctorStatus::Ok);
+        assert_eq!(check(&report, "at_spi").status, DoctorStatus::Ok);
+        assert_eq!(check(&report, "desktop_portal").status, DoctorStatus::Ok);
+        assert_eq!(
+            check(&report, "system_update_helper").status,
+            DoctorStatus::Ok
+        );
+        assert!(!directory.join("audit.jsonl").exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     fn check<'a>(report: &'a WorkAssistantDoctorReport, id: &str) -> &'a DoctorCheck {
