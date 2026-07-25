@@ -72,10 +72,10 @@ export const defaultProviderConfigs: Record<ProviderId, LlmProviderConfig> = {
     id: 'qwen36',
     type: 'scallion_proxy',
     label: 'Scallion 内置模型',
-    baseUrl: 'https://scallion.uno/api/papyrus/llm',
+    baseUrl: 'https://api.sca-hub.cn/api/papyrus/llm',
     apiKey: '',
     modelName: 'agnes-2.0-flash',
-    docsUrl: 'https://scallion.uno',
+    docsUrl: 'https://sca-hub.cn',
     setupHint: 'Built-in cloud model through Scallion proxy. No upstream key is stored in the client.',
     contextWindowTokens: 131072,
   },
@@ -310,7 +310,7 @@ export function mergeProviderConfigs(
         docsUrl: defaults.docsUrl,
         setupHint: defaults.setupHint,
         baseUrl:
-          defaults.type === 'vendor_key'
+          defaults.type === 'vendor_key' || defaults.type === 'scallion_proxy'
             ? defaults.baseUrl
             : persisted?.baseUrl?.trim()
               ? persisted.baseUrl

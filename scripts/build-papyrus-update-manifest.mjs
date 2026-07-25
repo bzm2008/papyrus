@@ -70,7 +70,7 @@ if (missing.length) throw new Error(`missing signed updater assets: ${missing.jo
 
 const manifest = {
   version,
-  notes: 'Papyrus 1.0.0：文科秘书工作台、项目账本、受控电脑助手与跨平台安装支持。',
+  notes: 'Papyrus 1.1.0：通信笺秘书时间线、项目账本、受控电脑助手与跨平台安装支持。',
   pub_date: new Date().toISOString(),
   platforms,
 }

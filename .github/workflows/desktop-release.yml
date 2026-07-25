@@ -148,13 +148,22 @@ jobs:
           find release-assets -type f -path '*/release/bundle/macos/Papyrus.app.tar.gz*' -delete
       - name: Build signed OTA manifest
         run: node scripts/build-papyrus-update-manifest.mjs --artifacts release-assets --version "${{ steps.version.outputs.version }}" --output release-assets/latest.json
+      - name: Generate Linux asset checksums
+        shell: bash
+        run: |
+          : > release-assets/SHA256SUMS
+          while IFS= read -r -d '' file; do
+            sha256sum "$file" | sed 's#  .*/#  #' >> release-assets/SHA256SUMS
+          done < <(find release-assets -type f \( -name '*.deb' -o -name '*.AppImage' \) -print0 | sort -z)
+          test -s release-assets/SHA256SUMS
+          cp release-assets/SHA256SUMS os-integration/debian13/SHA256SUMS
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' 'Papyrus 1.0.0 production release.' 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
+          gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' 'Papyrus 1.1.0 production release.' 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
           mapfile -d '' release_files < <(find release-assets -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' -o -name 'Papyrus-WPS-Addin_*.zip' \) -print0)
-          gh release upload "${{ steps.version.outputs.tag }}" "${release_files[@]}" release-assets/latest.json --repo "${GITHUB_REPOSITORY}" --clobber
+          gh release upload "${{ steps.version.outputs.tag }}" "${release_files[@]}" release-assets/latest.json release-assets/SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
       - name: Upload Debian 13 integration bundle
         env:
           GH_TOKEN: ${{ github.token }}

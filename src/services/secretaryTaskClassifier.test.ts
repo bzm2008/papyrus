@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { classifySecretaryTask, isConversationalShortcut } from './secretaryTaskClassifier'
+import { classifySecretaryTask, isCapabilityQuestion, isConversationalShortcut } from './secretaryTaskClassifier'
 
 describe('classifySecretaryTask domain routing', () => {
   it('routes local file and desktop requests to the controlled work assistant', () => {
@@ -27,5 +27,11 @@ describe('classifySecretaryTask domain routing', () => {
     expect(isConversationalShortcut('谢谢你')).toBe(true)
     expect(isConversationalShortcut('写一段欢迎词')).toBe(false)
     expect(isConversationalShortcut('查看今天的新闻')).toBe(false)
+  })
+
+  it('treats computer and browser capability questions as conversation-only', () => {
+    expect(isCapabilityQuestion('你能不能操控电脑')).toBe(true)
+    expect(isConversationalShortcut('你能不能操控浏览器')).toBe(true)
+    expect(classifySecretaryTask('帮我控制电脑打开计算器').domain).toBe('work_assistant')
   })
 })

@@ -19,8 +19,8 @@ import {
 
 export { parseSseChunks, shouldFallbackToNonStream } from './wpsAgentRuntime'
 
-const LLM_API = 'https://scallion.uno/api/papyrus/llm/chat'
-const MODELS_API = 'https://scallion.uno/api/papyrus/llm/models'
+const LLM_API = 'https://api.sca-hub.cn/api/papyrus/llm/chat'
+const MODELS_API = 'https://api.sca-hub.cn/api/papyrus/llm/models'
 const PRIMARY_MODEL = 'agnes-2.0-flash'
 const FALLBACK_MODEL = 'agnes-2.0-flash'
 const REQUEST_TIMEOUT_MS = 45000

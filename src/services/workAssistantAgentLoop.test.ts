@@ -55,6 +55,22 @@ describe('runWorkAssistantAgentLoop', () => {
     expect(normalMessages[0]?.content).not.toContain('Never request passwords')
   })
 
+  it('adds non-shell terminal safety guidance only when terminal is available', async () => {
+    const messages: Array<{ role: string; content: string }> = []
+    await runWorkAssistantAgentLoop({
+      runId: 'terminal-guidance',
+      prompt: '运行项目检查',
+      toolNames: ['terminal_run'],
+      modelCall: async (input) => {
+        messages.push(...input)
+        return finalDecision('检查完成。')
+      },
+      executeTool: vi.fn(),
+    })
+    expect(messages[0]?.content).toContain('never provide a shell command string')
+    expect(messages[0]?.content).toContain('Never request powershell')
+  })
+
   it('stops duplicate failed arguments before a third execution', async () => {
     const modelCall = vi.fn(async () => toolDecision('workspace_scan', { rootId: 'bad' }))
     const executeTool = vi.fn(async () => ({ ok: false, summary: 'failed', recoverable: true }))

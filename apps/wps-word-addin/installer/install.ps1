@@ -1,6 +1,6 @@
 param(
   [string]$AddinName = "PapyrusWpsAddin",
-  [string]$UpdateManifestUrl = "https://scallion.uno/api/papyrus/wps/update"
+  [string]$UpdateManifestUrl = "https://api.sca-hub.cn/api/papyrus/wps/update"
 )
 
 $ErrorActionPreference = "Stop"

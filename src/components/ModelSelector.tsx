@@ -41,28 +41,15 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
       ) ?? scallionModels.find((model) => getScallionRoutingAccess(model, modelRoutingMode)),
     [providerConfigs.qwen36.modelName, scallionModels, modelRoutingMode],
   )
-  const preferredAutoModel = useMemo(
-    () =>
-      scallionModels.find(
-        (model) =>
-          getScallionRoutingAccess(model, 'auto') &&
-          model.modelName === providerConfigs.qwen36.modelName,
-      ) ?? scallionModels.find((model) => getScallionRoutingAccess(model, 'auto')),
-    [providerConfigs.qwen36.modelName, scallionModels],
-  )
   const activeLabel =
     modelRoutingMode === 'auto'
-      ? preferredAutoModel?.label
-        ? `Auto · ${preferredAutoModel.label}`
-        : 'Auto 推荐'
+      ? 'Auto · 主站路由'
       : activeProvider.type === 'scallion_proxy'
         ? currentScallionModel?.label || (scallionToken ? '套餐模型加载中' : '登录后选择模型')
         : activeProvider.label
   const activeSubLabel =
     modelRoutingMode === 'auto'
-      ? preferredAutoModel
-        ? `${preferredAutoModel.modelName} · ${contextLabel(preferredAutoModel.contextWindowTokens)}`
-        : '秘书长自动选择模型'
+      ? '主站按任务选择可用模型'
       : activeProvider.type === 'scallion_proxy'
         ? currentScallionModel
           ? `${currentScallionModel.modelName} · ${contextLabel(currentScallionModel.contextWindowTokens)}`
@@ -169,6 +156,10 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectScallionModel = (model: ScallionModelMetadata) => {
+    // Auto is controlled by the Scallion router. Keep the complete catalogue
+    // visible for transparency, but do not let the client turn Auto into a
+    // hidden manual-model picker.
+    if (modelRoutingMode === 'auto') return
     if (!getScallionRoutingAccess(model, modelRoutingMode)) return
     updateProviderModelMetadata('qwen36', {
       label: model.label,
@@ -180,19 +171,8 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectAuto = () => {
-    const autoModel =
-      scallionModels.find(
-        (model) =>
-          getScallionRoutingAccess(model, 'auto') &&
-          model.modelName === providerConfigs.qwen36.modelName,
-      ) ?? scallionModels.find((model) => getScallionRoutingAccess(model, 'auto'))
-    if (autoModel && providerConfigs.qwen36.modelName !== autoModel.modelName) {
-      updateProviderModelMetadata('qwen36', {
-        label: autoModel.label,
-        modelName: autoModel.modelName,
-        contextWindowTokens: autoModel.contextWindowTokens,
-      })
-    }
+    // The gateway owns Auto selection. Keep the user's last manual model in
+    // local state without turning it into a hidden Auto pin.
     setActiveProviderId('qwen36')
     setModelRoutingMode('auto')
     close()
@@ -324,10 +304,13 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                         const access = getScallionModelAccessForMode(model, modelRoutingMode)
                         const manualAccess = getScallionModelAccessForMode(model, 'manual')
                         const autoAccess = getScallionModelAccessForMode(model, 'auto')
-                        const disabled = !getScallionRoutingAccess(model, modelRoutingMode)
+                        const disabled = modelRoutingMode === 'auto' || !getScallionRoutingAccess(model, modelRoutingMode)
+                        const autoOnly = !manualAccess.usable && autoAccess.usable
                         const accessSummary = access.usable
                           ? modelRoutingMode === 'auto'
-                            ? 'Auto 可用 · 点击设为首选'
+                            ? autoOnly
+                              ? '仅 Auto 可用 · 由主站自动选择'
+                              : 'Auto 可用 · 由主站自动选择'
                             : '手动可用'
                           : modelRoutingMode === 'manual' && autoAccess.usable
                             ? '仅 Auto 可用 · 当前套餐可由 Auto 路由'

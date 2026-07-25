@@ -13,7 +13,7 @@ export type SecretaryTaskClassification = {
   domain: SecretaryTaskDomain
 }
 
-const workAssistantPattern = /(?:文件|文件夹|目录|下载|桌面|磁盘|内存|CPU|应用|软件|打开网址|打开链接|定位文件|扫描|整理资料|归档|移动|重命名|复制|删除|电脑状态|downloads?|folders?|files?|desktop|disk|memory|scan|open\s+(?:app|url|file)|rename|move|organize)/i
+const workAssistantPattern = /(?:文件|文件夹|目录|下载|桌面|磁盘|内存|CPU|应用|软件|打开网址|打开链接|定位文件|扫描|整理资料|归档|移动|重命名|复制|删除|电脑状态|操控电脑|控制电脑|操作电脑|鼠标|键盘|截图|屏幕|downloads?|folders?|files?|desktop|disk|memory|scan|open\s+(?:app|url|file)|rename|move|organize)/i
 const browserPattern = /(?:网页|网站|浏览器|标签页|链接内容|页面|表单|字段|点击|填写|下载网页|提交表单|web|website|browser|tab|page|form|field|click|fill|submit|download)/i
 const writingDomainPattern = /(?:写作|撰写|编写|续写|写(?:一|篇|个|份|封|段|出|作|好|成|报告|文章|文案|小说|总结)|起草|文章|报告|总结|润色|改写|小说|章节|文案|正文|write|draft|article|report|rewrite)/i
 
@@ -85,6 +85,7 @@ const platformPatterns = [
 ]
 
 const conversationalShortcutPattern = /^(?:你好|您好|嗨|嗨嗨|哈喽|hello|hi|hey|在吗|有人吗|早上好|下午好|晚上好|晚安|谢谢|谢谢你|多谢|好的|好呀|好吧|收到|明白了|了解了|嗯|嗯嗯|哈哈|哈哈哈|再见|你是谁|你叫什么|你能做什么|how are you|who are you)[!！。,.，?？~～\s]*$/i
+const capabilityQuestionPattern = /(?:能不能|可不可以|是否可以|可以不可以|能否|会不会|可以).{0,18}(?:操控|控制|操作|使用|打开|管理).{0,18}(?:电脑|浏览器|桌面|应用|文件|网页|网站)/i
 
 /**
  * Short social turns should take one conversational model call. They must not
@@ -97,12 +98,19 @@ export function isConversationalShortcut(prompt: string) {
     .replace(/\s+/g, ' ')
     .trim()
 
-  if (!text || text.length > 32 || !conversationalShortcutPattern.test(text)) {
+  if (!text || text.length > 80) {
     return false
   }
 
+  if (capabilityQuestionPattern.test(text)) return true
+  if (!conversationalShortcutPattern.test(text)) return false
+
   const classification = classifySecretaryTask(text)
   return classification.complexity === 'simple' && classification.domain === 'writing'
+}
+
+export function isCapabilityQuestion(prompt: string) {
+  return capabilityQuestionPattern.test(prompt.replace(/\s+/g, ' ').trim())
 }
 
 export function classifySecretaryTask(

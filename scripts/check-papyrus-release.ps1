@@ -1,6 +1,6 @@
 param(
-  [string]$BaseUrl = "https://scallion.uno",
-  [string]$ExpectedVersion = "1.0.0"
+  [string]$BaseUrl = "https://api.sca-hub.cn",
+  [string]$ExpectedVersion = "1.1.0"
 )
 
 $ErrorActionPreference = "Stop"

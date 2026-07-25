@@ -87,9 +87,12 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
   const [searching, setSearching] = useState(false)
   const [searchResults, setSearchResults] = useState<SecretaryLedgerSearchResult[]>([])
   const [projectPickerOpen, setProjectPickerOpen] = useState(false)
+  const [conversationPickerOpen, setConversationPickerOpen] = useState(false)
   const resources = useAppStore((state) => state.resources)
   const activeStoryProjectId = useAppStore((state) => state.activeStoryProjectId)
   const activeChatId = useAppStore((state) => state.activeChatId)
+  const chatSessions = useAppStore((state) => state.chatSessions)
+  const newChatSession = useAppStore((state) => state.newChatSession)
   const switchChatSession = useAppStore((state) => state.switchChatSession)
   const setActiveStoryProject = useAppStore((state) => state.setActiveStoryProject)
 
@@ -126,6 +129,22 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
     [snapshot?.tasks],
   )
   const projects = snapshot?.projects
+
+  const openTaskComposer = () => {
+    setComposer((current) => current === 'task' ? undefined : 'task')
+  }
+
+  const startNewConversation = () => {
+    newChatSession()
+    setConversationPickerOpen(false)
+    setError('')
+  }
+
+  const selectConversation = (chatId: string) => {
+    switchChatSession(chatId)
+    setConversationPickerOpen(false)
+    setError('')
+  }
 
   const submitTask = async () => {
     const request = taskDraft.trim()
@@ -317,6 +336,51 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
           <section className="text-xs leading-5 text-[#6f7168]">{snapshot?.state.reason ?? '当前环境不能使用本地秘书账本。'}</section>
         ) : null}
 
+        <section aria-label="秘书快捷操作" className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={startNewConversation}
+            className="papyrus-primary-button flex h-9 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] shadow-[0_7px_18px_rgba(49,93,57,0.12)] active:scale-[0.98]"
+          >
+            <Plus size={14} />
+            新建对话
+          </button>
+          <button
+            type="button"
+            onClick={() => setConversationPickerOpen((open) => !open)}
+            className="papyrus-control flex h-9 items-center justify-center gap-1.5 rounded-lg px-2 text-[12px] active:scale-[0.98]"
+          >
+            <History size={14} />
+            查看历史对话
+          </button>
+        </section>
+        {conversationPickerOpen ? (
+          <section aria-label="历史对话" className="overflow-hidden rounded-lg border border-[#e8ddc7] bg-[#fffdf7]/72">
+            <div className="flex items-center justify-between border-b border-[#eee4d3] px-2.5 py-2 text-[11px]">
+              <span className="font-semibold text-[#2f2b22]">历史对话</span>
+              <span className="text-[#8f897a]">{chatSessions.length}</span>
+            </div>
+            <div className="papyrus-scrollbar max-h-48 overflow-y-auto p-1.5">
+              {chatSessions.length ? chatSessions.slice(0, 12).map((chat) => {
+                const active = chat.id === activeChatId
+                return (
+                  <button
+                    key={chat.id}
+                    type="button"
+                    title={`打开对话：${chat.title}`}
+                    onClick={() => selectConversation(chat.id)}
+                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[11px] ${active ? 'bg-[#edf6eb] text-[#315d39]' : 'text-[#3e3a31] hover:bg-[#fffefa]'}`}
+                  >
+                    <History size={12} className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{chat.title}</span>
+                    <span className="shrink-0 text-[10px] opacity-70">{formatTime(chat.updatedAt)}</span>
+                  </button>
+                )
+              }) : <EmptyLine text="还没有历史对话" />}
+            </div>
+          </section>
+        ) : null}
+
         <TaskCenterSection title="资料" icon={FileStack} action={<button type="button" className="papyrus-icon-button size-6 rounded-md" title="查看资料" onClick={onOpenMaterials}><ChevronDown size={13} /></button>}>
           {resources.length ? (
             <div className="space-y-1">
@@ -361,7 +425,7 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
           ) : <EmptyLine text="尚无已确认记忆" />}
         </TaskCenterSection>
 
-        <TaskCenterSection title="任务队列" icon={ClipboardList} action={<button type="button" title="新增待办任务" onClick={() => setComposer(composer === 'task' ? undefined : 'task')} className="papyrus-icon-button size-6 rounded-md"><Plus size={13} /></button>}>
+        <TaskCenterSection title="任务队列" icon={ClipboardList} action={<button type="button" title="新增待办任务" onClick={openTaskComposer} className="papyrus-icon-button size-6 rounded-md"><Plus size={13} /></button>}>
           {composer === 'task' ? (
             <div className="space-y-2 rounded-md border border-[#e8ddc7] bg-[#fffdf7] p-2">
               <textarea aria-label="待办任务" value={taskDraft} onChange={(event) => setTaskDraft(event.target.value)} rows={3} placeholder="例如：周五下午整理访谈摘要并写邮件初稿" className="w-full resize-none border-0 bg-transparent text-xs leading-5 outline-none placeholder:text-[#9d988a]" />
@@ -376,10 +440,10 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
           ) : <EmptyLine text="没有待恢复或排队任务" />}
         </TaskCenterSection>
 
-        <TaskCenterSection title="历史检索" icon={History}>
+        <TaskCenterSection title="项目记录检索" icon={History}>
           <div className="flex gap-1.5">
-            <input aria-label="项目历史检索" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void runSearch() } }} placeholder="检索当前项目" className="min-w-0 flex-1 rounded-md border border-[#e8ddc7] bg-[#fffefa] px-2 py-1 text-[11px] outline-none placeholder:text-[#9d988a]" />
-            <button type="button" title="检索项目历史" onClick={() => void runSearch()} className="papyrus-icon-button size-7 rounded-md"><Search size={13} /></button>
+            <input aria-label="项目记录检索" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void runSearch() } }} placeholder="检索当前项目记录" className="min-w-0 flex-1 rounded-md border border-[#e8ddc7] bg-[#fffefa] px-2 py-1 text-[11px] outline-none placeholder:text-[#9d988a]" />
+            <button type="button" title="检索项目记录" onClick={() => void runSearch()} className="papyrus-icon-button size-7 rounded-md"><Search size={13} /></button>
           </div>
           <label className="mt-1.5 flex items-center gap-1.5 text-[10px] text-[#8f897a]"><input type="checkbox" checked={crossProject} onChange={(event) => setCrossProject(event.target.checked)} /> 跨项目检索并标明来源</label>
           {searching ? <div className="mt-2 flex items-center gap-1.5 text-[11px] text-[#8f897a]"><Loader2 size={12} className="animate-spin" /> 检索中</div> : null}
@@ -414,4 +478,3 @@ function formatTime(timestamp: number) {
     return new Date(timestamp).toLocaleString()
   }
 }
-

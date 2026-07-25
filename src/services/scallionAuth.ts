@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { useAppStore, type ScallionUser } from '../stores/useAppStore'
 import { refreshScallionRuntimeMetadata } from './scallionAccountService'
 
-const SCALLION_API = 'https://scallion.uno/api/papyrus/auth'
+const SCALLION_API = 'https://api.sca-hub.cn/api/papyrus/auth'
 
 type DeviceResponse = {
   deviceCode: string

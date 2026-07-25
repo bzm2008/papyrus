@@ -38,6 +38,8 @@ beforeEach(() => {
 const originalProjectNavigation = {
   activeChatId: useAppStore.getState().activeChatId,
   activeStoryProjectId: useAppStore.getState().activeStoryProjectId,
+  chatSessions: useAppStore.getState().chatSessions,
+  newChatSession: useAppStore.getState().newChatSession,
   switchChatSession: useAppStore.getState().switchChatSession,
   setActiveStoryProject: useAppStore.getState().setActiveStoryProject,
 }
@@ -71,6 +73,29 @@ describe('SecretaryTaskCenter', () => {
     })))
   })
 
+  it('surfaces conversation quick actions without creating a task', async () => {
+    const newChatSession = vi.fn()
+    const switchChatSession = vi.fn()
+    useAppStore.setState({
+      activeChatId: 'chat-a',
+      chatSessions: [
+        { id: 'chat-a', title: '今天的工作安排', messages: [], articleId: 'article-a', articleIds: ['article-a'], activeArticleId: 'article-a', createdAt: 1, updatedAt: 2 },
+        { id: 'chat-b', title: '上周会议纪要', messages: [], articleId: 'article-a', articleIds: ['article-a'], activeArticleId: 'article-a', createdAt: 1, updatedAt: 1 },
+      ],
+      newChatSession,
+      switchChatSession,
+    })
+    render(<SecretaryTaskCenter onStartTask={vi.fn()} onOpenMaterials={vi.fn()} />)
+    await screen.findByText('招商材料')
+
+    fireEvent.click(screen.getByRole('button', { name: '新建对话' }))
+    expect(newChatSession).toHaveBeenCalledOnce()
+
+    fireEvent.click(screen.getByRole('button', { name: '查看历史对话' }))
+    fireEvent.click(await screen.findByTitle('打开对话：上周会议纪要'))
+    expect(switchChatSession).toHaveBeenCalledWith('chat-b')
+  })
+
   it('switches the actual chat and story project from the ledger project selector', async () => {
     const switchChatSession = vi.fn()
     const setActiveStoryProject = vi.fn()
@@ -102,4 +127,3 @@ describe('SecretaryTaskCenter', () => {
     expect(setActiveStoryProject).toHaveBeenCalledWith('story-b')
   })
 })
-

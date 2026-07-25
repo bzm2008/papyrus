@@ -7,6 +7,7 @@ mod path_policy;
 pub(crate) mod platform;
 mod preview;
 mod registry;
+mod terminal;
 mod types;
 mod workspace;
 
@@ -20,6 +21,7 @@ pub use path_policy::*;
 pub(crate) use platform::*;
 pub use preview::*;
 pub use registry::*;
+pub use terminal::*;
 pub use types::*;
 pub use workspace::*;
 

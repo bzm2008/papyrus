@@ -78,6 +78,32 @@ describe('controlled work assistant integration', () => {
     expect(useWorkAssistantStore.getState().runs['run-2'].status).toBe('cancelled')
   })
 
+  it('runs an allowlisted terminal request only after one approval', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_terminal_run') {
+        return { program: 'git', exitCode: 0, stdout: 'clean', stderr: '', truncated: false, durationMs: 4 }
+      }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    dispatchOrderedWorkAssistantEvent({ type: 'run.started', runId: 'terminal-run', at: 1 })
+    const promise = executeAssistantToolCall({
+      runId: 'terminal-run',
+      toolCall: {
+        id: 'terminal-tool',
+        runId: 'terminal-run',
+        name: 'terminal_run',
+        intent: '检查项目状态',
+        arguments: { program: 'git', args: ['status'], rootId: 'project', cwd: '' },
+        status: 'queued',
+        startedAt: 1,
+      },
+    })
+    expect(resolveAssistantApproval(await waitForApproval('terminal-run'), 'once')).toBe(true)
+    await expect(promise).resolves.toMatchObject({ ok: true })
+    expect(invoke).toHaveBeenCalledWith('work_assistant_terminal_run', expect.objectContaining({ program: 'git', rootId: 'project' }))
+  })
+
   it('keeps a stale preview recoverable instead of replaying approval', async () => {
     dispatchOrderedWorkAssistantEvent({ type: 'run.started', runId: 'run-3', at: 1 })
     setWorkAssistantInvokerForTests(async (command) => {

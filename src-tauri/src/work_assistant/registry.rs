@@ -98,6 +98,11 @@ fn desktop_capabilities(platform: &str) -> Vec<CapabilityStatus> {
             supported,
             (!supported).then_some("application aliases are unavailable on this platform"),
         ),
+        capability(
+            "terminal_run",
+            supported,
+            (!supported).then_some("controlled terminal execution is unavailable on this platform"),
+        ),
     ]
 }
 
@@ -452,6 +457,7 @@ mod tests {
             "desktop_open_file",
             "desktop_reveal_file",
             "desktop_open_app",
+            "terminal_run",
         ] {
             let capability = capabilities
                 .iter()

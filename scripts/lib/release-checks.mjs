@@ -232,6 +232,39 @@ async function checkExtensionOutput(rootDir) {
   return failures
 }
 
+async function checkVersionConsistency(rootDir) {
+  const failures = []
+  const { value: packageJson, error: packageError } = await readJson(rootDir, 'package.json')
+  if (packageError) return [packageError]
+  const expectedVersion = typeof packageJson?.version === 'string' ? packageJson.version.trim() : ''
+  if (!expectedVersion) return ['package.json.version is required for release version checks']
+
+  const { value: tauriConfig, error: tauriError } = await readJson(rootDir, 'src-tauri/tauri.conf.json')
+  if (tauriError) failures.push(tauriError)
+  else if (tauriConfig?.version !== expectedVersion) {
+    failures.push('src-tauri/tauri.conf.json version must match package.json.version (' + expectedVersion + ')')
+  }
+
+  const cargoToml = await readText(rootDir, 'src-tauri/Cargo.toml')
+  const cargoPackageVersion = cargoToml?.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1]
+  if (cargoPackageVersion !== expectedVersion) {
+    failures.push('src-tauri/Cargo.toml package version must match package.json.version (' + expectedVersion + ')')
+  }
+
+  const { value: browserManifest, error: browserError } = await readJson(rootDir, 'apps/browser-bridge/manifest.json')
+  if (browserError) failures.push(browserError)
+  else if (browserManifest?.version !== expectedVersion) {
+    failures.push('apps/browser-bridge/manifest.json version must match package.json.version (' + expectedVersion + ')')
+  }
+
+  const wpsPackaging = await readText(rootDir, 'scripts/package-wps-addin-release.ps1')
+  if (!wpsPackaging?.includes('$packageJson.version')) {
+    failures.push('scripts/package-wps-addin-release.ps1 must derive its default version from package.json.version')
+  }
+
+  return failures
+}
+
 async function checkCsp(rootDir) {
   const failures = []
   const { value, error } = await readJson(rootDir, 'src-tauri/tauri.conf.json')
@@ -357,6 +390,7 @@ export async function runReleaseChecks({ rootDir = process.cwd(), phase = 'local
   failures.push(...await checkCsp(rootDir))
   failures.push(...await checkCommands(rootDir))
   failures.push(...await checkExtensionOutput(rootDir))
+  failures.push(...await checkVersionConsistency(rootDir))
   failures.push(...await checkDocumentation(rootDir))
   if (phase === 'release') failures.push(...await checkReleaseWorkflows(rootDir))
   return { phase, failures }
@@ -367,6 +401,7 @@ export const _internal = {
   flattenManifestPermissions,
   checkCsp,
   checkCommands,
+  checkVersionConsistency,
   checkDocumentation,
   checkWorkflowSemantics,
   checkReleaseScripts,

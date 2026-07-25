@@ -4,6 +4,7 @@ import {
   removeWorkAssistantRoot,
   resetWorkAssistantInvokerForTests,
   scanWorkAssistantDownloads,
+  runTerminalCommand,
   setWorkAssistantInvokerForTests,
 } from './workAssistantClient'
 
@@ -26,5 +27,19 @@ describe('workAssistantClient', () => {
     await scanWorkAssistantDownloads('downloads')
 
     expect(invoke).toHaveBeenCalledWith('work_assistant_downloads_scan', { rootId: 'downloads' })
+  })
+
+  it('sends structured terminal requests without a shell string', async () => {
+    const invoke = vi.fn(async () => ({ program: 'git', exitCode: 0, stdout: '', stderr: '', truncated: false, durationMs: 2 }))
+    setWorkAssistantInvokerForTests(invoke)
+
+    await runTerminalCommand({ program: 'git', args: ['status'], rootId: 'project', cwd: 'src' })
+
+    expect(invoke).toHaveBeenCalledWith('work_assistant_terminal_run', {
+      program: 'git',
+      args: ['status'],
+      rootId: 'project',
+      cwd: 'src',
+    })
   })
 })

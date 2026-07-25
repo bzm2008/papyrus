@@ -211,8 +211,12 @@ export function getScallionModelAccessForMode(
   return {
     status: 'plan_unavailable',
     usable: false,
-    label: mode === 'auto' ? 'Auto 不可用' : '手动不可用',
-    detail: model.availabilityReason || (requiredPlan ? `需要 ${formatScallionPlanName(requiredPlan)} 套餐` : '当前套餐不可用'),
+    label: requiredPlan
+      ? `需要 ${formatScallionPlanName(requiredPlan)} 套餐`
+      : mode === 'auto'
+        ? 'Auto 不可用'
+        : '手动不可用',
+    detail: model.availabilityReason || '当前套餐不可用',
   }
 }
 

@@ -36,7 +36,7 @@ $release = [ordered]@{
   version = $Version
   product = "Papyrus WPS Add-in"
   packageUrl = $githubReleaseUrl
-  updateManifestUrl = "https://scallion.uno/api/papyrus/wps/update"
+  updateManifestUrl = "https://api.sca-hub.cn/api/papyrus/wps/update"
   pubDate = (Get-Date).ToUniversalTime().ToString("o")
 }
 $release | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $stageRoot "release.json") -Encoding UTF8

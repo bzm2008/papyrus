@@ -3,8 +3,8 @@ import {
   Clipboard,
   Copy,
   ExternalLink,
-  FileText,
   PanelLeftOpen,
+  PanelRightOpen,
   MessageSquare,
   PenLine,
   Play,
@@ -50,7 +50,6 @@ import {
   type SecretaryPlanDraft,
   useAppStore,
 } from '../stores/useAppStore'
-import { EditorPane } from './EditorPane'
 import { ModelSelector } from './ModelSelector'
 import { PromptAssistMenu } from './PromptAssistMenu'
 import {
@@ -83,6 +82,7 @@ export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
   const [inlineWorkbenchView, setInlineWorkbenchView] = useState<WorkbenchView>('run')
   const [taskCenterDrawerOpen, setTaskCenterDrawerOpen] = useState(false)
+  const [workbenchOpen, setWorkbenchOpen] = useState(false)
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
   const autoStartTaskIdRef = useRef<string | null>(null)
@@ -155,12 +155,12 @@ export function FlowWorkspace() {
     latestAssistantMessage && latestChangeStat?.createdAt >= latestAssistantMessage.createdAt
       ? latestChangeStat
       : undefined
-  const showInlineWorkbench =
-    inlineWorkbenchView !== 'run' ||
-    Boolean(activeWorkAssistantRun) ||
-    agentTodos.length > 0 ||
-    agentSteps.length > 0 ||
-    flowTraces.length > 0
+  const showWorkbench = workbenchOpen
+
+  const openWorkbench = (view: WorkbenchView) => {
+    setInlineWorkbenchView(view)
+    setWorkbenchOpen(true)
+  }
   useEffect(() => {
     const previousRunState = receiptRunStateRef.current
     const hasRunData = agentTodos.length > 0 || agentSteps.length > 0 || flowTraces.length > 0
@@ -452,13 +452,13 @@ export function FlowWorkspace() {
 
   return (
     <section className="flex h-full min-h-0 bg-transparent">
-      <div className="hidden min-h-0 xl:flex">
+      <div className="hidden">
         <SecretaryTaskCenter
           onStartTask={startPersistentTask}
           onPauseActiveTask={() => pauseSecretaryRun()}
           onCancelActiveTask={() => cancelSecretaryRun()}
           onOpenMaterials={() => {
-            setInlineWorkbenchView('files')
+            openWorkbench('files')
           }}
         />
       </div>
@@ -470,7 +470,7 @@ export function FlowWorkspace() {
               title="打开项目现场"
               aria-label="打开项目现场"
               onClick={() => setTaskCenterDrawerOpen(true)}
-              className="papyrus-icon-button size-7 shrink-0 rounded-md xl:hidden"
+              className="papyrus-icon-button size-7 shrink-0 rounded-md"
             >
               <PanelLeftOpen size={14} />
             </button>
@@ -481,7 +481,7 @@ export function FlowWorkspace() {
               <div className="flex min-w-0 items-center gap-2">
                 <div className="truncate text-[13px] font-semibold text-[#20201d]">秘书模式</div>
                 <a
-                  href={scallionQuota?.upgradeUrl ?? 'https://scallion.uno/pricing'}
+                  href={scallionQuota?.upgradeUrl ?? 'https://sca-hub.cn/pricing'}
                   target="_blank"
                   rel="noreferrer"
                   title="查看套餐与升级"
@@ -500,15 +500,14 @@ export function FlowWorkspace() {
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              title={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
-              aria-label={inlineWorkbenchView === 'manuscript' ? '收起文稿' : '在对话流中打开文稿'}
-              onClick={() => {
-                setInlineWorkbenchView((view) => (view === 'manuscript' ? 'run' : 'manuscript'))
-              }}
-              className="papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]"
+              title={workbenchOpen ? '收起右侧工作台' : '打开右侧工作台'}
+              aria-label={workbenchOpen ? '收起右侧工作台' : '打开右侧工作台'}
+              aria-pressed={workbenchOpen}
+              onClick={() => setWorkbenchOpen((open) => !open)}
+              className={`papyrus-control inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] ${workbenchOpen ? 'bg-[#edf6eb] text-[#315d39]' : ''}`}
             >
-              <FileText size={14} />
-              <span className="hidden sm:inline">{inlineWorkbenchView === 'manuscript' ? '收起文稿' : '文稿'}</span>
+              <PanelRightOpen size={14} />
+              <span className="hidden sm:inline">工作台</span>
             </button>
           </div>
         </header>
@@ -569,24 +568,6 @@ export function FlowWorkspace() {
                   : null}
               </AnimatePresence>
             </div>
-            {showInlineWorkbench ? (
-              <div className="mt-4">
-                <SecretaryWorkbenchPanel
-                  inline
-                  todos={agentTodos}
-                  steps={agentSteps}
-                  traces={flowTraces}
-                  runState={llmRunState}
-                  pinned={false}
-                  activeView={inlineWorkbenchView}
-                  onViewChange={setInlineWorkbenchView}
-                  changeStat={latestRunChangeStat}
-                  manuscript={<div className="h-[34rem]"><EditorPane /></div>}
-                  files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
-                  browser={<SecretaryBrowserWorkbench />}
-                />
-              </div>
-            ) : null}
           </div>
         </div>
 
@@ -670,13 +651,40 @@ export function FlowWorkspace() {
       </div>
 
       <AnimatePresence initial={false}>
+        {showWorkbench ? (
+          <motion.aside
+            key="secretary-workbench-sidebar"
+            initial={{ width: 0, opacity: 0 }}
+            animate={{ width: 320, opacity: 1 }}
+            exit={{ width: 0, opacity: 0 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="hidden min-h-0 shrink-0 overflow-hidden border-l border-[#e1dccf] bg-[#fffefa] lg:flex xl:w-[348px]"
+          >
+            <SecretaryWorkbenchPanel
+              inline
+              todos={agentTodos}
+              steps={agentSteps}
+              traces={flowTraces}
+              runState={llmRunState}
+              pinned={false}
+              activeView={inlineWorkbenchView}
+              onViewChange={setInlineWorkbenchView}
+              changeStat={latestRunChangeStat}
+              files={<SecretaryFileWorkbench planCall={filePlanCall} applyCall={fileApplyCall} onSelectToolCall={selectWorkAssistantTool} />}
+              browser={<SecretaryBrowserWorkbench />}
+            />
+          </motion.aside>
+        ) : null}
+      </AnimatePresence>
+
+      <AnimatePresence initial={false}>
         {taskCenterDrawerOpen ? (
           <motion.div
             key="secretary-task-center-drawer"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 bg-[#201f1a]/18 p-3 pt-14 xl:hidden"
+            className="fixed inset-0 z-50 bg-[#201f1a]/18 p-3 pt-14"
             onMouseDown={() => setTaskCenterDrawerOpen(false)}
           >
             <motion.div
@@ -693,7 +701,7 @@ export function FlowWorkspace() {
                 onPauseActiveTask={() => pauseSecretaryRun()}
                 onCancelActiveTask={() => cancelSecretaryRun()}
                 onOpenMaterials={() => {
-                  setInlineWorkbenchView('files')
+                  openWorkbench('files')
                   setTaskCenterDrawerOpen(false)
                 }}
                 onClose={() => setTaskCenterDrawerOpen(false)}

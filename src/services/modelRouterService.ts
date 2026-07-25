@@ -12,7 +12,6 @@ import {
   getProviderTierWeight,
   isProviderAllowedForAuto,
 } from './modelGovernanceService'
-import { getScallionRoutingAccess } from './scallionModelCatalog'
 import type { SecretaryTaskComplexity } from './secretaryTaskClassifier'
 
 export type ModelProviderRole =
@@ -51,31 +50,14 @@ export function selectModelForRole(
     }
   }
 
-  if (store.providerConfigs.qwen36.type === 'scallion_proxy') {
-    const configuredModelName = store.providerConfigs.qwen36.modelName.trim()
-    const autoModels = store.scallionModels.filter(
-      (model) => model.available !== false && getScallionRoutingAccess(model, 'auto'),
-    )
-    const autoModel =
-      autoModels.find(
-        (model) => model.id === configuredModelName || model.modelName === configuredModelName,
-      ) ?? autoModels[0]
-    if (autoModel) {
-      const provider = {
-        ...store.providerConfigs.qwen36,
-        modelName: autoModel.modelName || autoModel.id,
-        label: autoModel.label || store.providerConfigs.qwen36.label,
-        serverContextWindowTokens:
-          autoModel.contextWindowTokens ?? store.providerConfigs.qwen36.serverContextWindowTokens,
-      }
-      return {
-        provider,
-        providerId: 'qwen36',
-        mode: 'auto',
-        role,
-        reason: `Auto 路由选择 ${provider.label}`,
-        fallbackUsed: false,
-      }
+  if (store.providerConfigs.qwen36.type === 'scallion_proxy' && canCallProvider(store.providerConfigs.qwen36)) {
+    return {
+      provider: store.providerConfigs.qwen36,
+      providerId: 'qwen36',
+      mode: 'auto',
+      role,
+      reason: 'Auto 由主站按任务、套餐和实时可用性选择模型',
+      fallbackUsed: false,
     }
   }
 
@@ -110,7 +92,7 @@ export function describeModelRouting(decision: ModelRoutingDecision) {
     return `手动模型：${decision.provider.label}`
   }
 
-  return `Auto ${roleLabel(decision.role)}：${decision.provider.label}${decision.fallbackUsed ? '（兜底）' : ''}`
+  return `Auto ${roleLabel(decision.role)}：主站路由 · ${decision.provider.label}${decision.fallbackUsed ? '（兜底）' : ''}`
 }
 
 function scoreProvider(

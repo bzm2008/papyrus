@@ -34,6 +34,12 @@ export type RegisteredApplication = {
   createdAt: number
 }
 export type AuditEntry = { id: string; event: string; detail: string; at: number }
+export type TerminalRunRequest = {
+  program: string
+  args?: string[]
+  rootId: string
+  cwd?: string
+}
 
 let invokeFn: InvokeFn = (command, args) => invoke(command, args)
 
@@ -113,6 +119,9 @@ export const removeRegisteredApplication = (applicationId: string) =>
 
 export const launchRegisteredApplication = (applicationId: string) =>
   invokeTyped<void>('work_assistant_launch_application', { applicationId })
+
+export const runTerminalCommand = (request: TerminalRunRequest) =>
+  invokeTyped<Record<string, unknown>>('work_assistant_terminal_run', request as unknown as Record<string, unknown>)
 
 export const listWorkAssistantAudit = (offset = 0, limit = 50) =>
   invokeTyped<AuditEntry[]>('work_assistant_list_audit', { offset, limit })

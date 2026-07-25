@@ -1414,7 +1414,7 @@ export const useAppStore = create<AppState>()(
       authUserCode: undefined,
       authStatus: 'idle',
       remoteRelayEnabled: false,
-      remoteRelayEndpoint: 'https://scallion.uno/api/papyrus/remote',
+      remoteRelayEndpoint: 'https://api.sca-hub.cn/api/papyrus/remote',
       remoteRelayChannelId: undefined,
       remoteRelayAccessKey: undefined,
       remoteRelayAllowedPlatforms: ['clawbot', 'feishu', 'wecom', 'qq', 'wechat', 'custom'],
@@ -4315,11 +4315,11 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
     upgradeUrl:
       typeof item.upgradeUrl === 'string' && item.upgradeUrl.trim()
         ? item.upgradeUrl.trim()
-        : 'https://scallion.uno/pricing',
+        : 'https://sca-hub.cn/pricing',
     topUpUrl:
       typeof item.topUpUrl === 'string' && item.topUpUrl.trim()
         ? item.topUpUrl.trim()
-        : 'https://scallion.uno/pricing',
+        : 'https://sca-hub.cn/pricing',
     updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
   }
 }

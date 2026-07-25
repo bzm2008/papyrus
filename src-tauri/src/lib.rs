@@ -1,12 +1,14 @@
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     env, fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 use tauri::Manager;
+
+const SCALLION_LLM_API_BASE: &str = "https://api.sca-hub.cn/api/papyrus/llm";
 
 pub mod secretary_ledger;
 mod update_protection;
@@ -87,6 +89,7 @@ pub fn run() {
             work_assistant::work_assistant_register_application_from_picker,
             work_assistant::work_assistant_remove_application,
             work_assistant::work_assistant_launch_application,
+            work_assistant::work_assistant_terminal_run,
             work_assistant::work_assistant_cancel_run,
             work_assistant::work_assistant_preview,
             work_assistant::work_assistant_approve,
@@ -172,6 +175,8 @@ struct LlmChatRequest {
     max_tokens: u32,
     #[serde(default)]
     routing_mode: Option<String>,
+    #[serde(default)]
+    auto_model_hint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -194,14 +199,99 @@ struct LlmError {
 fn chat_endpoint(base_url: &str, provider_type: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');
 
+    if provider_type == "scallion_proxy" {
+        return format!("{}/chat", SCALLION_LLM_API_BASE);
+    }
+
     if trimmed.ends_with("/chat/completions") || trimmed.ends_with("/chat") {
         return trimmed.to_string();
     }
 
-    if provider_type == "scallion_proxy" {
-        format!("{}/chat", trimmed)
-    } else {
-        format!("{}/chat/completions", trimmed)
+    format!("{}/chat/completions", trimmed)
+}
+
+async fn post_json_with_bearer(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    body: &Value,
+    error_prefix: &str,
+) -> Result<(reqwest::StatusCode, String), String> {
+    let mut request_builder = client
+        .post(endpoint)
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+
+    if !api_key.trim().is_empty() {
+        request_builder = request_builder.bearer_auth(api_key.trim());
+    }
+
+    let response = request_builder
+        .body(body.to_string())
+        .send()
+        .await
+        .map_err(|error| format!("{}：{}", error_prefix, error))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|error| format!("读取模型响应失败：{}", error))?;
+
+    Ok((status, text))
+}
+
+fn is_unsupported_routing_mode_response(status: reqwest::StatusCode, text: &str) -> bool {
+    status.as_u16() == 400 && text.to_ascii_lowercase().contains("routing_mode")
+}
+
+fn without_routing_mode(body: &Value) -> Value {
+    let mut fallback = body.clone();
+    if let Some(object) = fallback.as_object_mut() {
+        object.remove("routing_mode");
+    }
+    fallback
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_legacy_routing_mode_validation_error() {
+        assert!(is_unsupported_routing_mode_response(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Validation: Unsupported parameter(s): `routing_mode`"}}"#,
+        ));
+        assert!(!is_unsupported_routing_mode_response(
+            reqwest::StatusCode::FORBIDDEN,
+            "plan_model_forbidden routing_mode",
+        ));
+    }
+
+    #[test]
+    fn strips_routing_mode_without_touching_other_chat_fields() {
+        let body = json!({
+            "model": "agnes-2.0-flash",
+            "routing_mode": "auto",
+            "messages": [{ "role": "user", "content": "你好" }],
+            "stream": false,
+        });
+        let fallback = without_routing_mode(&body);
+
+        assert!(fallback.get("routing_mode").is_none());
+        assert_eq!(fallback.get("model"), body.get("model"));
+        assert_eq!(fallback.get("messages"), body.get("messages"));
+    }
+
+    #[test]
+    fn scallion_chat_endpoint_ignores_stale_local_paths() {
+        assert_eq!(
+            chat_endpoint("https://api.sca-hub.cn/api/papyrus/llm/models", "scallion_proxy"),
+            "https://api.sca-hub.cn/api/papyrus/llm/chat"
+        );
+        assert_eq!(
+            chat_endpoint("https://api.sca-hub.cn/api/papyrus/llm/chat", "scallion_proxy"),
+            "https://api.sca-hub.cn/api/papyrus/llm/chat"
+        );
     }
 }
 
@@ -331,14 +421,6 @@ async fn test_model_connection(
         .build()
         .map_err(|error| format!("创建模型检测客户端失败：{}", error))?;
     let started_at = Instant::now();
-    let mut request_builder = client
-        .post(endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json");
-
-    if !request.api_key.trim().is_empty() {
-        request_builder = request_builder.bearer_auth(request.api_key.trim());
-    }
-
     let mut body = json!({
       "model": model_name,
       "messages": [
@@ -354,16 +436,32 @@ async fn test_model_connection(
             body["routing_mode"] = json!(routing_mode);
         }
     }
-    let response = request_builder
-        .body(body.to_string())
-        .send()
-        .await
-        .map_err(|error| format!("模型联通性检测失败：{}", error))?;
-    let status = response.status();
+    let (mut status, mut response_text) = post_json_with_bearer(
+        &client,
+        &endpoint,
+        &request.api_key,
+        &body,
+        "模型联通性检测失败",
+    )
+    .await?;
+
+    if request.provider_type == "scallion_proxy"
+        && request.routing_mode.is_some()
+        && is_unsupported_routing_mode_response(status, &response_text)
+    {
+        let fallback_body = without_routing_mode(&body);
+        (status, response_text) = post_json_with_bearer(
+            &client,
+            &endpoint,
+            &request.api_key,
+            &fallback_body,
+            "模型联通性检测失败",
+        )
+        .await?;
+    }
 
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let excerpt: String = body.chars().take(180).collect();
+        let excerpt: String = response_text.chars().take(180).collect();
         return Err(format!("模型联通性检测失败：HTTP {} {}", status, excerpt));
     }
 
@@ -381,7 +479,9 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
     let base_url = request.base_url.trim().trim_end_matches('/').to_string();
     let model_name = request.model_name.trim().to_string();
 
-    if base_url.is_empty() || model_name.is_empty() {
+    let auto_routing = request.provider_type == "scallion_proxy"
+        && request.routing_mode.as_deref() == Some("auto");
+    if base_url.is_empty() || (model_name.is_empty() && !auto_routing) {
         return Err("Base URL and Model Name are required".into());
     }
 
@@ -390,36 +490,52 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|error| format!("create LLM client failed: {}", error))?;
-    let mut request_builder = client
-        .post(endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json");
-
-    if !request.api_key.trim().is_empty() {
-        request_builder = request_builder.bearer_auth(request.api_key.trim());
-    }
-
     let mut body = json!({
-      "model": model_name,
       "messages": request.messages,
       "temperature": request.temperature,
       "max_tokens": request.max_tokens,
       "stream": false
     });
+    if !model_name.is_empty() {
+        body["model"] = json!(model_name);
+    }
     if request.provider_type == "scallion_proxy" {
         if let Some(routing_mode) = request.routing_mode.as_deref() {
             body["routing_mode"] = json!(routing_mode);
         }
     }
-    let response = request_builder
-        .body(body.to_string())
-        .send()
-        .await
-        .map_err(|error| format!("LLM network request failed: {}", error))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|error| format!("read LLM response failed: {}", error))?;
+    let (mut status, mut text) = post_json_with_bearer(
+        &client,
+        &endpoint,
+        &request.api_key,
+        &body,
+        "LLM network request failed",
+    )
+    .await?;
+
+    if request.provider_type == "scallion_proxy"
+        && request.routing_mode.is_some()
+        && is_unsupported_routing_mode_response(status, &text)
+    {
+        let mut fallback_body = without_routing_mode(&body);
+        if auto_routing && fallback_body.get("model").is_none() {
+            if let Some(model) = request
+                .auto_model_hint
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                fallback_body["model"] = json!(model.trim());
+            }
+        }
+        (status, text) = post_json_with_bearer(
+            &client,
+            &endpoint,
+            &request.api_key,
+            &fallback_body,
+            "LLM network request failed",
+        )
+        .await?;
+    }
 
     if !status.is_success() {
         let excerpt: String = text.chars().take(240).collect();
@@ -867,6 +983,7 @@ mod security_tests {
                 "work_assistant::work_assistant_register_application_from_picker",
                 "work_assistant::work_assistant_remove_application",
                 "work_assistant::work_assistant_launch_application",
+                "work_assistant::work_assistant_terminal_run",
                 "work_assistant::work_assistant_cancel_run",
                 "work_assistant::work_assistant_preview",
                 "work_assistant::work_assistant_approve",

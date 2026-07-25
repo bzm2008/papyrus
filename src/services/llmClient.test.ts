@@ -5,6 +5,7 @@ import {
   callOpenAICompatibleStream,
   fetchScallionProxyModelCatalog,
   fetchScallionProxyModels,
+  resolveChatEndpoint,
 } from './llmClient'
 import { defaultProviderConfigs } from './modelCatalog'
 import { useAppStore } from '../stores/useAppStore'
@@ -43,6 +44,8 @@ afterEach(async () => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.mocked(invoke).mockReset()
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+  delete (window as Window & { __TAURI__?: unknown }).__TAURI__
   useAppStore.setState({
     scallionToken: undefined,
     scallionModels: [],
@@ -97,6 +100,69 @@ describe('desktop sampling parity', () => {
         presencePenalty: 0.22,
       }),
     })
+  })
+
+  it('uses the native bridge first for desktop Scallion calls', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.mocked(invoke).mockResolvedValue('桌面原生回复')
+
+    await expect(
+      callOpenAICompatible(
+        {
+          ...defaultProviderConfigs.qwen36,
+          baseUrl: 'https://scallion.uno/api/papyrus/llm/models',
+        },
+        [{ role: 'user', content: '你好' }],
+        undefined,
+        { temperature: 0.22, maxTokens: 512 },
+      ),
+    ).resolves.toBe('桌面原生回复')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(invoke).toHaveBeenCalledWith('llm_chat', {
+      request: expect.objectContaining({
+        providerType: 'scallion_proxy',
+        baseUrl: 'https://api.sca-hub.cn/api/papyrus/llm',
+        routingMode: 'auto',
+        temperature: 0.22,
+        maxTokens: 512,
+      }),
+    })
+  })
+
+  it('uses the native bridge for desktop Scallion streaming when WebView fetch is not the trusted transport', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    const fetchMock = vi.fn()
+    const onToken = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.mocked(invoke).mockResolvedValue('原生流式降级回复')
+
+    await expect(
+      callOpenAICompatibleStream(defaultProviderConfigs.qwen36, [{ role: 'user', content: '你好' }], {
+        onToken,
+      }),
+    ).resolves.toBe('原生流式降级回复')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(onToken).toHaveBeenCalledWith('原生流式降级回复')
+  })
+
+  it('canonicalizes built-in Scallion chat endpoints when persisted URLs are stale', () => {
+    expect(resolveChatEndpoint('https://scallion.uno/api/papyrus/llm/models', 'scallion_proxy')).toBe(
+      'https://api.sca-hub.cn/api/papyrus/llm/chat',
+    )
+    expect(resolveChatEndpoint('https://sca-hub.cn/api/papyrus/llm/chat', 'scallion_proxy')).toBe(
+      'https://api.sca-hub.cn/api/papyrus/llm/chat',
+    )
+    expect(resolveChatEndpoint('', 'scallion_proxy')).toBe(
+      'https://api.sca-hub.cn/api/papyrus/llm/chat',
+    )
   })
 
   it('keeps sampling options when an empty streaming body falls back to a regular request', async () => {
@@ -278,10 +344,13 @@ describe('Scallion production contract', () => {
       ),
     )
 
-    const models = await fetchScallionProxyModels(defaultProviderConfigs.qwen36)
+    const models = await fetchScallionProxyModels({
+      ...defaultProviderConfigs.qwen36,
+      baseUrl: 'https://scallion.uno/api/papyrus/llm/models',
+    })
 
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(
-      'https://scallion.uno/api/papyrus/llm/models',
+      'https://api.sca-hub.cn/api/papyrus/llm/models',
     )
     expect(models).toEqual([
       expect.objectContaining({
@@ -316,7 +385,9 @@ describe('Scallion production contract', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toHaveProperty('routing_mode', 'auto')
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).not.toHaveProperty('routing_mode')
+    const legacyBody = JSON.parse(fetchMock.mock.calls[1][1].body)
+    expect(legacyBody).not.toHaveProperty('routing_mode')
+    expect(legacyBody).toHaveProperty('model', 'agnes-2.0-flash')
   })
 
   it('keeps server-declared plan restrictions so the UI can show unavailable models', async () => {
@@ -448,10 +519,9 @@ describe('Scallion production contract', () => {
     ).resolves.toBe('完成')
 
     const requestInit = (fetchMock.mock.calls as unknown as Array<[RequestInfo, RequestInit]>)[0]?.[1]
-    expect(JSON.parse(String(requestInit?.body))).toMatchObject({
-      model: 'agnes-2.0-flash',
-      routing_mode: 'auto',
-    })
+    const requestBody = JSON.parse(String(requestInit?.body))
+    expect(requestBody).not.toHaveProperty('model')
+    expect(requestBody).toHaveProperty('routing_mode', 'auto')
   })
 
   it('classifies auto quota exhaustion regardless of HTTP status', async () => {
@@ -485,6 +555,23 @@ describe('Scallion production contract', () => {
       code: 'network_error',
       recoverable: true,
     })
+  })
+
+  it('uses the canonical Scallion model catalog even if local base URL is blank', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash' }],
+        plan: { key: 'free', name: 'Free' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchScallionProxyModels({ ...defaultProviderConfigs.qwen36, baseUrl: '' })).resolves.toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.sca-hub.cn/api/papyrus/llm/models',
+      expect.objectContaining({ method: 'GET' }),
+    )
   })
 
   it('preserves the top-level plan metadata alongside the full model directory', async () => {
@@ -623,7 +710,7 @@ describe('Scallion production contract', () => {
 
     expect(result).toBe('已切换到套餐内模型')
     expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(JSON.parse(fetchMock.mock.calls[3][1].body).model).toBe('agnes-2.0-flash')
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).not.toHaveProperty('model')
     expect(useAppStore.getState().providerConfigs.qwen36.modelName).toBe('agnes-2.0-flash')
     expect(useAppStore.getState().scallionModels[0]?.id).toBe('agnes-2.0-flash')
   })

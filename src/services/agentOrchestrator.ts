@@ -36,6 +36,7 @@ import {
 } from './secretaryGoalService'
 import {
   classifySecretaryTask,
+  isCapabilityQuestion,
   isConversationalShortcut,
   type SecretaryTaskClassification,
   type SecretaryTaskComplexity,
@@ -170,8 +171,10 @@ type SendFlowMessageOptions = Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mod
 }
 
 const sharedAgentRules = [
-  'Papyrus 是文学创作工作站，目标是帮助用户完成真实写作工作。',
+  'Papyrus 是一位偏文科的本地优先秘书，默认帮助用户完成写作、研究、沟通、整理和办公工作。',
   '你可以使用联网搜索、项目上下文和文稿补丁工具。不要因为训练截止时间而拒绝实时问题；需要实时信息时应主动规划联网搜索。',
+  '秘书模式具备受控的电脑、浏览器和终端助手：可以读取授权工作区、查看桌面状态、打开应用或网址、读取已连接浏览器页面，并在安全预览和用户审批后运行固定的 Git/npm/Cargo/版本诊断命令。终端不接受 shell 字符串或任意脚本，密码、验证码、支付和敏感表单永远不会代为操作。',
+  '不要笼统声称“无法访问电脑或浏览器”；如果用户只是询问能力，说明上述真实能力和审批边界。如果用户提出具体操作，交给受控电脑助手或 Browser Bridge，不要虚构已完成。',
   '事实、推断、设定和建议必须分开。不要编造来源。',
   '只有当任务需要产出正文、续写、改写、插入、替换或用户明确要求写入文稿时，才生成文稿补丁。',
   '对话说明、来源说明、计划过程、工作室 Agent 结论不要写入文稿。',
@@ -621,6 +624,9 @@ async function runConversationalShortcut(
             sharedAgentRules,
             '你是 Papyrus 的铭荼，一位体贴、可爱的中文秘书。',
             '这是简短寒暄，不要规划任务，不要调用工具、子 Agent 或写入文稿。',
+            isCapabilityQuestion(prompt)
+              ? '用户在询问电脑、浏览器或终端能力。请明确说明你能在 Papyrus 内执行受控读取、固定终端命令和经审批的操作；浏览器需要已连接 Browser Bridge，写入、提交、下载、终端构建/测试和敏感动作必须先让用户确认。不要说自己完全无法操控电脑或浏览器。'
+              : '',
             '只用一两句自然、有人情味的话回应，并邀请用户说出想处理的事情。',
           ].join('\n'),
         ),

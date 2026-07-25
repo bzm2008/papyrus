@@ -1,6 +1,6 @@
 # Papyrus on Debian 13
 
-This directory contains the system integration files for Papyrus 1.0.0 on
+This directory contains the system integration files for Papyrus 1.1.0 on
 Debian 13 and compatible Debian-based distributions. Windows and macOS use
 their native Tauri installers; this integration is intentionally Linux-only.
 
@@ -11,13 +11,13 @@ of the following commands:
 
 ```sh
 chmod +x install-papyrus.sh
-./install-papyrus.sh Papyrus_1.0.0_amd64.deb
+./install-papyrus.sh Papyrus_1.1.0_amd64.deb
 ```
 
 or:
 
 ```sh
-./install-papyrus.sh Papyrus_1.0.0_amd64.AppImage
+./install-papyrus.sh Papyrus_1.1.0_amd64.AppImage
 ```
 
 The script asks for `sudo` when needed. It installs the application under
@@ -39,7 +39,7 @@ uses `/opt/papyrus` and `/usr/bin/papyrus` after the image boots.
 
 ```sh
 sudo env PAPYRUS_ROOTFS=/work/rootfs \
-  ./install-papyrus.sh /work/assets/Papyrus_1.0.0_amd64.deb
+  ./install-papyrus.sh /work/assets/Papyrus_1.1.0_amd64.deb
 ```
 
 Use `PAPYRUS_INSTALL_ROOT`, `PAPYRUS_BIN_LINK`, `PAPYRUS_DESKTOP_DIR` or
@@ -86,4 +86,4 @@ only when a complete data reset is intended.
 * Debian 13 (amd64) or a compatible Debian-based system.
 * `dpkg-deb` for `.deb` assets, or FUSE/AppImage support for AppImage assets.
 * A graphical session for the desktop entry.
-* `sha256sum` to verify the pinned assets listed in `SHA256SUMS`.
+* `sha256sum` to verify the release-generated assets listed in `SHA256SUMS`.

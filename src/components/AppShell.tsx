@@ -119,7 +119,7 @@ function MainWorkbench() {
   }, [])
 
   const isFlowMode = mode === 'flow'
-  const showLeft = columnMode === 3
+  const showLeft = columnMode === 3 && !isFlowMode
   const showRight = !isFlowMode && columnMode >= 2
 
   return (

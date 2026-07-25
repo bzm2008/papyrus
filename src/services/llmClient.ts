@@ -7,7 +7,10 @@ import {
 } from '../stores/useAppStore'
 import { getScallionExternalApiAccess } from './scallionModelCatalog'
 
+const SCALLION_LLM_API_BASE = 'https://api.sca-hub.cn/api/papyrus/llm'
 const SCALLION_MODELS_TIMEOUT_MS = 15_000
+const SCALLION_RETIRED_AUTO_MODELS = new Set(['qwen/qwen3.5-122b-a10b'])
+const SCALLION_MODEL_UNAVAILABLE_TYPES = new Set(['papyrus_model_err', 'papyrus_model_error', 'model_unavailable'])
 
 export type ChatMessage = {
   role: 'system' | 'user' | 'assistant'
@@ -147,6 +150,7 @@ export type LlmErrorCode =
   | 'quota_exhausted'
   | 'auto_quota_exhausted'
   | 'plan_model_forbidden'
+  | 'model_unavailable'
   | 'forbidden'
   | 'rate_limited'
   | 'server_error'
@@ -195,6 +199,7 @@ type NativeLlmPayload = {
     frequencyPenalty?: number
     presencePenalty?: number
     routingMode?: ModelRoutingMode
+    autoModelHint?: string
   }
 }
 
@@ -219,12 +224,42 @@ async function callOpenAICompatibleOnce(
 ) {
   assertExternalApiAllowed(provider)
   const modelName = resolveProviderModelName(provider, sampling?.routingMode)
+  const routingMode = provider.type === 'scallion_proxy' ? resolveScallionRoutingMode(sampling?.routingMode) : undefined
 
-  if (!modelName) {
+  if (!modelName && !(provider.type === 'scallion_proxy' && routingMode === 'auto')) {
     throw new Error('Model Name 不能为空')
   }
 
   assertScallionModelListed(provider, modelName, sampling?.routingMode)
+
+  if (shouldUseNativeScallionTransport(provider)) {
+    try {
+      return await callScallionViaNative(provider, messages, {
+        temperature: sampling?.temperature ?? 0.45,
+        maxTokens: sampling?.maxTokens ?? 8192,
+        frequencyPenalty: sampling?.frequencyPenalty,
+        presencePenalty: sampling?.presencePenalty,
+        routingMode: sampling?.routingMode,
+      })
+    } catch (error) {
+      if (allowModelRecovery && error instanceof LlmRequestError && isRecoverableScallionModelError(error)) {
+        const requestedRoutingMode = resolveScallionRoutingMode(sampling?.routingMode)
+        const recoveredProvider = await recoverScallionModel(provider, requestedRoutingMode)
+
+        if (recoveredProvider) {
+          return callOpenAICompatibleOnce(
+            recoveredProvider,
+            messages,
+            signal,
+            sampling ? { ...sampling, routingMode: requestedRoutingMode } : { routingMode: requestedRoutingMode },
+            false,
+          )
+        }
+      }
+
+      throw error
+    }
+  }
 
   const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
@@ -237,14 +272,18 @@ async function callOpenAICompatibleOnce(
   }
 
   const requestBody = {
-    model: modelName,
+    ...(modelName
+      ? { model: modelName }
+      : omitScallionRoutingMode && provider.type === 'scallion_proxy'
+        ? { model: resolveLegacyScallionModelName(provider) }
+        : {}),
     messages,
     temperature: sampling?.temperature ?? 0.45,
     max_tokens: sampling?.maxTokens ?? 8192,
     frequency_penalty: sampling?.frequencyPenalty,
     presence_penalty: sampling?.presencePenalty,
     ...(provider.type === 'scallion_proxy' && !omitScallionRoutingMode
-      ? { routing_mode: resolveScallionRoutingMode(sampling?.routingMode) }
+      ? { routing_mode: routingMode }
       : {}),
     stream: false,
   }
@@ -309,7 +348,7 @@ async function callOpenAICompatibleOnce(
       }
     }
 
-    if (allowModelRecovery && provider.type === 'scallion_proxy' && error.code === 'plan_model_forbidden') {
+    if (allowModelRecovery && provider.type === 'scallion_proxy' && isRecoverableScallionModelError(error)) {
       const requestedRoutingMode = resolveScallionRoutingMode(sampling?.routingMode)
       const recoveredProvider = await recoverScallionModel(provider, requestedRoutingMode)
 
@@ -386,12 +425,44 @@ async function callOpenAICompatibleStreamOnce(
 ) {
   assertExternalApiAllowed(provider)
   const modelName = resolveProviderModelName(provider, sampling?.routingMode)
+  const routingMode = provider.type === 'scallion_proxy' ? resolveScallionRoutingMode(sampling?.routingMode) : undefined
 
-  if (!modelName) {
+  if (!modelName && !(provider.type === 'scallion_proxy' && routingMode === 'auto')) {
     throw new Error('Model Name 不能为空')
   }
 
   assertScallionModelListed(provider, modelName, sampling?.routingMode)
+
+  if (shouldUseNativeScallionTransport(provider)) {
+    try {
+      const fallback = await callScallionViaNative(provider, messages, {
+        temperature: sampling?.temperature ?? 0.45,
+        maxTokens: sampling?.maxTokens ?? 8192,
+        frequencyPenalty: sampling?.frequencyPenalty,
+        presencePenalty: sampling?.presencePenalty,
+        routingMode: sampling?.routingMode,
+      })
+      onToken(fallback)
+      return fallback
+    } catch (error) {
+      if (allowModelRecovery && error instanceof LlmRequestError && isRecoverableScallionModelError(error)) {
+        const requestedRoutingMode = resolveScallionRoutingMode(sampling?.routingMode)
+        const recoveredProvider = await recoverScallionModel(provider, requestedRoutingMode)
+
+        if (recoveredProvider) {
+          return callOpenAICompatibleStreamOnce(
+            recoveredProvider,
+            messages,
+            { signal, onToken, sampling: sampling ? { ...sampling, routingMode: requestedRoutingMode } : { routingMode: requestedRoutingMode } },
+            false,
+            emptyStreamFallback,
+          )
+        }
+      }
+
+      throw error
+    }
+  }
 
   const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
@@ -411,14 +482,18 @@ async function callOpenAICompatibleStreamOnce(
       headers,
       signal,
       body: JSON.stringify({
-        model: modelName,
+        ...(modelName
+          ? { model: modelName }
+          : omitScallionRoutingMode && provider.type === 'scallion_proxy'
+            ? { model: resolveLegacyScallionModelName(provider) }
+            : {}),
         messages,
         temperature: sampling?.temperature ?? 0.45,
         max_tokens: sampling?.maxTokens ?? 8192,
         frequency_penalty: sampling?.frequencyPenalty,
         presence_penalty: sampling?.presencePenalty,
         ...(provider.type === 'scallion_proxy' && !omitScallionRoutingMode
-          ? { routing_mode: resolveScallionRoutingMode(sampling?.routingMode) }
+          ? { routing_mode: routingMode }
           : {}),
         stream: true,
       }),
@@ -475,7 +550,7 @@ async function callOpenAICompatibleStreamOnce(
       }
     }
 
-    if (allowModelRecovery && provider.type === 'scallion_proxy' && error.code === 'plan_model_forbidden') {
+    if (allowModelRecovery && provider.type === 'scallion_proxy' && isRecoverableScallionModelError(error)) {
       const requestedRoutingMode = resolveScallionRoutingMode(sampling?.routingMode)
       const recoveredProvider = await recoverScallionModel(provider, requestedRoutingMode)
 
@@ -599,7 +674,7 @@ export async function fetchScallionProxyModelCatalog(
   provider: LlmProviderConfig,
   options: { includeUnavailable?: boolean } = {},
 ): Promise<ScallionModelCatalog> {
-  if (provider.type !== 'scallion_proxy' || !provider.baseUrl.trim()) {
+  if (provider.type !== 'scallion_proxy') {
     return { models: [] }
   }
 
@@ -611,7 +686,7 @@ export async function fetchScallionProxyModelCatalog(
   // add the legacy include_unavailable switch: older gateways used it to
   // expose provider-side models outside the Papyrus catalogue.
   void options
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models`
+  const endpoint = `${resolveScallionLlmApiBase(provider.baseUrl)}/models`
   const headers: Record<string, string> = {}
   const apiKey = resolveProviderApiKey(provider)
 
@@ -753,6 +828,11 @@ export function canCallProvider(provider: LlmProviderConfig) {
 
   if (provider.type === 'scallion_proxy') {
     const stateModels = useAppStore.getState().scallionModels
+    if (routingMode === 'auto') {
+      // Auto is selected by the gateway. Do not require a cached local model
+      // or pin the request to Agnes when the catalogue is stale or incomplete.
+      return Boolean(provider.baseUrl.trim() && resolveProviderApiKey(provider))
+    }
     const listedModelIsUsable = stateModels.some(
       (model) =>
         (model.id === modelName || model.modelName === modelName) &&
@@ -823,20 +903,30 @@ function resolveProviderModelName(provider: LlmProviderConfig, routingMode?: Mod
 
   const mode = resolveScallionRoutingMode(routingMode)
   const listed = useAppStore.getState().scallionModels
-  const configuredModel = listed.find((model) => model.id === configured || model.modelName === configured)
-  if (configuredModel && isScallionModelCallableWithPlan(configuredModel, mode)) {
-    return configuredModel.id || configuredModel.modelName
+  if (mode === 'auto') {
+    // The gateway owns Auto pool selection. Sending no model lets the server
+    // apply the current plan and routing policy instead of a stale local id.
+    return ''
   }
 
-  if (mode === 'auto') {
-    const fallback = listed.find(
-      (model) =>
-        isScallionModelCallableWithPlan(model, mode),
-    )
-    return fallback?.id || fallback?.modelName || configured
+  const configuredModel = listed.find((model) => model.id === configured || model.modelName === configured)
+  if (configuredModel && isScallionModelCallableWithPlan(configuredModel, mode)) {
+    return getScallionModelRequestName(configuredModel)
   }
 
   return configured
+}
+
+function resolveLegacyScallionModelName(provider: LlmProviderConfig) {
+  const configured = provider.modelName.trim()
+  const listed = useAppStore.getState().scallionModels
+  const configuredModel = listed.find((model) => model.id === configured || model.modelName === configured)
+  if (configuredModel && isScallionModelCallableWithPlan(configuredModel, 'auto')) {
+    return getScallionModelRequestName(configuredModel) || configured
+  }
+
+  const autoModel = listed.find((model) => isScallionModelCallableWithPlan(model, 'auto'))
+  return getScallionModelRequestName(autoModel) || configured
 }
 
 function assertScallionModelListed(
@@ -849,6 +939,9 @@ function assertScallionModelListed(
   }
 
   const routingMode = resolveScallionRoutingMode(explicitRoutingMode)
+  if (routingMode === 'auto') {
+    return
+  }
   const listed = useAppStore.getState().scallionModels.some(
     (model) =>
       (model.id === modelName || model.modelName === modelName) &&
@@ -893,7 +986,9 @@ async function callViaTauri(
   const modelName = resolveProviderModelName(provider, routingMode)
   const payload: NativeLlmPayload = {
     request: {
-      baseUrl: provider.baseUrl,
+      baseUrl: provider.type === 'scallion_proxy'
+        ? resolveScallionLlmApiBase(provider.baseUrl)
+        : provider.baseUrl,
       modelName,
       apiKey: resolveProviderApiKey(provider),
       providerType: provider.type,
@@ -903,6 +998,7 @@ async function callViaTauri(
       frequencyPenalty: options.frequencyPenalty,
       presencePenalty: options.presencePenalty,
       routingMode,
+      autoModelHint: routingMode === 'auto' ? resolveLegacyScallionModelName(provider) : undefined,
     },
   }
 
@@ -913,7 +1009,123 @@ async function callViaTauri(
   }
 }
 
+async function callScallionViaNative(
+  provider: LlmProviderConfig,
+  messages: ChatMessage[],
+  options: {
+    temperature: number
+    maxTokens: number
+    frequencyPenalty?: number
+    presencePenalty?: number
+    routingMode?: ModelRoutingMode
+  },
+) {
+  try {
+    const response = await callViaTauri(provider, messages, options)
+    scheduleScallionQuotaRefresh(provider)
+    return response
+  } catch (error) {
+    const nativeError = classifyNativeScallionError(error)
+    if (nativeError.code === 'unauthorized') {
+      useAppStore.getState().expireScallionSession()
+    } else if (nativeError.code === 'quota_exhausted' || nativeError.code === 'auto_quota_exhausted') {
+      scheduleScallionQuotaRefresh(provider)
+    }
+    throw nativeError
+  }
+}
+
+function shouldUseNativeScallionTransport(provider: LlmProviderConfig) {
+  return provider.type === 'scallion_proxy' && isTauriRuntimeAvailable()
+}
+
+function isTauriRuntimeAvailable() {
+  const globalWindow = typeof window === 'undefined'
+    ? undefined
+    : window as Window & {
+        __TAURI_INTERNALS__?: unknown
+        __TAURI__?: unknown
+      }
+  return Boolean(
+    globalWindow?.__TAURI_INTERNALS__ ||
+    globalWindow?.__TAURI__ ||
+    (typeof navigator !== 'undefined' && /\bTauri\b/i.test(navigator.userAgent)),
+  )
+}
+
+function classifyNativeScallionError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || 'Scallion 调用失败')
+  const httpStatus = Number(message.match(/HTTP\s+(\d{3})/i)?.[1])
+  const lowered = message.toLowerCase()
+
+  if (httpStatus === 401) {
+    return new LlmRequestError('Scallion 登录已过期，请重新登录。', {
+      code: 'unauthorized',
+      status: 401,
+      recoverable: true,
+    })
+  }
+  if (httpStatus === 402) {
+    return new LlmRequestError('Scallion 积分不足，请充值或进入主站查看套餐。', {
+      code: 'quota_exhausted',
+      status: 402,
+      recoverable: true,
+    })
+  }
+  if (lowered.includes('auto_quota_exhausted')) {
+    return new LlmRequestError('Auto 调用次数已用尽，请等待额度刷新或切换可用模型。', {
+      code: 'auto_quota_exhausted',
+      status: Number.isFinite(httpStatus) ? httpStatus : undefined,
+      recoverable: true,
+    })
+  }
+  if (lowered.includes('plan_model_forbidden')) {
+    return new LlmRequestError('当前套餐不可调用该模型，请刷新模型目录后重试。', {
+      code: 'plan_model_forbidden',
+      status: Number.isFinite(httpStatus) ? httpStatus : 403,
+      recoverable: true,
+    })
+  }
+  if (isModelUnavailableSignal(Number.isFinite(httpStatus) ? httpStatus : undefined, undefined, message)) {
+    return new LlmRequestError('当前模型已下线，请刷新模型目录后重试。', {
+      code: 'model_unavailable',
+      status: Number.isFinite(httpStatus) ? httpStatus : 410,
+      recoverable: true,
+    })
+  }
+  if (httpStatus === 403) {
+    return new LlmRequestError('当前套餐或账户权限无法调用该模型。', {
+      code: 'forbidden',
+      status: 403,
+      recoverable: true,
+    })
+  }
+  if (httpStatus === 429) {
+    return new LlmRequestError('Scallion 调用过于频繁，请稍后重试。', {
+      code: 'rate_limited',
+      status: 429,
+      recoverable: true,
+    })
+  }
+  if (Number.isFinite(httpStatus) && httpStatus >= 500) {
+    return new LlmRequestError('Scallion 服务暂不可用，请稍后重试。', {
+      code: 'server_error',
+      status: httpStatus,
+      recoverable: true,
+    })
+  }
+
+  return new LlmRequestError(message, {
+    code: 'network_error',
+    recoverable: true,
+  })
+}
+
 export function resolveChatEndpoint(baseUrl: string, providerType: ProviderType) {
+  if (providerType === 'scallion_proxy') {
+    return `${resolveScallionLlmApiBase(baseUrl)}/chat`
+  }
+
   const trimmed = baseUrl.trim().replace(/\/+$/, '')
 
   if (!trimmed) {
@@ -924,7 +1136,12 @@ export function resolveChatEndpoint(baseUrl: string, providerType: ProviderType)
     return trimmed
   }
 
-  return providerType === 'scallion_proxy' ? `${trimmed}/chat` : `${trimmed}/chat/completions`
+  return `${trimmed}/chat/completions`
+}
+
+export function resolveScallionLlmApiBase(baseUrl?: string) {
+  void baseUrl
+  return SCALLION_LLM_API_BASE
 }
 
 export function isLocalCompatibleEndpoint(baseUrl: string) {
@@ -960,6 +1177,7 @@ function createHttpError(status: number, payload: ChatCompletionResponse) {
   else if (type === 'auto_quota_exhausted') code = 'auto_quota_exhausted'
   else if (status === 402) code = 'quota_exhausted'
   else if (type === 'plan_model_forbidden') code = 'plan_model_forbidden'
+  else if (isModelUnavailableSignal(status, type, message)) code = 'model_unavailable'
   else if (status === 403) code = 'forbidden'
   else if (status === 429) code = 'rate_limited'
   else if (status >= 500) code = 'server_error'
@@ -971,6 +1189,7 @@ function createHttpError(status: number, payload: ChatCompletionResponse) {
     autoQuota: payloadError?.auto_quota,
     recoverable:
       code === 'plan_model_forbidden' ||
+      code === 'model_unavailable' ||
       code === 'auto_quota_exhausted' ||
       code === 'server_error' ||
       code === 'rate_limited',
@@ -979,6 +1198,10 @@ function createHttpError(status: number, payload: ChatCompletionResponse) {
 
 function isUnsupportedRoutingModeError(error: LlmRequestError) {
   return error.status === 400 && /routing[_ -]?mode/i.test(error.message)
+}
+
+function isRecoverableScallionModelError(error: LlmRequestError) {
+  return error.code === 'plan_model_forbidden' || error.code === 'model_unavailable'
 }
 
 async function recoverScallionModel(provider: LlmProviderConfig, requestedRoutingMode?: ModelRoutingMode) {
@@ -999,18 +1222,22 @@ async function recoverScallionModel(provider: LlmProviderConfig, requestedRoutin
     await refreshScallionQuota().catch(() => undefined)
     const state = useAppStore.getState()
     const routingMode = requestedRoutingMode ?? resolveScallionRoutingMode()
-    const next = refreshedModels.find(
-      (model) =>
-        model.id &&
-        isScallionModelSelectableForMode(model, routingMode),
+    if (routingMode === 'auto') {
+      // Keep recovery gateway-routed; selecting a replacement id locally would
+      // reintroduce the stale-model pinning that caused the original failure.
+      return { ...provider, modelName: provider.modelName }
+    }
+    const next = selectPreferredScallionModel(refreshedModels, (model) =>
+      Boolean(getScallionModelRequestName(model)) && isScallionModelSelectableForMode(model, routingMode),
     )
+    const nextModelName = getScallionModelRequestName(next)
 
-    if (!next) {
+    if (!next || !nextModelName) {
       return undefined
     }
 
     state.updateProviderModelMetadata('qwen36', {
-      modelName: next.id,
+      modelName: nextModelName,
       label: next.label || provider.label,
       contextWindowTokens: next.contextWindowTokens,
     })
@@ -1018,7 +1245,7 @@ async function recoverScallionModel(provider: LlmProviderConfig, requestedRoutin
     return {
       ...state.providerConfigs.qwen36,
       ...provider,
-      modelName: next.id,
+      modelName: nextModelName,
       label: next.label || provider.label,
       serverContextWindowTokens: next.contextWindowTokens ?? provider.serverContextWindowTokens,
     }
@@ -1165,6 +1392,46 @@ function isScallionModelSelectableForMode(
   const hasExplicitModeAccess =
     model.manualAvailable !== undefined || model.autoAvailable !== undefined || model.autoOnly === true
   return (hasExplicitModeAccess || model.planAvailable !== false) && isScallionModelCallable(model, routingMode)
+}
+
+function selectPreferredScallionModel<T extends { id?: string; modelName?: string }>(
+  models: readonly T[],
+  isSelectable: (model: T) => boolean,
+) {
+  const selectable = models.filter(isSelectable)
+  return (
+    selectable.find((model) => !isRetiredScallionAutoModel(model)) ??
+    selectable[0]
+  )
+}
+
+function getScallionModelRequestName(model?: { id?: string; modelName?: string }) {
+  return model?.id || model?.modelName || ''
+}
+
+function isRetiredScallionAutoModel(model: { id?: string; modelName?: string }) {
+  return (
+    SCALLION_RETIRED_AUTO_MODELS.has(normalizeScallionModelName(model.id)) ||
+    SCALLION_RETIRED_AUTO_MODELS.has(normalizeScallionModelName(model.modelName))
+  )
+}
+
+function normalizeScallionModelName(value?: string) {
+  return value?.trim().toLowerCase() ?? ''
+}
+
+function isModelUnavailableSignal(status: number | undefined, type: unknown, message: string) {
+  const normalizedType = String(type || '').trim().toLowerCase()
+  const lowered = message.toLowerCase()
+  return (
+    status === 410 ||
+    SCALLION_MODEL_UNAVAILABLE_TYPES.has(normalizedType) ||
+    lowered.includes('papyrus_model_err') ||
+    lowered.includes('papyrus_model_error') ||
+    lowered.includes('model_unavailable') ||
+    lowered.includes('end of life') ||
+    lowered.includes('no longer available')
+  )
 }
 
 function mergeScallionModel(

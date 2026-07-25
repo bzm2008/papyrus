@@ -14,7 +14,7 @@ afterEach(() => {
 })
 
 describe('model routing preferences', () => {
-  it('keeps the user-selected Auto model instead of always taking the first pool entry', () => {
+  it('leaves Auto model selection to the gateway instead of pinning a local model', () => {
     useAppStore.setState({
       modelRoutingMode: 'auto',
       scallionToken: 'jwt-token',
@@ -25,13 +25,33 @@ describe('model routing preferences', () => {
       scallionModels: [
         { id: 'first-auto', modelName: 'first-auto', label: 'First', available: true, autoAvailable: true, updatedAt: Date.now() },
         { id: 'preferred-auto', modelName: 'preferred-auto', label: 'Preferred', available: true, autoAvailable: true, updatedAt: Date.now() },
+        { id: 'agnes-2.0-flash', modelName: 'agnes-2.0-flash', label: 'Agnes', available: true, autoAvailable: true, updatedAt: Date.now() },
       ],
     })
 
-    expect(selectModelForRole('agent', { complexity: 'simple' }).provider.modelName).toBe('preferred-auto')
+    const decision = selectModelForRole('agent', { complexity: 'simple' })
+    expect(decision.provider.modelName).toBe('preferred-auto')
+    expect(decision.reason).toContain('主站')
   })
 
-  it('skips cached Auto models that the live plan marks unavailable', () => {
+  it('does not replace the persisted model when Auto is selected', () => {
+    useAppStore.setState({
+      modelRoutingMode: 'auto',
+      scallionToken: 'jwt-token',
+      providerConfigs: {
+        ...defaultProviderConfigs,
+        qwen36: { ...defaultProviderConfigs.qwen36, modelName: 'qwen/qwen3.5-122b-a10b' },
+      },
+      scallionModels: [
+        { id: 'qwen/qwen3.5-122b-a10b', modelName: 'qwen/qwen3.5-122b-a10b', label: 'Retired', available: true, autoAvailable: true, updatedAt: Date.now() },
+        { id: 'allowed-auto', modelName: 'allowed-auto', label: 'Allowed', available: true, autoAvailable: true, updatedAt: Date.now() },
+      ],
+    })
+
+    expect(selectModelForRole('agent', { complexity: 'simple' }).provider.modelName).toBe('qwen/qwen3.5-122b-a10b')
+  })
+
+  it('keeps Auto available when the local catalogue is stale', () => {
     useAppStore.setState({
       modelRoutingMode: 'auto',
       scallionToken: 'jwt-token',
@@ -45,6 +65,8 @@ describe('model routing preferences', () => {
       ],
     })
 
-    expect(selectModelForRole('agent', { complexity: 'simple' }).provider.modelName).toBe('allowed-auto')
+    const decision = selectModelForRole('agent', { complexity: 'simple' })
+    expect(decision.provider.modelName).toBe('restricted-auto')
+    expect(decision.reason).toContain('主站')
   })
 })

@@ -39,7 +39,7 @@ describe('Scallion desktop authorization', () => {
         json: async () => ({
           device_code: 'device-1',
           user_code: 'ABCD23',
-          verification_url: 'https://scallion.uno/papyrus/authorize?device=device-1',
+          verification_url: 'https://sca-hub.cn/papyrus/authorize?device=device-1',
           interval: 1,
         }),
       })
@@ -75,7 +75,7 @@ describe('Scallion desktop authorization', () => {
         json: async () => ({
           deviceCode: 'device-2',
           userCode: 'EFGH45',
-          verificationUrl: 'https://scallion.uno/papyrus/authorize?device=device-2',
+          verificationUrl: 'https://sca-hub.cn/papyrus/authorize?device=device-2',
           interval: 1,
         }),
       })

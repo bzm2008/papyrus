@@ -99,6 +99,26 @@ const batchSchema = (): AssistantSchemaNode => ({
   required: ['rootId', 'conflictPolicy', 'operations'],
 })
 
+const terminalSchema = (): AssistantSchemaNode => ({
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    program: {
+      type: 'string',
+      enum: ['git', 'npm', 'pnpm', 'yarn', 'cargo', 'rustc', 'python', 'node', 'dotnet', 'go', 'system_info', 'whoami'],
+    },
+    args: {
+      type: 'array',
+      minItems: 0,
+      maxItems: 12,
+      items: { type: 'string', minLength: 1, maxLength: 160 },
+    },
+    rootId: { type: 'string', minLength: 1 },
+    cwd: { type: 'string', maxLength: 400 },
+  },
+  required: ['program', 'rootId'],
+})
+
 export const WORK_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'workspace_list', toolset: 'workspace', executor: 'native', description: 'List available workspace roots.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: emptyObjectSchema() },
   { name: 'workspace_scan', toolset: 'workspace', executor: 'native', description: 'Scan a workspace root for files and folders.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: workspaceRootSchema() },
@@ -112,6 +132,7 @@ export const WORK_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'desktop_open_url', toolset: 'desktop', executor: 'native', description: 'Open a URL using the system default browser.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: { type: 'object', additionalProperties: false, properties: { url: { type: 'string', minLength: 1 } }, required: ['url'] } },
   { name: 'desktop_open_app', toolset: 'desktop', executor: 'native', description: 'Launch an installed desktop application.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: { type: 'object', additionalProperties: false, properties: { appId: { type: 'string', minLength: 1 } }, required: ['appId'] } },
   { name: 'desktop_reveal_file', toolset: 'desktop', executor: 'native', description: 'Reveal a workspace file in the system file manager.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: fileSchema() },
+  { name: 'terminal_run', toolset: 'desktop', executor: 'native', description: 'Run one allowlisted terminal program with structured arguments inside an authorized workspace. No shell parsing or arbitrary scripts.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: terminalSchema() },
 ]
 
 const browserElementSchema = () => ({

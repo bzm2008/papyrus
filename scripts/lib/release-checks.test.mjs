@@ -13,8 +13,10 @@ async function fixture() {
   await fs.mkdir(path.join(rootDir, 'dist-browser-bridge'), { recursive: true })
   await fs.mkdir(path.join(rootDir, 'docs', 'testing'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), JSON.stringify({
+    version: '0.1.2',
     app: { security: { csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob: https:; font-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" } },
   }))
+  await fs.writeFile(path.join(rootDir, 'src-tauri', 'Cargo.toml'), '[package]\nname = "papyrus"\nversion = "0.1.2"\n')
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'src', 'lib.rs'), REQUIRED_COMMANDS.map((command) => `work_assistant::${command},`).join('\n'))
   await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'manifest.json'), JSON.stringify({
     manifest_version: 3,
@@ -22,6 +24,10 @@ async function fixture() {
     permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
     host_permissions: ['http://127.0.0.1/*'],
   }))
+  await fs.mkdir(path.join(rootDir, 'apps', 'browser-bridge'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'apps', 'browser-bridge', 'manifest.json'), JSON.stringify({ version: '0.1.2' }))
+  await fs.mkdir(path.join(rootDir, 'scripts'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'scripts', 'package-wps-addin-release.ps1'), '$Version = [string]$packageJson.version\\n')
   await fs.writeFile(path.join(rootDir, 'README.md'), 'Papyrus Work Assistant and Browser Bridge release notes')
   await fs.writeFile(path.join(rootDir, 'package.json'), JSON.stringify({
     version: '0.1.2',
@@ -133,6 +139,17 @@ test('extension output version must match the application package version', asyn
     }))
     const report = await runReleaseChecks({ rootDir, phase: 'local' })
     assert.ok(report.failures.some((failure) => failure.includes('version must match package.json.version')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('desktop release version sources must match package.json', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'src-tauri', 'Cargo.toml'), '[package]\nname = "papyrus"\nversion = "0.1.1"\n')
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('Cargo.toml package version must match package.json.version')))
   } finally {
     await cleanup(rootDir)
   }

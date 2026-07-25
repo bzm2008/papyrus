@@ -17,6 +17,7 @@ describe('WORK_ASSISTANT_TOOLS', () => {
       'desktop_open_url',
       'desktop_open_app',
       'desktop_reveal_file',
+      'terminal_run',
     ])
   })
 
@@ -140,6 +141,22 @@ describe('WORK_ASSISTANT_TOOLS', () => {
         additionalProperties: false,
         required: ['rootId'],
         properties: { rootId: { type: 'string', minLength: 1 } },
+      },
+    })
+  })
+
+  it('declares a bounded, non-shell terminal schema', () => {
+    const terminal = WORK_ASSISTANT_TOOLS.find((tool) => tool.name === 'terminal_run')
+    expect(terminal).toMatchObject({
+      toolset: 'desktop',
+      defaultRisk: 'high',
+      previewRequired: true,
+      inputSchema: {
+        required: ['program', 'rootId'],
+        properties: {
+          program: { enum: expect.arrayContaining(['git', 'npm', 'cargo', 'system_info']) },
+          args: { type: 'array', maxItems: 12 },
+        },
       },
     })
   })

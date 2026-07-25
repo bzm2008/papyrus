@@ -13,6 +13,7 @@ import {
   scanWorkAssistantDownloads,
   scanWorkAssistantRoot,
   searchWorkAssistantFiles,
+  runTerminalCommand,
 } from './workAssistantClient'
 import {
   approveBrowserAction,
@@ -144,6 +145,11 @@ function safeToolFailure(error: unknown) {
     page_restricted: '当前页面包含密码、验证码、支付或账号安全内容，已阻止操作。',
     stale_page: '页面已经变化，请重新获取快照后再操作。',
     browser_disconnected: '浏览器未连接，请先配对当前标签页。',
+    terminal_program_not_allowed: '该终端程序或参数不在 Papyrus 的安全白名单中。',
+    terminal_timeout: '终端命令超时，已停止等待。',
+    terminal_output_limit: '终端输出超过安全上限，已截断。',
+    terminal_cwd_invalid: '终端工作目录必须位于已授权工作区内。',
+    terminal_exit: '终端命令已执行，但退出码表示失败。',
     network: '网络暂不可用，请检查连接后重试。',
     timeout: '请求超时，请稍后重试。',
     unsupported_content_type: '网页内容类型不支持，仅允许 HTML 或纯文本。',
@@ -166,6 +172,25 @@ async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal):
     case 'file_open': return openWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_reveal_file': return revealWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_open_app': return launchRegisteredApplication(String(args.appId ?? ''))
+    case 'terminal_run': {
+      const result = await runTerminalCommand({
+        program: String(args.program ?? ''),
+        args: Array.isArray(args.args) ? args.args.map(String) : [],
+        rootId: String(args.rootId ?? ''),
+        cwd: typeof args.cwd === 'string' ? args.cwd : '',
+      })
+      const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined
+      if (exitCode !== undefined && exitCode !== 0) {
+        return {
+          ok: false,
+          summary: `终端命令退出码为 ${exitCode}。`,
+          errorCode: 'terminal_exit',
+          recoverable: true,
+          data: result,
+        }
+      }
+      return result
+    }
     case 'web_extract': {
       const result = await extractPublicWebPage(String(args.url ?? ''), call.runId, signal)
       const extractId = `${call.runId}:${call.id}`
@@ -247,13 +272,20 @@ function resolveWebArchiveInput(call: AssistantToolCall): { result: WebExtractRe
 }
 
 function syntheticPreview(call: AssistantToolCall, risk: AssistantToolPreview['risk']): AssistantToolPreview {
+  const terminalCommand = call.name === 'terminal_run'
+    ? [String(call.arguments.program ?? ''), ...(Array.isArray(call.arguments.args) ? call.arguments.args.map(String) : [])]
+        .join(' ')
+        .slice(0, 220)
+    : ''
   return {
     id: `approval-${call.id}`,
     revision: 'local',
     risk,
     title: call.intent || call.name,
-    targetSummary: String(call.arguments.path ?? call.arguments.url ?? call.arguments.appId ?? '桌面操作'),
-    impactSummary: '该操作将调用受控的本地系统能力。',
+    targetSummary: terminalCommand || String(call.arguments.path ?? call.arguments.url ?? call.arguments.appId ?? '桌面操作'),
+    impactSummary: terminalCommand
+      ? '将在已授权工作区内执行固定程序和结构化参数，不经过 shell；命令输出会被限制并摘要化。'
+      : '该操作将调用受控的本地系统能力。',
     reversible: risk === 'reversible',
     expiresAt: now() + 5 * 60_000,
   }

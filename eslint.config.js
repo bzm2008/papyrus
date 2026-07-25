@@ -13,6 +13,7 @@ export default defineConfig([
     'src-tauri/target',
     'src-tauri/target-*/**',
     '.cargo-target-*/**',
+    'target-desktop-*/**',
     'target-release-*/**',
     'artifacts',
     '.worktrees',

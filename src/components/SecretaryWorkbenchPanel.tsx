@@ -25,7 +25,7 @@ import {
   useAppStore,
 } from '../stores/useAppStore'
 
-export type WorkbenchView = 'run' | 'files' | 'browser' | 'manuscript'
+export type WorkbenchView = 'run' | 'files' | 'browser'
 
 type WorkbenchProps = {
   todos: AgentTodo[]
@@ -37,7 +37,6 @@ type WorkbenchProps = {
   onViewChange: (view: WorkbenchView) => void
   onPinnedChange?: (pinned: boolean) => void
   onClose?: () => void
-  manuscript: ReactNode
   files: ReactNode
   browser?: ReactNode
   changeStat?: ReturnType<typeof useAppStore.getState>['documentChangeStats'][number]
@@ -99,7 +98,6 @@ export function SecretaryWorkbenchPanel({
   onViewChange,
   onPinnedChange,
   onClose,
-  manuscript,
   files,
   browser,
   changeStat,
@@ -128,14 +126,14 @@ export function SecretaryWorkbenchPanel({
           </div>
           <div className="min-w-0 flex-1">
             <div className="truncate text-[13px] font-semibold text-[#20201d]">
-              {activeView === 'run' ? (inline ? '本轮执行' : '执行工作台') : activeView === 'files' ? '文件工作台' : activeView === 'browser' ? '浏览器工作台' : '文稿'}
+              {activeView === 'run' ? (inline ? '本轮执行' : '执行工作台') : activeView === 'files' ? '文件工作台' : '浏览器工作台'}
             </div>
             <div className="truncate text-[11px] text-[#8f897a]">
               {activeView === 'run'
                 ? runState === 'running'
                 ? (inline ? '随对话流展示执行进度' : '实时跟踪本轮协作')
                   : '本轮执行记录'
-                : activeView === 'files' ? '预览与执行回执' : activeView === 'browser' ? '当前标签页与受控动作' : '当前作品内容'}
+                : activeView === 'files' ? '预览与执行回执' : '当前标签页与受控动作'}
             </div>
           </div>
           <div className="inline-flex rounded-lg border border-[#e8ddc7] bg-[#f8f4ea] p-0.5">
@@ -164,17 +162,6 @@ export function SecretaryWorkbenchPanel({
             >
               浏览器
             </button>
-            <button
-              type="button"
-              onClick={() => onViewChange('manuscript')}
-              className={`h-6 rounded-md px-2 text-[11px] font-medium ${
-                activeView === 'manuscript'
-                  ? 'bg-[#20201d] text-[#fffefa]'
-                  : 'text-[#6f7168] hover:bg-[#fffefa] hover:text-[#20201d]'
-              }`}
-            >
-              文稿
-            </button>
           </div>
           {!inline ? (
             <>
@@ -198,7 +185,7 @@ export function SecretaryWorkbenchPanel({
           ) : null}
         </header>
 
-        <div className={`min-h-0 flex-1 overflow-hidden ${inline ? 'max-h-[34rem]' : ''}`}>
+        <div className="min-h-0 flex-1 overflow-hidden">
           <AnimatePresence mode="wait" initial={false}>
             {activeView === 'run' ? (
               <motion.div
@@ -222,18 +209,7 @@ export function SecretaryWorkbenchPanel({
               <motion.div key="browser-view" initial={{ opacity: 0, x: 8 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -8 }} className="h-full min-h-0">
                 {browser ?? <div className="p-4 text-sm text-[#817a6d]">浏览器工作台尚未连接。</div>}
               </motion.div>
-            ) : (
-              <motion.div
-                key="manuscript-view"
-                initial={{ opacity: 0, x: 8 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -8 }}
-                transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-                className="h-full min-h-0"
-              >
-                {manuscript}
-              </motion.div>
-            )}
+            ) : null}
           </AnimatePresence>
         </div>
       </div>

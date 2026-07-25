@@ -47,8 +47,8 @@ Papyrus 保留 Scallion 主站授权和内置模型代理。客户端不保存�
 
 秘书模式现在也可作为受控电脑助手：它能读取系统状态、扫描用户授权目录、生成文件整理预览、打开安全 URL 或用户登记的应用别名。所有磁盘写操作都必须先展示预览并由用户批准；模型没有 Shell、任意命令执行或未授权路径访问能力。授权目录、应用别名、能力健康和最近审计可在“设置 → 电脑助手”中管理。
 
-- 主站授权 API: `https://scallion.uno/api/papyrus/auth`
-- 内置模型代理: `https://scallion.uno/api/papyrus/llm`
+- 主站授权 API: `https://api.sca-hub.cn/api/papyrus/auth`
+- 内置模型代理: `https://api.sca-hub.cn/api/papyrus/llm`
 - 内置模型列表: 启动时从主站模型网关读取完整目录、套餐权限、上下文窗口和可用状态；套餐外模型仍展示但明确标记不可用
 - 套餐与额度: 桌面端和 WPS 插件定时同步当前套餐与实时 `points_balance`，模型调用后刷新余额；网络结果不确定时不会自动重复发送 Scallion 请求
 - 自定义模型: 支持 OpenAI-compatible Base URL、模型名和 Key

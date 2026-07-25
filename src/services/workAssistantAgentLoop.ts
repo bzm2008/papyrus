@@ -33,6 +33,13 @@ const browserSafetyGuidance = [
   'Do not claim a browser action succeeded unless its tool result has ok: true.',
 ]
 
+const terminalSafetyGuidance = [
+  'Terminal execution is structured and allowlisted. Provide program, args, rootId, and optional relative cwd; never provide a shell command string.',
+  'Never request powershell, pwsh, cmd, bash, sh, zsh, python scripts, node scripts, shell operators, encoded commands, or executable paths.',
+  'Use terminal_run only for the listed Git/npm/Cargo/version/system diagnostics. It always stops at a user approval boundary.',
+  'Keep the working directory inside an authorized workspace and never claim success unless the terminal result has ok: true.',
+]
+
 function parseDecision(raw: string): WorkAssistantDecision {
   let value: unknown
   try {
@@ -80,6 +87,7 @@ export async function runWorkAssistantAgentLoop(input: WorkAssistantAgentLoopInp
         input.toolSchemas ? `Tool schemas: ${JSON.stringify(input.toolSchemas)}` : '',
         'Never invent paths or approval tokens. file_apply_batch may only reference previewId returned by file_plan_batch.',
         ...(input.toolNames.some((name) => name.startsWith('browser_')) ? browserSafetyGuidance : []),
+        ...(input.toolNames.includes('terminal_run') ? terminalSafetyGuidance : []),
       ].join('\n'),
     },
     { role: 'user', content: input.prompt },
