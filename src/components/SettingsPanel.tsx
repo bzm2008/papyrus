@@ -410,7 +410,7 @@ export function SettingsPanel() {
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">自动更新</div>
                       <div className="mt-1 text-xs text-[#8f897a]">
-                        Endpoint: https://api.sca-hub.cn/api/papyrus/update
+                        Endpoint: https://sca-hub.cn/api/papyrus/update
                       </div>
                     </div>
                     <button
