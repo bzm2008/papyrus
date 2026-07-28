@@ -20,6 +20,11 @@ export type ScallionQuotaDisplay = {
   source: 'realtime' | 'cached' | 'unavailable'
   status: ScallionSyncStatus
 }
+
+export type ScallionSendBlockReason = {
+  code: 'auto_quota_exhausted' | 'quota_exhausted'
+  message: string
+}
 type AccountPayload = {
   user?: ScallionUser
   quota?: number | (Partial<ScallionQuota> & {
@@ -38,11 +43,13 @@ type AccountPayload = {
     autoModels?: unknown
     auto?: {
       monthly_limit?: number
-      daily_limit?: number
+      daily_limit?: number | null
+      daily_unlimited?: boolean
+      dailyUnlimited?: boolean
       monthly_used?: number
       daily_used?: number
       monthly_remaining?: number
-      daily_remaining?: number
+      daily_remaining?: number | null
     }
     plan?: {
       key?: string
@@ -51,7 +58,9 @@ type AccountPayload = {
       manual_models?: string[]
       auto_models?: string[]
       auto_monthly_calls?: number
-      auto_daily_calls?: number
+      auto_daily_calls?: number | null
+      auto_daily_unlimited?: boolean
+      autoDailyUnlimited?: boolean
       external_api?: boolean | string
     }
   })
@@ -76,6 +85,8 @@ type AccountPayload = {
   autoMonthlyCalls?: unknown
   auto_daily_calls?: unknown
   autoDailyCalls?: unknown
+  auto_daily_unlimited?: unknown
+  autoDailyUnlimited?: unknown
   auto_monthly_used?: unknown
   autoMonthlyUsed?: unknown
   auto_daily_used?: unknown
@@ -93,16 +104,20 @@ type AccountPayload = {
     manual_models?: string[]
     auto_models?: string[]
     auto_monthly_calls?: number
-    auto_daily_calls?: number
+    auto_daily_calls?: number | null
+    auto_daily_unlimited?: boolean
+    autoDailyUnlimited?: boolean
     external_api?: boolean | string
   }
   auto?: {
     monthly_limit?: number
-    daily_limit?: number
+    daily_limit?: number | null
+    daily_unlimited?: boolean
+    dailyUnlimited?: boolean
     monthly_used?: number
     daily_used?: number
     monthly_remaining?: number
-    daily_remaining?: number
+    daily_remaining?: number | null
   }
 }
 
@@ -400,6 +415,54 @@ export function getScallionQuotaDisplay(input: {
   }
 }
 
+/**
+ * A local block is allowed only for a fresh authenticated quota response.
+ * Stale data must never turn a temporary sync failure into a false denial.
+ */
+export function getScallionSendBlockReason(input: {
+  token?: string
+  quota?: ScallionQuota
+  syncStatus?: ScallionSyncStatus
+  routingMode?: 'auto' | 'manual'
+  isScallionProvider?: boolean
+}): ScallionSendBlockReason | undefined {
+  if (!input.isScallionProvider || !input.token?.trim() || input.syncStatus !== 'ready' || !input.quota) {
+    return undefined
+  }
+
+  const quota = input.quota
+  const forcedFreeAuto = quota.planKey === 'free' && quota.manualModels?.length === 0 && (quota.autoModels?.length ?? 0) > 0
+  if (input.routingMode === 'auto' || forcedFreeAuto) {
+    if (quota.autoMonthlyRemaining === 0) {
+      const used = quota.autoMonthlyUsed ?? quota.autoMonthlyCalls ?? 0
+      const limit = quota.autoMonthlyCalls ?? used
+      return {
+        code: 'auto_quota_exhausted',
+        message: `本月 Auto 额度已用完，已用 ${used} / ${limit} 次，请等待下月刷新或升级套餐。本条消息未发送。`,
+      }
+    }
+
+    // `daily_unlimited` is authoritative. Older or incomplete cache entries
+    // without an explicit positive daily limit are intentionally not blocked.
+    if (quota.autoDailyUnlimited !== true && quota.autoDailyCalls !== null && quota.autoDailyCalls !== undefined && quota.autoDailyRemaining === 0) {
+      return {
+        code: 'auto_quota_exhausted',
+        message: '今日 Auto 额度已用完，明日刷新；本条消息未发送。',
+      }
+    }
+    return undefined
+  }
+
+  const points = quota.pointsBalance ?? quota.remaining
+  if (typeof points === 'number' && Number.isFinite(points) && points <= 0) {
+    return {
+      code: 'quota_exhausted',
+      message: '积分余额不足，本条消息未发送。请充值或进入主站升级套餐。',
+    }
+  }
+  return undefined
+}
+
 export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): ScallionQuota {
   const accountUser = user ?? payload.user
   const quotaObject = payload.quota && typeof payload.quota === 'object' ? payload.quota : undefined
@@ -451,6 +514,32 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
   const autoModels = normalizeStringList(
     payload.auto_models ?? payload.autoModels ?? quotaPayload?.auto_models ?? quotaPayload?.autoModels ?? plan?.auto_models,
   )
+  const normalizedPlanKey = normalizePlanKey(plan?.key) ?? fallbackPlanKey
+  const autoDailyUnlimited = firstBoolean(
+    payload.auto_daily_unlimited,
+    payload.autoDailyUnlimited,
+    auto?.daily_unlimited,
+    auto?.dailyUnlimited,
+    quotaAuto?.daily_unlimited,
+    quotaAuto?.dailyUnlimited,
+    plan?.auto_daily_unlimited,
+    plan?.autoDailyUnlimited,
+  ) ?? (
+    normalizedPlanKey === 'free' && [
+      payload.auto_daily_calls,
+      payload.autoDailyCalls,
+      auto?.daily_limit,
+      plan?.auto_daily_calls,
+    ].some((value) => value === null)
+      ? true
+      : undefined
+  )
+  const autoDailyCalls = autoDailyUnlimited === true
+    ? null
+    : firstOptionalLimit(payload.auto_daily_calls, payload.autoDailyCalls, plan?.auto_daily_calls, auto?.daily_limit, quotaAuto?.daily_limit)
+  const autoDailyRemaining = autoDailyUnlimited === true
+    ? null
+    : firstOptionalLimit(payload.auto_daily_remaining, payload.autoDailyRemaining, auto?.daily_remaining, quotaAuto?.daily_remaining)
 
   return {
     remaining: pointsBalance,
@@ -459,7 +548,7 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
     quota: quotaValue,
     unifiedPoints: payload.unified_points ?? quotaObject?.unifiedPoints,
     total,
-    planKey: normalizePlanKey(plan?.key) ?? fallbackPlanKey,
+    planKey: normalizedPlanKey,
     planName: plan?.name || scallionPlanName(fallbackPlanKey),
     planExpiresAt: plan?.expires_at ?? accountUser?.member_expires_at,
     unit: quotaObject?.unit || '积分',
@@ -467,11 +556,12 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
     manualModels,
     autoModels,
     autoMonthlyCalls: firstOptionalNumber(payload.auto_monthly_calls, payload.autoMonthlyCalls, plan?.auto_monthly_calls, auto?.monthly_limit, quotaAuto?.monthly_limit),
-    autoDailyCalls: firstOptionalNumber(payload.auto_daily_calls, payload.autoDailyCalls, plan?.auto_daily_calls, auto?.daily_limit, quotaAuto?.daily_limit),
+    autoDailyCalls,
+    autoDailyUnlimited,
     autoMonthlyUsed: firstOptionalNumber(payload.auto_monthly_used, payload.autoMonthlyUsed, auto?.monthly_used, quotaAuto?.monthly_used),
     autoDailyUsed: firstOptionalNumber(payload.auto_daily_used, payload.autoDailyUsed, auto?.daily_used, quotaAuto?.daily_used),
     autoMonthlyRemaining: firstOptionalNumber(payload.auto_monthly_remaining, payload.autoMonthlyRemaining, auto?.monthly_remaining, quotaAuto?.monthly_remaining),
-    autoDailyRemaining: firstOptionalNumber(payload.auto_daily_remaining, payload.autoDailyRemaining, auto?.daily_remaining, quotaAuto?.daily_remaining),
+    autoDailyRemaining,
     externalApi: firstExternalApi(payload.external_api, payload.externalApi, plan?.external_api),
     memberPriceLabel:
       quotaObject?.memberPriceLabel || quotaObject?.member_price_label || payload.member_price_label || '9.9 元/月',
@@ -500,6 +590,28 @@ function firstOptionalNumber(...values: unknown[]) {
     if (value === undefined || value === null || value === '') continue
     const number = typeof value === 'number' ? value : Number(value)
     if (Number.isFinite(number)) return Math.max(0, number)
+  }
+  return undefined
+}
+
+function firstOptionalLimit(...values: unknown[]): number | null | undefined {
+  for (const value of values) {
+    if (value === null) return null
+    if (value === undefined || value === '') continue
+    const number = typeof value === 'number' ? value : Number(value)
+    if (Number.isFinite(number)) return Math.max(0, number)
+  }
+  return undefined
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (normalized === 'true') return true
+      if (normalized === 'false') return false
+    }
   }
   return undefined
 }

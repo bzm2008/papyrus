@@ -38,6 +38,10 @@ type ScallionModelPayload =
       available_for_plan?: boolean
       availableForPlan?: boolean
       allowed?: boolean
+      manual_available?: boolean
+      manualAvailable?: boolean
+      auto_available?: boolean
+      autoAvailable?: boolean
     }>
   | {
       data?: Array<{
@@ -52,6 +56,10 @@ type ScallionModelPayload =
         available_for_plan?: boolean
         availableForPlan?: boolean
         allowed?: boolean
+        manual_available?: boolean
+        manualAvailable?: boolean
+        auto_available?: boolean
+        autoAvailable?: boolean
       }>
       models?: Array<{
         id?: string
@@ -65,6 +73,10 @@ type ScallionModelPayload =
         available_for_plan?: boolean
         availableForPlan?: boolean
         allowed?: boolean
+        manual_available?: boolean
+        manualAvailable?: boolean
+        auto_available?: boolean
+        autoAvailable?: boolean
       }>
     }
 
@@ -82,6 +94,7 @@ type LlmPayload = {
     message?: string
     type?: string
     code?: string
+    auto_quota?: unknown
   }
 }
 
@@ -508,10 +521,12 @@ async function requestScallion(
         code?: string
         status?: number
         retryable?: boolean
+        autoQuota?: unknown
       }
       error.code = payload.error?.type ?? payload.error?.code
       error.status = response.status
       error.retryable = response.status >= 500 || response.status === 408 || response.status === 429
+      error.autoQuota = payload.error?.auto_quota
       throw error
     }
 
@@ -612,7 +627,10 @@ async function fetchAvailableScallionModels(token: string | undefined) {
     .filter((model) => {
       const planAvailable =
         model.plan_available ?? model.planAvailable ?? model.available_for_plan ?? model.availableForPlan ?? model.allowed ?? true
-      return (model.available ?? model.enabled ?? true) && planAvailable
+      const manualAvailable = model.manual_available ?? model.manualAvailable
+      const autoAvailable = model.auto_available ?? model.autoAvailable
+      const callable = autoAvailable === true || manualAvailable === true || (autoAvailable === undefined && manualAvailable === undefined && planAvailable)
+      return (model.available ?? model.enabled ?? true) && callable
     })
     .map((model) => model.id || model.modelName || model.model_name || model.name || '')
     .filter(Boolean)

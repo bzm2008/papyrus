@@ -54,6 +54,8 @@ for (const file of files) {
 const platforms = {}
 for (const [assetPath, signature] of signatures) {
   if (!signature) throw new Error(`empty updater signature: ${assetPath}.sig`)
+  const stat = await fs.stat(assetPath).catch(() => null)
+  if (!stat?.isFile() || stat.size < 1) throw new Error(`missing signed updater asset: ${path.basename(assetPath)}`)
   const name = path.basename(assetPath)
   const platform = platformForAsset(name)
   if (!platform) continue
@@ -70,7 +72,7 @@ if (missing.length) throw new Error(`missing signed updater assets: ${missing.jo
 
 const manifest = {
   version,
-  notes: 'Papyrus 1.1.0：通信笺秘书时间线、项目账本、受控电脑助手与跨平台安装支持。',
+  notes: 'Papyrus 1.1.1：受控电脑助手、Auto 额度和安全执行边界修复。',
   pub_date: new Date().toISOString(),
   platforms,
 }

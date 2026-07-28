@@ -23,6 +23,7 @@ import {
   createSecretaryTaskCenterMemory,
   deleteSecretaryTaskCenterMemory,
   loadSecretaryTaskCenterSnapshot,
+  prepareSecretaryLedgerRecoveryTask,
   queueSecretaryLedgerTask,
   rollbackSecretaryTaskCenterMemory,
   updateSecretaryTaskCenterMemory,
@@ -43,6 +44,7 @@ type SecretaryTaskCenterProps = {
   onOpenMaterials: () => void
   onPauseActiveTask?: () => void
   onCancelActiveTask?: () => void
+  activeTaskId?: string
   onClose?: () => void
   compact?: boolean
 }
@@ -71,7 +73,7 @@ const taskStatusClass: Record<SecretaryLedgerTask['status'], string> = {
   cancelled: 'bg-[#f0eee7] text-[#6f7168]',
 }
 
-export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiveTask, onCancelActiveTask, onClose, compact = false }: SecretaryTaskCenterProps) {
+export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiveTask, onCancelActiveTask, activeTaskId, onClose, compact = false }: SecretaryTaskCenterProps) {
   const [snapshot, setSnapshot] = useState<SecretaryTaskCenterSnapshot>()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -215,6 +217,10 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
 
   const changeTaskStatus = async (task: SecretaryLedgerTask, status: 'queued' | 'paused' | 'cancelled') => {
     if (task.status === 'running' || task.status === 'awaiting_approval') {
+      if (task.id !== activeTaskId) {
+        setError('这条旧任务不能控制当前运行。请先执行恢复复核。')
+        return
+      }
       if (status === 'paused') onPauseActiveTask?.()
       if (status === 'cancelled') onCancelActiveTask?.()
     }
@@ -258,7 +264,40 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
 
   const beginTask = (task: SecretaryLedgerTask) => {
     const recovery = recoveryByTaskId.get(task.id)
+    if (recovery?.health.state === 'blocked') {
+      setError(recovery.health.message)
+      return
+    }
+    if (recovery?.health.state === 'requires_review' && !recovery.prepared) {
+      setError('请先完成恢复复核，再重新规划此任务。')
+      return
+    }
     onStartTask(task, recovery)
+  }
+
+  const reviewRecovery = async (recovery: SecretaryLedgerRecoveryItem) => {
+    if (recovery.health.state === 'blocked') {
+      setError(recovery.health.message)
+      return
+    }
+
+    let reconciledTask = recovery.task
+    if (
+      recovery.task.status === 'running'
+      || recovery.task.status === 'awaiting_approval'
+      || recovery.task.status === 'paused'
+    ) {
+      const reconciled = await prepareSecretaryLedgerRecoveryTask(recovery.task.id)
+      if (!reconciled.ok) {
+        setError(reconciled.message)
+        return
+      }
+      reconciledTask = reconciled.value
+    }
+
+    setError('')
+    onStartTask(reconciledTask, { ...recovery, task: reconciledTask, prepared: true })
+    await refresh()
   }
 
   const selectProject = (project: SecretaryTaskCenterProject) => {
@@ -435,7 +474,20 @@ export function SecretaryTaskCenter({ onStartTask, onOpenMaterials, onPauseActiv
           ) : null}
           {visibleTasks.length ? (
             <div className="space-y-2">
-              {visibleTasks.slice(0, 8).map((task) => <TaskRow key={task.id} task={task} onStart={() => beginTask(task)} onRetry={() => void retryTask(task)} onPause={() => void changeTaskStatus(task, 'paused')} onCancel={() => void changeTaskStatus(task, 'cancelled')} />)}
+              {visibleTasks.slice(0, 8).map((task) => {
+                const recovery = recoveryByTaskId.get(task.id)
+                return <TaskRow
+                  key={task.id}
+                  task={task}
+                  recovery={recovery}
+                  active={task.id === activeTaskId}
+                  onStart={() => beginTask(task)}
+                  onReview={() => recovery ? void reviewRecovery(recovery) : undefined}
+                  onRetry={() => void retryTask(task)}
+                  onPause={() => void changeTaskStatus(task, 'paused')}
+                  onCancel={() => void changeTaskStatus(task, 'cancelled')}
+                />
+              })}
             </div>
           ) : <EmptyLine text="没有待恢复或排队任务" />}
         </TaskCenterSection>
@@ -466,9 +518,31 @@ function MemoryRow({ memory, onEdit, onRollback, onDelete }: { memory: Secretary
   return <article className="group border-b border-[#eee4d3] pb-2 last:border-b-0 last:pb-0"><p className="line-clamp-3 text-[11px] leading-5 text-[#3e3a31]">{memory.content}</p><div className="mt-1 flex items-center gap-1 text-[10px] text-[#9d988a]"><span>{memory.scope === 'personal' ? '个人偏好' : '项目事实'}</span><span>v{memory.revision}</span><span className="ml-auto flex opacity-0 transition-opacity group-hover:opacity-100"><button type="button" title="编辑记忆" onClick={onEdit} className="papyrus-icon-button size-5 rounded"><Pencil size={10} /></button>{memory.revision > 1 ? <button type="button" title="回退上一版" onClick={onRollback} className="papyrus-icon-button ml-1 size-5 rounded"><RotateCcw size={10} /></button> : null}<button type="button" title="永久删除记忆" onClick={onDelete} className="papyrus-icon-button ml-1 size-5 rounded text-[#9b3d30]"><Trash2 size={10} /></button></span></div></article>
 }
 
-function TaskRow({ task, onStart, onRetry, onPause, onCancel }: { task: SecretaryLedgerTask; onStart: () => void; onRetry: () => void; onPause: () => void; onCancel: () => void }) {
-  const startable = task.status === 'queued' || task.status === 'paused'
-  return <article className="rounded-md border border-[#e8ddc7]/82 bg-[#fffdf7]/72 p-2"><div className="flex items-start gap-1.5"><div className="min-w-0 flex-1"><div className="line-clamp-2 text-[11px] font-medium leading-4 text-[#2f2b22]">{task.title}</div>{task.scheduleAt ? <div className="mt-1 flex items-center gap-1 text-[10px] text-[#8f897a]"><Clock3 size={10} />{formatTime(task.scheduleAt)}</div> : null}</div><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${taskStatusClass[task.status]}`}>{taskStatusLabel[task.status]}</span></div>{task.nextStep ? <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-[#8f897a]">{task.nextStep}</p> : null}<div className="mt-2 flex justify-end gap-1">{startable ? <button type="button" title="开始或继续任务" onClick={onStart} className="papyrus-icon-button size-6 rounded-md text-[#315d39]"><Play size={11} fill="currentColor" /></button> : null}{task.status === 'failed' || task.status === 'cancelled' ? <button type="button" title="重新排队并重试" onClick={onRetry} className="papyrus-icon-button size-6 rounded-md text-[#315d39]"><RotateCcw size={11} /></button> : null}{task.status === 'queued' || task.status === 'running' || task.status === 'awaiting_approval' ? <button type="button" title="暂停任务" onClick={onPause} className="papyrus-icon-button size-6 rounded-md"><Pause size={11} /></button> : null}{task.status !== 'completed' && task.status !== 'cancelled' ? <button type="button" title="取消任务" onClick={onCancel} className="papyrus-icon-button size-6 rounded-md text-[#9b3d30]"><Square size={10} fill="currentColor" /></button> : null}</div></article>
+function TaskRow({ task, recovery, active, onStart, onReview, onRetry, onPause, onCancel }: {
+  task: SecretaryLedgerTask
+  recovery?: SecretaryLedgerRecoveryItem
+  active: boolean
+  onStart: () => void
+  onReview: () => void
+  onRetry: () => void
+  onPause: () => void
+  onCancel: () => void
+}) {
+  const health = recovery?.health
+  const needsReview = health?.state === 'requires_review'
+  const blocked = health?.state === 'blocked'
+  const startable = (task.status === 'queued' || task.status === 'paused') && !needsReview && !blocked
+  const statusLabel = needsReview ? '需要复核' : blocked ? '无法恢复' : taskStatusLabel[task.status]
+  const statusClass = needsReview
+    ? 'bg-[#fff1e9] text-[#8b4138]'
+    : blocked
+      ? 'bg-[#f0eee7] text-[#6f7168]'
+      : taskStatusClass[task.status]
+  const canPause = task.status === 'queued' || ((task.status === 'running' || task.status === 'awaiting_approval') && active)
+  const canCancel = task.status !== 'completed' && task.status !== 'cancelled' && (
+    task.status !== 'running' && task.status !== 'awaiting_approval' || active
+  )
+  return <article className="rounded-md border border-[#e8ddc7]/82 bg-[#fffdf7]/72 p-2"><div className="flex items-start gap-1.5"><div className="min-w-0 flex-1"><div className="line-clamp-2 text-[11px] font-medium leading-4 text-[#2f2b22]">{task.title}</div>{task.scheduleAt ? <div className="mt-1 flex items-center gap-1 text-[10px] text-[#8f897a]"><Clock3 size={10} />{formatTime(task.scheduleAt)}</div> : null}</div><span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${statusClass}`}>{statusLabel}</span></div>{needsReview || blocked ? <p className="mt-1 line-clamp-3 text-[10px] leading-4 text-[#8f897a]">{health.message}</p> : task.nextStep ? <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-[#8f897a]">{task.nextStep}</p> : null}<div className="mt-2 flex justify-end gap-1">{needsReview ? <button type="button" title="复核并重新规划" onClick={onReview} className="papyrus-icon-button size-6 rounded-md text-[#745d2e]"><RotateCcw size={11} /></button> : null}{startable ? <button type="button" title="开始或继续任务" onClick={onStart} className="papyrus-icon-button size-6 rounded-md text-[#315d39]"><Play size={11} fill="currentColor" /></button> : null}{task.status === 'failed' || task.status === 'cancelled' ? <button type="button" title="重新排队并重试" onClick={onRetry} className="papyrus-icon-button size-6 rounded-md text-[#315d39]"><RotateCcw size={11} /></button> : null}{canPause ? <button type="button" title="暂停任务" onClick={onPause} className="papyrus-icon-button size-6 rounded-md"><Pause size={11} /></button> : null}{canCancel ? <button type="button" title="取消任务" onClick={onCancel} className="papyrus-icon-button size-6 rounded-md text-[#9b3d30]"><Square size={10} fill="currentColor" /></button> : null}</div></article>
 }
 
 function formatTime(timestamp: number) {

@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Papyrus Browser Bridge",
-  "version": "1.1.0",
+  "version": "1.1.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArxeHlgipEoVuSzGgZ8nBpDB3lKtanAhf5dE5ZjWlBH1OsPdEqepqPLlglwG+JIqFlqdZUPJH7P/29zOA9xSo3d3uuo9Zv2tr8OUy+WmlTLXmWgm/ngb8gozjJ1oMRcy83w9AezkyqElIhgCy6DIUm8A2uWz/Cj3tFX8B69tDcwZUs9zCPXXIPMUxOL7VTjodPlTiOWEWEFZyMWH8FIWgws/NRvO8SwzMumJ9oi4xLCAaOT6b2sW7ipWh7tQaST0dJi+wQXiOOozCUOOoP3wnWTOkIX0g2VGnvQZ8RkwVysFlcVz3xdVE9tnIpGg3Uzlw3ye9iiZYxvX9HbI0LVvB5QIDAQAB",
   "description": "Connect Papyrus to one user-authorized Chromium tab with a constrained accessibility protocol.",
   "permissions": ["tabs", "activeTab", "scripting", "storage"],
   "host_permissions": ["http://127.0.0.1/*"],

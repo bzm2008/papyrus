@@ -33,4 +33,14 @@ describe('ComputerAssistantSettings', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认清空' }))
     await waitFor(() => expect(client.clearWorkAssistantAudit).toHaveBeenCalled())
   })
+
+  it('asks the native command to select an application instead of passing a browser-selected path', async () => {
+    render(<ComputerAssistantSettings />)
+    await screen.findByText(/^Work · 工作区$/)
+
+    fireEvent.change(screen.getByRole('textbox', { name: '应用别名' }), { target: { value: '编辑器' } })
+    fireEvent.click(screen.getByRole('button', { name: '选择并注册' }))
+
+    await waitFor(() => expect(client.registerApplicationFromPicker).toHaveBeenCalledWith('编辑器'))
+  })
 })

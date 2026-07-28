@@ -1,6 +1,6 @@
 param(
   [string]$BaseUrl = "https://api.sca-hub.cn",
-  [string]$ExpectedVersion = "1.1.0"
+  [string]$ExpectedVersion = "1.1.1"
 )
 
 $ErrorActionPreference = "Stop"

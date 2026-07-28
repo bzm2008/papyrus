@@ -22,10 +22,18 @@ type RawModel = {
   enabled?: boolean
   plan_available?: boolean
   planAvailable?: boolean
+  manual_available?: boolean
+  manualAvailable?: boolean
+  auto_available?: boolean
+  autoAvailable?: boolean
+  auto_only?: boolean
+  autoOnly?: boolean
   available_for_plan?: boolean
   availableForPlan?: boolean
   required_plan?: string
   requiredPlan?: string
+  auto_required_plan?: string
+  autoRequiredPlan?: string
   availability_reason?: string
   availabilityReason?: string
   context_window_tokens?: number
@@ -37,14 +45,57 @@ type RawModel = {
 type ModelPayload = {
   data?: RawModel[]
   models?: RawModel[]
-  plan?: { key?: string; name?: string; expires_at?: string | null }
+  plan?: {
+    key?: string
+    name?: string
+    expires_at?: string | null
+    auto_monthly_calls?: number | null
+    auto_daily_calls?: number | null
+    auto_daily_unlimited?: boolean
+    manual_models?: string[]
+    auto_models?: string[]
+  }
 }
 
 type QuotaPayload = {
   points_balance?: number
   balance?: number
-  quota?: number | { remaining?: number; points?: number; total?: number }
-  plan?: { key?: string; name?: string; expires_at?: string | null }
+  quota?: number | {
+    remaining?: number
+    points?: number
+    total?: number
+    auto?: {
+      monthly_limit?: number | null
+      daily_limit?: number | null
+      daily_unlimited?: boolean
+      monthly_used?: number
+      daily_used?: number
+      monthly_remaining?: number | null
+      daily_remaining?: number | null
+    }
+  }
+  plan?: {
+    key?: string
+    name?: string
+    expires_at?: string | null
+    auto_monthly_calls?: number | null
+    auto_daily_calls?: number | null
+    auto_daily_unlimited?: boolean
+    manual_models?: string[]
+    auto_models?: string[]
+  }
+  auto_monthly_calls?: number | null
+  auto_daily_calls?: number | null
+  auto_daily_unlimited?: boolean
+  auto?: {
+    monthly_limit?: number | null
+    daily_limit?: number | null
+    daily_unlimited?: boolean
+    monthly_used?: number
+    daily_used?: number
+    monthly_remaining?: number | null
+    daily_remaining?: number | null
+  }
 }
 
 export async function fetchWpsScallionRuntimeMetadata(token: string): Promise<WpsScallionRuntimeMetadata> {
@@ -126,23 +177,13 @@ export function mergeWpsRuntimeMetadata(
 
 export type WpsModelAccess = {
   usable: boolean
-  label: '可用' | '套餐不可用' | '暂不可用'
+  label: '可用' | '仅 Auto 可用' | '套餐不可用' | '暂不可用'
   detail: string
 }
 
 export function getWpsModelAccess(
-  model: Pick<WpsScallionModel, 'available' | 'planAvailable' | 'requiredPlan' | 'availabilityReason'>,
+  model: Pick<WpsScallionModel, 'available' | 'planAvailable' | 'manualAvailable' | 'autoAvailable' | 'autoOnly' | 'requiredPlan' | 'autoRequiredPlan' | 'availabilityReason'>,
 ): WpsModelAccess {
-  if (model.planAvailable === false) {
-    return {
-      usable: false,
-      label: '套餐不可用',
-      detail:
-        model.availabilityReason ||
-        (model.requiredPlan ? `需要 ${formatWpsPlanName(model.requiredPlan)} 套餐` : '当前套餐不可用'),
-    }
-  }
-
   if (model.available === false) {
     return {
       usable: false,
@@ -151,7 +192,28 @@ export function getWpsModelAccess(
     }
   }
 
-  return { usable: true, label: '可用', detail: '当前套餐可调用' }
+  const manualAvailable = model.manualAvailable ?? model.planAvailable !== false
+  if (manualAvailable) {
+    return {
+      usable: true,
+      label: '可用',
+      detail: '当前套餐可手动调用',
+    }
+  }
+
+  if (model.autoAvailable === true || model.autoOnly === true) {
+    return {
+      usable: false,
+      label: '仅 Auto 可用',
+      detail: model.availabilityReason || '当前套餐可由主站 Auto 路由使用',
+    }
+  }
+
+  return {
+    usable: false,
+    label: '套餐不可用',
+    detail: model.availabilityReason || (model.requiredPlan ? `需要 ${formatWpsPlanName(model.requiredPlan)} 套餐` : '当前套餐不可用'),
+  }
 }
 
 export function formatWpsPlanName(value?: string) {
@@ -202,7 +264,11 @@ export function parseWpsModelPayload(payload: ModelPayload | RawModel[]): WpsSca
         contextWindowTokens,
         contextWindowLabel: model.context_window_label ?? model.contextWindowLabel,
         planAvailable,
+        manualAvailable: model.manual_available ?? model.manualAvailable,
+        autoAvailable: model.auto_available ?? model.autoAvailable,
+        autoOnly: model.auto_only ?? model.autoOnly,
         requiredPlan: model.required_plan ?? model.requiredPlan,
+        autoRequiredPlan: model.auto_required_plan ?? model.autoRequiredPlan,
         availabilityReason: model.availability_reason ?? model.availabilityReason,
         available,
       }
@@ -231,6 +297,12 @@ function channelError(label: string, result: PromiseSettledResult<Response>) {
 
 export function normalizeWpsQuota(payload: QuotaPayload): WpsScallionQuota {
   const quotaObject = payload.quota && typeof payload.quota === 'object' ? payload.quota : undefined
+  const auto = payload.auto ?? quotaObject?.auto
+  const autoDailyUnlimited = firstBoolean(
+    payload.auto_daily_unlimited,
+    auto?.daily_unlimited,
+    payload.plan?.auto_daily_unlimited,
+  )
   const pointsBalance = firstNumber(
     payload.points_balance,
     quotaObject?.points,
@@ -246,6 +318,15 @@ export function normalizeWpsQuota(payload: QuotaPayload): WpsScallionQuota {
     planKey: payload.plan?.key,
     planName: payload.plan?.name,
     planExpiresAt: payload.plan?.expires_at,
+    autoMonthlyCalls: firstOptionalNumber(payload.auto_monthly_calls, payload.plan?.auto_monthly_calls, auto?.monthly_limit),
+    autoDailyCalls: autoDailyUnlimited
+      ? null
+      : firstOptionalLimit(payload.auto_daily_calls, payload.plan?.auto_daily_calls, auto?.daily_limit),
+    autoMonthlyUsed: firstOptionalNumber(auto?.monthly_used),
+    autoDailyUsed: firstOptionalNumber(auto?.daily_used),
+    autoMonthlyRemaining: firstOptionalNumber(auto?.monthly_remaining),
+    autoDailyRemaining: autoDailyUnlimited ? null : firstOptionalLimit(auto?.daily_remaining),
+    autoDailyUnlimited,
     updatedAt: Date.now(),
   }
 }
@@ -263,7 +344,18 @@ function normalizeWpsPlan(plan?: ModelPayload['plan'] | QuotaPayload['plan']): W
     ...(key ? { key } : {}),
     ...(name ? { name } : {}),
     ...(expiresAt !== undefined ? { expiresAt } : {}),
+    ...(plan.auto_monthly_calls !== undefined ? { autoMonthlyCalls: firstOptionalNumber(plan.auto_monthly_calls) } : {}),
+    ...(plan.auto_daily_calls !== undefined ? { autoDailyCalls: plan.auto_daily_calls === null ? null : firstOptionalLimit(plan.auto_daily_calls) } : {}),
+    ...(plan.auto_daily_unlimited === true ? { autoDailyUnlimited: true } : {}),
+    ...(Array.isArray(plan.manual_models) ? { manualModels: normalizeStringList(plan.manual_models) } : {}),
+    ...(Array.isArray(plan.auto_models) ? { autoModels: normalizeStringList(plan.auto_models) } : {}),
   }
+}
+
+function normalizeStringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : []
 }
 
 function positiveNumber(value: unknown) {
@@ -277,4 +369,35 @@ function firstNumber(...values: unknown[]) {
     if (Number.isFinite(number)) return Math.max(0, number)
   }
   return 0
+}
+
+function firstOptionalNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue
+    const number = Number(value)
+    if (Number.isFinite(number)) return Math.max(0, number)
+  }
+  return undefined
+}
+
+function firstOptionalLimit(...values: unknown[]): number | null | undefined {
+  for (const value of values) {
+    if (value === null) return null
+    if (value === undefined || value === '') continue
+    const number = Number(value)
+    if (Number.isFinite(number)) return Math.max(0, number)
+  }
+  return undefined
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (normalized === 'true') return true
+      if (normalized === 'false') return false
+    }
+  }
+  return undefined
 }

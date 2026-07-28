@@ -116,6 +116,8 @@ type ScallionPlanPayload = {
   autoMonthlyCalls?: unknown
   auto_daily_calls?: unknown
   autoDailyCalls?: unknown
+  auto_daily_unlimited?: unknown
+  autoDailyUnlimited?: unknown
   external_api?: unknown
   externalApi?: unknown
 }
@@ -406,7 +408,7 @@ export async function callOpenAICompatibleStream(
       receivedToken ||
       emptyStreamFallback.attempted ||
       signal?.aborted ||
-      (error instanceof LlmRequestError && error.code === 'request_uncertain')
+      (error instanceof LlmRequestError && shouldKeepScallionStreamError(error))
     ) {
       throw error
     }
@@ -1309,7 +1311,10 @@ function normalizeScallionPlanPayload(payload?: ScallionPlanPayload): ScallionPl
     manualModels,
     autoModels,
     autoMonthlyCalls: toNonNegativeNumber(payload.auto_monthly_calls ?? payload.autoMonthlyCalls),
-    autoDailyCalls: toNonNegativeNumber(payload.auto_daily_calls ?? payload.autoDailyCalls),
+    autoDailyCalls: toOptionalQuotaLimit(
+      payload.auto_daily_calls !== undefined ? payload.auto_daily_calls : payload.autoDailyCalls,
+    ),
+    autoDailyUnlimited: firstBoolean(payload.auto_daily_unlimited, payload.autoDailyUnlimited),
     externalApi: normalizeExternalApi(payload.external_api ?? payload.externalApi),
     updatedAt: Date.now(),
   }
@@ -1324,6 +1329,35 @@ function normalizeStringList(value: unknown) {
 function normalizeExternalApi(value: unknown): boolean | string | undefined {
   if (typeof value === 'boolean') return value
   if (typeof value === 'string' && value.trim()) return value.trim()
+  return undefined
+}
+
+function shouldKeepScallionStreamError(error: LlmRequestError) {
+  return [
+    'request_uncertain',
+    'auto_quota_exhausted',
+    'quota_exhausted',
+    'unauthorized',
+    'plan_model_forbidden',
+    'model_unavailable',
+    'forbidden',
+  ].includes(error.code)
+}
+
+function toOptionalQuotaLimit(value: unknown): number | null | undefined {
+  if (value === null) return null
+  return toNonNegativeNumber(value)
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (normalized === 'true') return true
+      if (normalized === 'false') return false
+    }
+  }
   return undefined
 }
 

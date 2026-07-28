@@ -39,7 +39,18 @@ pub fn work_assistant_preview(
     state: State<'_, WorkAssistantState>,
     request: NativePreviewRequest,
 ) -> Result<AssistantToolPreview, AssistantErrorPayload> {
-    crate::work_assistant::create_native_file_preview(&state, request).map_err(Into::into)
+    if request.tool_name == "file_plan_batch" {
+        crate::work_assistant::create_native_file_preview(&state, request).map_err(Into::into)
+    } else {
+        crate::work_assistant::create_native_action_preview(
+            &state,
+            request.run_id,
+            request.tool_call_id,
+            request.tool_name,
+            request.arguments,
+        )
+        .map_err(safe_native_action_error)
+    }
 }
 
 #[tauri::command]
@@ -49,8 +60,28 @@ pub fn work_assistant_approve(
     run_id: String,
     choice: ApprovalChoice,
 ) -> Result<crate::work_assistant::ApprovalGrant, AssistantErrorPayload> {
-    crate::work_assistant::approve_batch_preview(&state, &preview_id, &run_id, choice)
-        .map_err(Into::into)
+    if crate::work_assistant::is_native_action_preview(&state, &preview_id)
+        .map_err(safe_native_action_error)?
+    {
+        crate::work_assistant::approve_native_action_preview(&state, &preview_id, &run_id, choice)
+            .map_err(safe_native_action_error)
+    } else {
+        crate::work_assistant::approve_batch_preview(&state, &preview_id, &run_id, choice)
+            .map_err(Into::into)
+    }
+}
+
+/// Execute a desktop launch or terminal diagnostic only from native preview state. The frontend
+/// cannot supply a second application id, program, path, cwd, or argument payload at this stage.
+#[tauri::command]
+pub async fn work_assistant_execute_native_action(
+    state: State<'_, WorkAssistantState>,
+    preview_id: String,
+    approval_token: String,
+) -> Result<crate::work_assistant::NativeActionExecutionResult, AssistantErrorPayload> {
+    crate::work_assistant::execute_native_action(&state, &preview_id, &approval_token)
+        .await
+        .map_err(safe_native_action_error)
 }
 
 #[tauri::command]
@@ -122,10 +153,13 @@ pub fn execute_batch_file_operations(
                 // Every earlier preflight slot belongs to this batch until its transaction commits.
                 // Reclaim them before propagating the preflight error.
                 let cleanup = cleanup_prepared(&mut prepared);
-                if let Some(cleanup) = cleanup {
+                if cleanup.is_some() {
                     let _ = append_audit_entry(
                         state,
-                        &AuditEntry::new("file_operation_cleanup_warning", cleanup.message),
+                        &AuditEntry::new(
+                            "file_operation_cleanup_warning",
+                            cleanup_warning_audit_detail(),
+                        ),
                     );
                 }
                 return Err(error);
@@ -133,10 +167,13 @@ pub fn execute_batch_file_operations(
         }
     }
     if let Err(error) = consume_approval(state, &execution, &preview, &approval, required_count) {
-        if let Some(cleanup) = cleanup_prepared(&mut prepared) {
+        if cleanup_prepared(&mut prepared).is_some() {
             let _ = append_audit_entry(
                 state,
-                &AuditEntry::new("file_operation_cleanup_warning", cleanup.message),
+                &AuditEntry::new(
+                    "file_operation_cleanup_warning",
+                    cleanup_warning_audit_detail(),
+                ),
             );
         }
         return Err(error);
@@ -334,6 +371,24 @@ fn safe_command_error(error: WorkAssistantError) -> AssistantErrorPayload {
     }
 }
 
+fn safe_native_action_error(error: WorkAssistantError) -> AssistantErrorPayload {
+    let message = match error.code.as_str() {
+        "blocked" => "该本地操作未通过安全校验，未执行任何操作。",
+        "stale_preview" => "安全预览已过期或已变化，请重新生成后确认。",
+        "terminal_program_not_allowed" => "该终端操作不在 Papyrus 的只读安全目录中。",
+        "terminal_cwd_invalid" => "终端工作目录必须位于已授权工作区内。",
+        "terminal_timeout" => "终端诊断超时，已停止等待。",
+        "terminal_failed" => "终端诊断未能启动或完成。",
+        "protocol" => "本地操作请求格式无效。",
+        _ => "本地操作未完成。",
+    };
+    AssistantErrorPayload {
+        code: error.code,
+        message: message.into(),
+        recoverable: error.recoverable,
+    }
+}
+
 fn validate_approval(
     state: &WorkAssistantState,
     execution: &BatchExecutionRequest,
@@ -433,12 +488,18 @@ fn cleanup_prepared(prepared: &mut PreparedTransactions) -> Option<WorkAssistant
     prepared.cleanup()
 }
 
+fn cleanup_warning_audit_detail() -> String {
+    // Recovery errors can embed absolute paths from native I/O. The audit trail only needs a
+    // stable category; details remain in the in-memory error returned to the active operation.
+    "status=cleanup_unavailable".into()
+}
+
 fn record_cleanup_warnings(
     state: &WorkAssistantState,
     result: &mut BatchExecutionResult,
     prepared: &mut PreparedTransactions,
 ) {
-    if let Some(error) = cleanup_prepared(prepared) {
+    if cleanup_prepared(prepared).is_some() {
         let warning = item(
             usize::MAX,
             "uncommitted recovery cleanup needs attention".into(),
@@ -451,7 +512,10 @@ fn record_cleanup_warnings(
         );
         let _ = append_audit_entry(
             state,
-            &AuditEntry::new("file_operation_cleanup_warning", error.message),
+            &AuditEntry::new(
+                "file_operation_cleanup_warning",
+                cleanup_warning_audit_detail(),
+            ),
         );
         result.warnings.push(warning);
     }
@@ -466,7 +530,11 @@ fn append_item_audit(
         state,
         &AuditEntry::new(
             "file_operation_item",
-            format!("index={};status={status};{}", item.index, item.detail),
+            format!(
+                "index={};status={status};code={}",
+                item.index,
+                item.code.as_deref().unwrap_or("none")
+            ),
         ),
     )
 }
@@ -695,6 +763,40 @@ mod tests {
             "approved file operation could not be completed"
         );
         assert!(!payload.message.contains(r"C:\Users\Administrator"));
+    }
+
+    #[test]
+    fn cleanup_warning_audit_uses_a_fixed_non_sensitive_summary() {
+        let detail = cleanup_warning_audit_detail();
+        assert_eq!(detail, "status=cleanup_unavailable");
+        assert!(!detail.contains("PAPYRUS_CLEANUP_PATH_SENTINEL"));
+        assert!(!detail.contains(':'));
+    }
+
+    #[test]
+    fn file_item_audit_never_serializes_operation_detail_text() {
+        let path = directory();
+        fs::create_dir_all(&path).unwrap();
+        let state = state(&path);
+        let sentinel = r"PAPYRUS_AUDIT_DETAIL_SENTINEL_C:\Users\Administrator\secret.txt";
+        let item = BatchItemResult {
+            index: 3,
+            detail: sentinel.into(),
+            code: Some("blocked".into()),
+            recoverable: Some(false),
+            recovery_receipts: Vec::new(),
+        };
+
+        append_item_audit(&state, "failed", &item).unwrap();
+
+        let audit = crate::work_assistant::read_audit_entries(&state.audit_path).unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].event, "file_operation_item");
+        assert!(!audit[0].detail.contains(sentinel));
+        assert!(audit[0].detail.contains("index=3"));
+        assert!(audit[0].detail.contains("status=failed"));
+
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

@@ -13,13 +13,31 @@ export type SecretaryTaskClassification = {
   domain: SecretaryTaskDomain
 }
 
+const browserApplicationPattern = /(?:打开|启动|运行|开启|唤起|launch|open)\s*(?:谷歌(?:浏览器|\s*chrome)|google\s*(?:chrome|浏览器)|chrome|chromium|microsoft\s*edge|edge|firefox|(?:系统默认|默认)?浏览器)(?:\s*(?:这个)?(?:软件|应用|程序))?/i
+const terminalLexicalPattern = /(?:\bgit\b|\bnpm\b|\bpnpm\b|\byarn\b|\bcargo\b|\bterminal\b|\bshell\b|终端|命令行|命令|脚本)/i
+const terminalCompositionPattern = /(?:写|编写|生成|提供|给我|告诉我|解释|说明|如何|怎么|示例|教程|什么是|介绍)/i
+const terminalExplicitActionPattern = /(?:帮我|请|替我|为我|我想|直接|现在|运行|执行|调用|查看|检查|获取|在终端|命令行|run|execute|inspect|check|show)/i
+const terminalReadOperationPattern = /\b(?:git\s+(?:status|diff(?:\s+--stat)?|branch|log|show|--version)|npm\s+--version|pnpm\s+--version|yarn\s+--version|cargo\s+--version)\b/i
+
+export function isTerminalExecutionRequest(text: string) {
+  if (!terminalLexicalPattern.test(text)) return false
+
+  // Requests to write or explain a command must stay in the writing path. An
+  // explicit adjacent execution verb still wins (for example, "帮我写并运行").
+  const explicitExecution = /(?:帮我|请|替我|为我)\s*(?:直接)?(?:运行|执行|调用|查看|检查|获取)/i.test(text)
+  if (terminalCompositionPattern.test(text) && !explicitExecution) return false
+
+  return terminalExplicitActionPattern.test(text) || terminalReadOperationPattern.test(text)
+}
+
 const workAssistantPattern = /(?:文件|文件夹|目录|下载|桌面|磁盘|内存|CPU|应用|软件|打开网址|打开链接|定位文件|扫描|整理资料|归档|移动|重命名|复制|删除|电脑状态|操控电脑|控制电脑|操作电脑|鼠标|键盘|截图|屏幕|downloads?|folders?|files?|desktop|disk|memory|scan|open\s+(?:app|url|file)|rename|move|organize)/i
 const browserPattern = /(?:网页|网站|浏览器|标签页|链接内容|页面|表单|字段|点击|填写|下载网页|提交表单|web|website|browser|tab|page|form|field|click|fill|submit|download)/i
 const writingDomainPattern = /(?:写作|撰写|编写|续写|写(?:一|篇|个|份|封|段|出|作|好|成|报告|文章|文案|小说|总结)|起草|文章|报告|总结|润色|改写|小说|章节|文案|正文|write|draft|article|report|rewrite)/i
 
 function inferDomain(text: string): SecretaryTaskDomain {
-  const work = workAssistantPattern.test(text)
-  const browser = browserPattern.test(text)
+  const browserApplication = browserApplicationPattern.test(text)
+  const work = workAssistantPattern.test(text) || browserApplication || isTerminalExecutionRequest(text)
+  const browser = browserPattern.test(text) && !browserApplication
   const writing = writingDomainPattern.test(text)
   if ((work || browser) && writing) return 'mixed'
   // Browser work takes precedence over the broad local-work patterns. For
@@ -85,7 +103,7 @@ const platformPatterns = [
 ]
 
 const conversationalShortcutPattern = /^(?:你好|您好|嗨|嗨嗨|哈喽|hello|hi|hey|在吗|有人吗|早上好|下午好|晚上好|晚安|谢谢|谢谢你|多谢|好的|好呀|好吧|收到|明白了|了解了|嗯|嗯嗯|哈哈|哈哈哈|再见|你是谁|你叫什么|你能做什么|how are you|who are you)[!！。,.，?？~～\s]*$/i
-const capabilityQuestionPattern = /(?:能不能|可不可以|是否可以|可以不可以|能否|会不会|可以).{0,18}(?:操控|控制|操作|使用|打开|管理).{0,18}(?:电脑|浏览器|桌面|应用|文件|网页|网站)/i
+const capabilityQuestionPattern = /^(?:你|您)?\s*(?:能不能|可不可以|是否可以|可以不可以|能否|会不会|可以|可否)\s*(?:直接)?\s*(?:操控|控制|操作|使用|访问)\s*(?:电脑|浏览器|桌面|应用|文件|网页|网站|终端|命令行)\s*(?:吗|呢)?\s*[!！。,.，?？~～\s]*$/i
 
 /**
  * Short social turns should take one conversational model call. They must not

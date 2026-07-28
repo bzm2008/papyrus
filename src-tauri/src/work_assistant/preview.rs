@@ -297,12 +297,50 @@ mod tests {
         assert_eq!(error.message, "native file preview is blocked");
         assert!(!error.message.contains(r"C:\Users\Administrator"));
     }
+
+    #[test]
+    fn file_preview_creation_reclaims_expired_entries_before_reserving_a_slot() {
+        const MAX_PENDING_PREVIEWS: usize = 256;
+
+        let directory = test_dir();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("source.txt"), "source").unwrap();
+        let state = state(root(&directory), &directory);
+        let now = unix_seconds();
+        {
+            let mut previews = state.previews.lock().unwrap();
+            for index in 0..MAX_PENDING_PREVIEWS {
+                let id = format!("expired-preview-{index}");
+                previews.insert(
+                    id.clone(),
+                    StoredPreview {
+                        id,
+                        run: "expired-run".into(),
+                        tool_call_id: String::new(),
+                        revision: index as u64,
+                        risk: "reversible".into(),
+                        scope: vec!["root".into()],
+                        payload: serde_json::json!({ "expired": true }),
+                        expires: now.saturating_sub(1),
+                    },
+                );
+            }
+        }
+
+        let preview = create_batch_preview(&state, request(ConflictPolicy::Skip)).unwrap();
+        let previews = state.previews.lock().unwrap();
+        assert_eq!(previews.len(), 1);
+        assert!(previews.contains_key(&preview.preview_id));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 use crate::work_assistant::{
-    append_audit_entry, ApprovalChoice, ApprovalGrant, AssistantRiskLevel, AssistantToolPreview,
-    AuditEntry, AuthorizedRoot, BatchPreview, BatchPreviewRequest, ConflictPolicy,
-    FileOperationKind, FileOperationRequest, NativePreviewRequest, PathPolicy, StoredApproval,
-    StoredPreview, WorkAssistantError, WorkAssistantState,
+    append_audit_entry, reserve_approval_slot, reserve_preview_slot, ApprovalChoice, ApprovalGrant,
+    AssistantRiskLevel, AssistantToolPreview, AuditEntry, AuthorizedRoot, BatchPreview,
+    BatchPreviewRequest, ConflictPolicy, FileOperationKind, FileOperationRequest,
+    NativePreviewRequest, PathPolicy, StoredApproval, StoredPreview, WorkAssistantError,
+    WorkAssistantState,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -444,11 +482,13 @@ fn create_batch_preview_with_tool_call(
     let payload = serde_json::to_value(&request).map_err(|error| {
         WorkAssistantError::protocol(format!("could not serialize preview request: {error}"))
     })?;
-    state
-        .previews
-        .lock()
-        .map_err(|_| WorkAssistantError::protocol("workspace previews lock is unavailable"))?
-        .insert(
+    {
+        let mut previews = state
+            .previews
+            .lock()
+            .map_err(|_| WorkAssistantError::protocol("workspace previews lock is unavailable"))?;
+        reserve_preview_slot(&mut previews, now)?;
+        previews.insert(
             preview.preview_id.clone(),
             StoredPreview {
                 id: preview.preview_id.clone(),
@@ -461,6 +501,7 @@ fn create_batch_preview_with_tool_call(
                 expires: preview.expires,
             },
         );
+    }
     append_audit_entry(
         state,
         &AuditEntry::new(
@@ -517,16 +558,19 @@ pub fn approve_batch_preview(
     }
 
     let token = Uuid::new_v4().to_string();
+    let now = unix_seconds();
     let grant = ApprovalGrant {
         token: token.clone(),
         preview_id: preview.id.clone(),
-        expires: unix_seconds().saturating_add(APPROVAL_LIFETIME_SECONDS),
+        expires: now.saturating_add(APPROVAL_LIFETIME_SECONDS),
     };
-    state
-        .approvals
-        .lock()
-        .map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?
-        .insert(
+    {
+        let mut approvals = state
+            .approvals
+            .lock()
+            .map_err(|_| WorkAssistantError::protocol("workspace approvals lock is unavailable"))?;
+        reserve_approval_slot(&mut approvals, now)?;
+        approvals.insert(
             token.clone(),
             StoredApproval {
                 token,
@@ -540,6 +584,7 @@ pub fn approve_batch_preview(
                 used_count: 0,
             },
         );
+    }
     Ok(grant)
 }
 

@@ -1,19 +1,24 @@
 import {
   approveWorkAssistantAction,
   cancelWorkAssistantRun,
+  approveNativeAssistantAction,
+  executeNativeAssistantAction,
   executeWorkAssistantAction,
   getWorkAssistantDesktopStatus,
   inspectWorkAssistantFile,
+  listAvailableApplications,
   launchRegisteredApplication,
   listWorkAssistantRoots,
   openWorkAssistantFile,
   openWorkAssistantUrl,
+  previewNativeAssistantAction,
   previewWorkAssistantAction,
   revealWorkAssistantFile,
   scanWorkAssistantDownloads,
   scanWorkAssistantRoot,
   searchWorkAssistantFiles,
   runTerminalCommand,
+  type TerminalRunRequest,
 } from './workAssistantClient'
 import {
   approveBrowserAction,
@@ -35,6 +40,7 @@ import type {
   AssistantToolResult,
   WorkAssistantEvent,
 } from './workAssistantProtocol'
+import { WorkAssistantDeltaBuffer } from './workAssistantEventBuffer'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
 
 type PendingApproval = {
@@ -56,12 +62,9 @@ const webExtractCache = new Map<string, { result: WebExtractResult; expiresAt: n
 const webArchivePreviewCache = new Map<string, { result: WebExtractResult; preview: WebArchivePreview }>()
 const failureCounts = new Map<string, number>()
 
-const queuedDeltas = new Map<string, { runId: string; messageId: string; text: string; at: number }>()
-let deltaTimer: ReturnType<typeof setTimeout> | undefined
-let deltaFrame: number | undefined
-
 const now = () => Date.now()
 const dispatch = (event: WorkAssistantEvent) => useWorkAssistantStore.getState().dispatch(event)
+const deltaBuffer = new WorkAssistantDeltaBuffer(dispatch)
 
 export function resolveAssistantApproval(id: string, choice: AssistantApprovalChoice) {
   const pending = pendingApprovals.get(id)
@@ -86,6 +89,33 @@ function waitForApproval(request: AssistantApprovalRequest, signal?: AbortSignal
       abort: () => signal?.removeEventListener('abort', onAbort),
     })
   })
+}
+
+function throwIfRunAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new DOMException('Run cancelled', 'AbortError')
+}
+
+/**
+ * Keep the native cancellation state alive after an approval promise resolves.
+ * The approval listener is intentionally removed on resolve, so it cannot be
+ * the only cancellation boundary between approval and execution.
+ */
+function bindNativeRunCancellation(runId: string, signal?: AbortSignal) {
+  let cancellationRequested = false
+  const requestCancellation = () => {
+    if (cancellationRequested) return
+    cancellationRequested = true
+    void cancelWorkAssistantRun(runId).catch(() => undefined)
+  }
+  const onAbort = () => requestCancellation()
+
+  if (signal?.aborted) requestCancellation()
+  else signal?.addEventListener('abort', onAbort, { once: true })
+
+  return {
+    requestCancellation,
+    dispose: () => signal?.removeEventListener('abort', onAbort),
+  }
 }
 
 function stableArguments(value: Record<string, unknown>) {
@@ -130,6 +160,65 @@ function sanitizedToolData(toolName: string, value: unknown): Record<string, unk
       capabilities: status.capabilities,
     }
   }
+  if (toolName === 'desktop_list_apps' && Array.isArray(value)) {
+    return {
+      applications: value.map((application) => {
+        const item = application && typeof application === 'object' ? application as Record<string, unknown> : {}
+        return { id: item.id, label: item.label, platform: item.platform, kind: item.kind }
+      }),
+    }
+  }
+  if (toolName === 'terminal_run') {
+    const terminal = value as Record<string, unknown>
+    const allowedOperations = new Set([
+      'git_status',
+      'git_diff_stat',
+      'git_branch',
+      'git_log',
+      'git_version',
+      'system_info',
+      'whoami',
+    ])
+    const program = typeof terminal.program === 'string' && allowedOperations.has(terminal.program)
+      ? terminal.program
+      : undefined
+    const diagnostic = terminal.diagnostic && typeof terminal.diagnostic === 'object'
+      ? terminal.diagnostic as Record<string, unknown>
+      : undefined
+    const safeDiagnostic: Record<string, unknown> = {}
+    for (const key of [
+      'kind',
+      'hasChanges',
+      'stagedFiles',
+      'unstagedFiles',
+      'untrackedFiles',
+      'filesChanged',
+      'linesAdded',
+      'linesDeleted',
+      'binaryFiles',
+      'recentCommitCount',
+      'historyLimitReached',
+      'attachedBranch',
+      'version',
+      'stderrPresent',
+    ]) {
+      const field = diagnostic?.[key]
+      if (typeof field === 'boolean' || typeof field === 'number') safeDiagnostic[key] = field
+      if (key === 'kind' && typeof field === 'string' && allowedOperations.has(field)) {
+        safeDiagnostic[key] = field
+      }
+      if (key === 'version' && typeof field === 'string' && /^\d+(?:\.\d+){0,3}$/.test(field)) {
+        safeDiagnostic[key] = field
+      }
+    }
+    return {
+      ...(program ? { program } : {}),
+      ...(typeof terminal.exitCode === 'number' ? { exitCode: terminal.exitCode } : {}),
+      ...(typeof terminal.truncated === 'boolean' ? { truncated: terminal.truncated } : {}),
+      ...(typeof terminal.durationMs === 'number' ? { durationMs: terminal.durationMs } : {}),
+      ...(Object.keys(safeDiagnostic).length > 0 ? { diagnostic: safeDiagnostic } : {}),
+    }
+  }
   return Array.isArray(value) ? { items: value } : value as Record<string, unknown>
 }
 
@@ -168,14 +257,21 @@ async function executeNativeTool(call: AssistantToolCall, signal?: AbortSignal):
     case 'file_inspect': return inspectWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'downloads_scan': return scanWorkAssistantDownloads(String(args.rootId ?? ''))
     case 'desktop_status': return getWorkAssistantDesktopStatus()
+    case 'desktop_list_apps': return listAvailableApplications()
     case 'desktop_open_url': return openWorkAssistantUrl(String(args.url ?? ''))
     case 'file_open': return openWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_reveal_file': return revealWorkAssistantFile(String(args.rootId ?? ''), String(args.path ?? ''))
     case 'desktop_open_app': return launchRegisteredApplication(String(args.appId ?? ''))
     case 'terminal_run': {
+      const operation = typeof args.operation === 'string' ? args.operation as TerminalRunRequest['operation'] : undefined
+      if (!operation) {
+        throw Object.assign(new Error('终端只接受固定的诊断操作。'), {
+          code: 'terminal_program_not_allowed',
+          recoverable: true,
+        })
+      }
       const result = await runTerminalCommand({
-        program: String(args.program ?? ''),
-        args: Array.isArray(args.args) ? args.args.map(String) : [],
+        operation,
         rootId: String(args.rootId ?? ''),
         cwd: typeof args.cwd === 'string' ? args.cwd : '',
       })
@@ -273,8 +369,10 @@ function resolveWebArchiveInput(call: AssistantToolCall): { result: WebExtractRe
 
 function syntheticPreview(call: AssistantToolCall, risk: AssistantToolPreview['risk']): AssistantToolPreview {
   const terminalCommand = call.name === 'terminal_run'
-    ? [String(call.arguments.program ?? ''), ...(Array.isArray(call.arguments.args) ? call.arguments.args.map(String) : [])]
-        .join(' ')
+    ? (typeof call.arguments.operation === 'string'
+      ? call.arguments.operation
+      : [String(call.arguments.program ?? ''), ...(Array.isArray(call.arguments.args) ? call.arguments.args.map(String) : [])]
+        .join(' '))
         .slice(0, 220)
     : ''
   return {
@@ -291,6 +389,14 @@ function syntheticPreview(call: AssistantToolCall, risk: AssistantToolPreview['r
   }
 }
 
+function requiresNativeApprovalToken(call: AssistantToolCall) {
+  return call.name === 'desktop_open_app'
+    || call.name === 'desktop_open_url'
+    || call.name === 'file_open'
+    || call.name === 'desktop_reveal_file'
+    || call.name === 'terminal_run'
+}
+
 export async function executeAssistantToolCall(input: ExecuteToolInput): Promise<AssistantToolResult> {
   const emit = input.emit ?? dispatch
   const call = { ...input.toolCall, runId: input.runId }
@@ -303,8 +409,9 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     return guarded
   }
 
+  const nativeCancellation = bindNativeRunCancellation(input.runId, input.signal)
   try {
-    if (input.signal?.aborted) throw new DOMException('Run cancelled', 'AbortError')
+    throwIfRunAborted(input.signal)
     let preview: AssistantToolPreview | undefined
 
     if (call.name === 'file_plan_batch') {
@@ -336,11 +443,22 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       webArchivePreviewCache.set(archivePreview.id, { result: archiveInput.result, preview: archivePreview })
     } else if (manifest.executor === 'browser_bridge' && manifest.defaultRisk !== 'read') {
       preview = await previewBrowserBridgeAction(call)
+    } else if (manifest.executor === 'native' && requiresNativeApprovalToken(call)) {
+      // Do not let a frontend-only preview stand in for an external process
+      // launch. The native layer stores the validated action and later accepts
+      // only its opaque id plus a one-time approval token.
+      preview = await previewNativeAssistantAction({
+        runId: input.runId,
+        toolCallId: call.id,
+        toolName: call.name,
+        arguments: call.arguments,
+      })
     } else if (manifest.defaultRisk !== 'read') {
       preview = syntheticPreview(call, manifest.defaultRisk)
     }
 
     if (preview) {
+      throwIfRunAborted(input.signal)
       const risk = effectiveRisk(manifest.defaultRisk, preview.risk)
       const request: AssistantApprovalRequest = {
         ...preview,
@@ -351,6 +469,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
       }
       emit({ type: 'approval.required', runId: input.runId, request, at: now() })
       const choice = await waitForApproval(request, input.signal)
+      throwIfRunAborted(input.signal)
       if (choice === 'deny') {
         if (manifest.executor === 'browser_bridge') {
           await rejectBrowserAction(preview.id, input.runId).catch(() => undefined)
@@ -362,7 +481,9 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
 
       emit({ type: 'tool.progress', runId: input.runId, toolCallId: call.id, message: '审批通过，正在执行', at: now() })
       if (call.name === 'file_apply_batch') {
+        throwIfRunAborted(input.signal)
         const grant = await approveWorkAssistantAction(preview.id, input.runId, choice)
+        throwIfRunAborted(input.signal)
         const data = await executeWorkAssistantAction(preview.id, grant.token)
         const failed = data.failed.length > 0
         const result = {
@@ -376,6 +497,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         return result
       }
       if (manifest.executor === 'project') {
+        throwIfRunAborted(input.signal)
         const pending = webArchivePreviewCache.get(preview.id)
         if (!pending) throw new Error('网页归档预览不可用，请重新提取。')
         const result = applyWebArchive(pending.result, pending.preview)
@@ -384,7 +506,9 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         return result
       }
       if (manifest.executor === 'browser_bridge') {
+        throwIfRunAborted(input.signal)
         const grant = await approveBrowserAction(preview.id, input.runId)
+        throwIfRunAborted(input.signal)
         const data = await executeApprovedBrowserAction({
           previewId: grant.previewId,
           approvalToken: grant.token,
@@ -403,8 +527,30 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
         emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
         return result
       }
+      if (manifest.executor === 'native' && requiresNativeApprovalToken(call)) {
+        throwIfRunAborted(input.signal)
+        const grant = await approveNativeAssistantAction(preview.id, input.runId, choice)
+        throwIfRunAborted(input.signal)
+        const data = await executeNativeAssistantAction(grant.previewId, grant.token)
+        const result = data?.ok === false
+          ? {
+              ok: false as const,
+              summary: data.summary || '本地操作被安全策略阻止。',
+              errorCode: data.errorCode || 'blocked',
+              recoverable: data.recoverable !== false,
+              data: sanitizedToolData(call.name, data.data),
+            }
+          : {
+              ok: true as const,
+              summary: data.summary || resultSummary(data.data),
+              data: sanitizedToolData(call.name, data.data),
+            }
+        emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result, at: now() })
+        return result
+      }
     }
 
+    throwIfRunAborted(input.signal)
     const data = manifest.executor === 'browser_bridge'
       ? await executeBrowserBridgeTool(call)
       : await executeNativeTool(call, input.signal)
@@ -424,7 +570,7 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     return result
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      await cancelWorkAssistantRun(input.runId).catch(() => undefined)
+      nativeCancellation.requestCancellation()
       const cancelled = { ok: false, summary: '运行已取消。', errorCode: 'cancelled', recoverable: true }
       emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: cancelled, at: now() })
       return cancelled
@@ -433,55 +579,28 @@ export async function executeAssistantToolCall(input: ExecuteToolInput): Promise
     const failed = safeToolFailure(error)
     emit({ type: 'tool.completed', runId: input.runId, toolCallId: call.id, result: failed, at: now() })
     return failed
+  } finally {
+    nativeCancellation.dispose()
   }
-}
-
-function flushQueuedItem(key: string) {
-  const queued = queuedDeltas.get(key)
-  if (!queued) return
-  queuedDeltas.delete(key)
-  dispatch({ type: 'message.delta', runId: queued.runId, messageId: queued.messageId, delta: queued.text, at: queued.at })
 }
 
 export function flushRunDeltas(runId: string) {
-  for (const [key, queued] of queuedDeltas) if (queued.runId === runId) flushQueuedItem(key)
+  deltaBuffer.flushRun(runId)
 }
 
 export function flushAllWorkAssistantDeltas() {
-  for (const key of [...queuedDeltas.keys()]) flushQueuedItem(key)
-  if (deltaTimer) clearTimeout(deltaTimer)
-  if (deltaFrame !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(deltaFrame)
-  deltaTimer = undefined
-  deltaFrame = undefined
-}
-
-function scheduleDeltaFlush() {
-  if (deltaTimer || deltaFrame !== undefined) return
-  const startedAt = now()
-  const flushAfterFloor = () => {
-    const remaining = Math.max(0, 40 - (now() - startedAt))
-    deltaTimer = setTimeout(() => {
-      deltaTimer = undefined
-      deltaFrame = undefined
-      flushAllWorkAssistantDeltas()
-    }, remaining)
-  }
-  if (typeof requestAnimationFrame === 'function') deltaFrame = requestAnimationFrame(flushAfterFloor)
-  else flushAfterFloor()
+  deltaBuffer.flushAll()
 }
 
 export function queueWorkAssistantDelta(event: Extract<WorkAssistantEvent, { type: 'message.delta' }>) {
-  const key = `${event.runId}:${event.messageId}`
-  const queued = queuedDeltas.get(key) ?? { runId: event.runId, messageId: event.messageId, text: '', at: event.at }
-  queued.text += event.delta
-  queued.at = event.at
-  queuedDeltas.set(key, queued)
-  scheduleDeltaFlush()
+  deltaBuffer.queue(event)
 }
 
 export function dispatchOrderedWorkAssistantEvent(event: WorkAssistantEvent) {
   if (event.type === 'message.delta') queueWorkAssistantDelta(event)
   else {
+    // Status, tool, approval, and terminal transitions must never overtake
+    // already-visible assistant text for the same run.
     flushRunDeltas(event.runId)
     dispatch(event)
   }

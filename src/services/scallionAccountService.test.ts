@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getScallionQuotaDisplay,
+  getScallionSendBlockReason,
   normalizeQuota,
   quotaFromUser,
   refreshScallionModels,
@@ -149,6 +150,40 @@ describe('normalizeQuota', () => {
         autoMonthlyRemaining: 299,
         autoDailyRemaining: 9,
         externalApi: 'deeper',
+      }),
+    )
+  })
+
+  it('preserves Free Auto daily-unlimited quota fields from the new gateway contract', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 504,
+        plan: {
+          key: 'free',
+          name: 'Free',
+          manual_models: [],
+          auto_models: ['agnes-2.0-flash'],
+          auto_monthly_calls: 300,
+          auto_daily_calls: null,
+        },
+        auto: {
+          monthly_limit: 300,
+          daily_limit: null,
+          daily_unlimited: true,
+          monthly_used: 12,
+          daily_used: 99,
+          monthly_remaining: 288,
+          daily_remaining: null,
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        planKey: 'free',
+        autoMonthlyCalls: 300,
+        autoDailyCalls: null,
+        autoDailyUsed: 99,
+        autoDailyRemaining: null,
+        autoDailyUnlimited: true,
       }),
     )
   })
@@ -327,6 +362,79 @@ describe('getScallionQuotaDisplay', () => {
       },
       syncStatus: 'stale',
     })).toEqual({ value: 9, source: 'cached', status: 'stale' })
+  })
+})
+
+describe('getScallionSendBlockReason', () => {
+  const baseQuota = {
+    remaining: 20,
+    pointsBalance: 20,
+    planKey: 'free',
+    unit: '积分',
+    isMember: false,
+    memberPriceLabel: '',
+    upgradeUrl: '',
+    topUpUrl: '',
+    updatedAt: 1,
+  }
+
+  it('blocks only a fresh Auto monthly exhaustion and explains that nothing was sent', () => {
+    expect(getScallionSendBlockReason({
+      token: 'jwt',
+      syncStatus: 'ready',
+      routingMode: 'auto',
+      isScallionProvider: true,
+      quota: { ...baseQuota, autoMonthlyCalls: 300, autoMonthlyUsed: 300, autoMonthlyRemaining: 0, autoDailyUnlimited: true, autoDailyRemaining: null },
+    })).toEqual(expect.objectContaining({
+      code: 'auto_quota_exhausted',
+      message: expect.stringContaining('本条消息未发送'),
+    }))
+  })
+
+  it('does not treat Free daily usage as a send block when daily_unlimited is true', () => {
+    expect(getScallionSendBlockReason({
+      token: 'jwt',
+      syncStatus: 'ready',
+      routingMode: 'auto',
+      isScallionProvider: true,
+      quota: { ...baseQuota, autoMonthlyCalls: 300, autoMonthlyRemaining: 1, autoDailyCalls: null, autoDailyRemaining: null, autoDailyUnlimited: true },
+    })).toBeUndefined()
+  })
+
+  it('treats a fresh Free entitlement as Auto even if an old UI cache still says manual', () => {
+    expect(getScallionSendBlockReason({
+      token: 'jwt',
+      syncStatus: 'ready',
+      routingMode: 'manual',
+      isScallionProvider: true,
+      quota: {
+        ...baseQuota,
+        remaining: 0,
+        pointsBalance: 0,
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoMonthlyRemaining: 0,
+        autoDailyUnlimited: true,
+      },
+    })).toEqual(expect.objectContaining({
+      code: 'auto_quota_exhausted',
+      message: expect.stringContaining('本月 Auto 额度'),
+    }))
+  })
+
+  it('keeps paid daily Auto limits and ignores a stale cached zero', () => {
+    const quota = { ...baseQuota, planKey: 'briefly', autoMonthlyCalls: 1000, autoMonthlyRemaining: 90, autoDailyCalls: 30, autoDailyRemaining: 0 }
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'ready', routingMode: 'auto', isScallionProvider: true, quota }))
+      .toEqual(expect.objectContaining({ message: expect.stringContaining('今日 Auto 额度') }))
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'stale', routingMode: 'auto', isScallionProvider: true, quota })).toBeUndefined()
+  })
+
+  it('blocks a fresh manual request with no points but not Auto', () => {
+    const quota = { ...baseQuota, remaining: 0, pointsBalance: 0 }
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'ready', routingMode: 'manual', isScallionProvider: true, quota }))
+      .toEqual(expect.objectContaining({ code: 'quota_exhausted', message: expect.stringContaining('积分余额不足') }))
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'ready', routingMode: 'auto', isScallionProvider: true, quota })).toBeUndefined()
   })
 })
 

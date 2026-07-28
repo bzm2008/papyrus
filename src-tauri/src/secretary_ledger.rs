@@ -11,7 +11,7 @@ use std::{
 use tauri::Manager;
 use uuid::Uuid;
 
-pub const SECRETARY_LEDGER_SCHEMA_VERSION: i64 = 6;
+pub const SECRETARY_LEDGER_SCHEMA_VERSION: i64 = 7;
 const LEGACY_PROJECT_ID: &str = "__papyrus_legacy__";
 const MAX_LIST_RESULTS: u32 = 100;
 const MAX_LEGACY_IMPORT_RECORDS: usize = 100;
@@ -21,6 +21,14 @@ const MAX_SAFE_JSON_DEPTH: usize = 12;
 const MAX_SAFE_JSON_KEYS: usize = 100;
 const MAX_SAFE_JSON_NODES: usize = 1_000;
 const MAX_TASK_PROGRESS_EVENTS: usize = 8;
+const SCHEDULER_LEASE_FRESHNESS_MS: i64 = 10 * 60 * 1_000;
+const RECOVERY_REVIEW_EVENT_TYPE: &str = "recovery_review_required";
+const RECOVERY_RUNNING_SUMMARY: &str =
+    "上次运行未正常结束，执行结果尚未确认。请先核对当前状态，再决定是否继续。";
+const RECOVERY_RUNNING_NEXT_STEP: &str = "先重新核对当前状态和已完成结果，再决定下一步。";
+const RECOVERY_APPROVAL_SUMMARY: &str =
+    "上次等待的审批已失效。旧预览、授权和一次性令牌均不会恢复；请重新核对当前状态并生成新的预览。";
+const RECOVERY_APPROVAL_NEXT_STEP: &str = "先重新核对当前状态，再生成新的预览并等待新的确认。";
 
 #[derive(Clone, Debug)]
 pub struct SecretaryLedger {
@@ -342,6 +350,7 @@ pub struct LegacyImportResult {
 #[derive(Debug)]
 pub enum LedgerError {
     InvalidInput,
+    TaskBusy,
     Unavailable,
 }
 
@@ -349,6 +358,7 @@ impl LedgerError {
     pub fn safe_message(&self) -> &'static str {
         match self {
             Self::InvalidInput => "秘书账本输入无效",
+            Self::TaskBusy => "另一个秘书任务仍在进行，请先在项目现场完成、暂停或复核它。",
             Self::Unavailable => "秘书账本暂不可用",
         }
     }
@@ -825,8 +835,13 @@ impl SecretaryLedger {
         let existing =
             find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
         authorize_project_write(&access, Some(&existing.project_id))?;
+        let previous_status = existing.status.clone();
         let task = updated_task_from_input(existing, input)?;
+        ensure_task_transition(&previous_status, &task.status)?;
         update_task_record(&transaction, &task)?;
+        if is_releasing_task_status(&task.status) {
+            release_global_scheduler_lease(&transaction, &task.id)?;
+        }
         transaction.commit()?;
         Ok(task)
     }
@@ -858,6 +873,9 @@ impl SecretaryLedger {
         authorize_project_write(&access, Some(&task.project_id))?;
         ensure_task_project(&transaction, &task.project_id, false)?;
         insert_task(&transaction, &task)?;
+        if !acquire_global_scheduler_lease(&transaction, &task.id)? {
+            return Err(LedgerError::TaskBusy);
+        }
         let events = events
             .into_iter()
             .map(|event| append_task_event(&transaction, &task, event))
@@ -906,6 +924,9 @@ impl SecretaryLedger {
         if !matches!(existing.status.as_str(), "queued" | "paused") {
             return Ok(None);
         }
+        if !acquire_global_scheduler_lease(&transaction, &id)? {
+            return Err(LedgerError::TaskBusy);
+        }
         let task = updated_task_from_input(existing, task)?;
         if !update_task_record_if_claimable(&transaction, &task)? {
             return Ok(None);
@@ -919,6 +940,96 @@ impl SecretaryLedger {
         Ok(Some(SecretaryTaskProgress {
             task,
             events,
+            checkpoint,
+        }))
+    }
+
+    /// Converts an interrupted in-project run into a user-reviewed pause. This deliberately
+    /// does not restore in-memory approvals, previews, browser observations, or one-time
+    /// capabilities: a resumed task must inspect the current state and obtain fresh approval.
+    pub fn reconcile_recovery(
+        &self,
+        access: &ProjectAccess,
+        id: &str,
+    ) -> Result<Option<SecretaryTaskProgress>, LedgerError> {
+        let id = normalize_identifier(id.to_string())?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let access = validate_project_access_in_transaction(&transaction, access)?;
+        let existing =
+            find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
+        authorize_project_write(&access, Some(&existing.project_id))?;
+
+        // A task still held by a live scheduler is not a recovery candidate.
+        // Only a lease older than the bounded heartbeat window may be
+        // converted into a paused review checkpoint.
+        if scheduler_lease_is_fresh(&transaction, &id)? {
+            return Err(LedgerError::TaskBusy);
+        }
+
+        let previous_status = existing.status.clone();
+        let (summary, next_step, payload) = match previous_status.as_str() {
+            "running" => (
+                RECOVERY_RUNNING_SUMMARY,
+                RECOVERY_RUNNING_NEXT_STEP,
+                serde_json::json!({
+                    "kind": RECOVERY_REVIEW_EVENT_TYPE,
+                    "previousStatus": "running",
+                    "resultUnconfirmed": true,
+                    "summary": RECOVERY_RUNNING_SUMMARY,
+                }),
+            ),
+            "awaiting_approval" => (
+                RECOVERY_APPROVAL_SUMMARY,
+                RECOVERY_APPROVAL_NEXT_STEP,
+                serde_json::json!({
+                    "approvalExpired": true,
+                    "kind": RECOVERY_REVIEW_EVENT_TYPE,
+                    "previousStatus": "awaiting_approval",
+                    "summary": RECOVERY_APPROVAL_SUMMARY,
+                }),
+            ),
+            _ => return Ok(None),
+        };
+
+        let task = updated_task_from_input(
+            existing,
+            UpdateTaskInput {
+                title: None,
+                request: None,
+                status: Some("paused".into()),
+                priority: None,
+                schedule_at: TaskFieldPatch::Clear,
+                next_step: TaskFieldPatch::Set(next_step.into()),
+                public_plan: TaskFieldPatch::Unchanged,
+                summary: TaskFieldPatch::Set(summary.into()),
+            },
+        )?;
+        if !update_task_record_if_status(&transaction, &task, &previous_status)? {
+            return Ok(None);
+        }
+
+        let event = append_task_event(
+            &transaction,
+            &task,
+            RecordEventInput {
+                event_type: RECOVERY_REVIEW_EVENT_TYPE.into(),
+                payload: payload.clone(),
+            },
+        )?;
+        let checkpoint = append_task_checkpoint(
+            &transaction,
+            &task,
+            SaveCheckpointInput {
+                context_snapshot: payload,
+                next_step: next_step.into(),
+            },
+        )?;
+        release_global_scheduler_lease(&transaction, &task.id)?;
+        transaction.commit()?;
+        Ok(Some(SecretaryTaskProgress {
+            task,
+            events: vec![event],
             checkpoint,
         }))
     }
@@ -945,13 +1056,18 @@ impl SecretaryLedger {
         let existing =
             find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
         authorize_project_write(&access, Some(&existing.project_id))?;
+        let previous_status = existing.status.clone();
         let task = updated_task_from_input(existing, task_input)?;
+        ensure_task_transition(&previous_status, &task.status)?;
         update_task_record(&transaction, &task)?;
         let events = events
             .into_iter()
             .map(|event| append_task_event(&transaction, &task, event))
             .collect::<Result<Vec<_>, _>>()?;
         let checkpoint = append_task_checkpoint(&transaction, &task, checkpoint)?;
+        if is_releasing_task_status(&task.status) {
+            release_global_scheduler_lease(&transaction, &task.id)?;
+        }
         transaction.commit()?;
         Ok(SecretaryTaskProgress {
             task,
@@ -968,6 +1084,7 @@ impl SecretaryLedger {
         let existing =
             find_task_in_transaction(&transaction, &id)?.ok_or(LedgerError::InvalidInput)?;
         authorize_project_write(&access, Some(&existing.project_id))?;
+        release_global_scheduler_lease(&transaction, &existing.id)?;
         transaction.execute(
             "
             DELETE FROM secretary_fts
@@ -1308,6 +1425,15 @@ pub fn secretary_ledger_claim_task(
 }
 
 #[tauri::command]
+pub fn secretary_ledger_reconcile_recovery(
+    app: tauri::AppHandle,
+    access: ProjectAccess,
+    id: String,
+) -> Result<Option<SecretaryTaskProgress>, String> {
+    with_app_ledger(app, |ledger| ledger.reconcile_recovery(&access, &id))
+}
+
+#[tauri::command]
 pub fn secretary_ledger_persist_task_progress(
     app: tauri::AppHandle,
     access: ProjectAccess,
@@ -1604,6 +1730,27 @@ fn apply_migrations(connection: &mut Connection) -> Result<(), LedgerError> {
         )?;
         transaction.execute(
             "INSERT INTO secretary_schema_migrations(version, applied_at) VALUES (6, unixepoch())",
+            [],
+        )?;
+    }
+    let seventh_migration_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM secretary_schema_migrations WHERE version = 7)",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    if seventh_migration_applied == 0 {
+        transaction.execute_batch(
+            "
+            CREATE TABLE secretary_scheduler_lease (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                task_id TEXT NOT NULL,
+                acquired_at INTEGER NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES secretary_tasks(id) ON DELETE CASCADE
+            );
+            ",
+        )?;
+        transaction.execute(
+            "INSERT INTO secretary_schema_migrations(version, applied_at) VALUES (7, unixepoch())",
             [],
         )?;
     }
@@ -1905,6 +2052,34 @@ fn normalize_task_status(value: String) -> Result<String, LedgerError> {
     }
 }
 
+/// Task status changes are part of the persistence safety boundary. In
+/// particular, a completed task must never become running through a generic
+/// update, because that would bypass the claim/recovery paths and could make
+/// stale work appear live again.
+fn ensure_task_transition(previous: &str, next: &str) -> Result<(), LedgerError> {
+    let allowed = previous == next
+        || matches!(
+            (previous, next),
+            ("queued", "paused" | "cancelled")
+                | ("paused", "queued" | "cancelled")
+                | (
+                    "running",
+                    "awaiting_approval" | "paused" | "completed" | "failed" | "cancelled"
+                )
+                | (
+                    "awaiting_approval",
+                    "running" | "paused" | "failed" | "cancelled"
+                )
+                | ("failed", "queued" | "cancelled")
+                | ("cancelled", "queued")
+        );
+    if allowed {
+        Ok(())
+    } else {
+        Err(LedgerError::InvalidInput)
+    }
+}
+
 fn validate_priority(priority: i64) -> Result<(), LedgerError> {
     if !(1..=5).contains(&priority) {
         return Err(LedgerError::InvalidInput);
@@ -2026,6 +2201,132 @@ fn update_task_record_if_claimable(
     }
     index_task(transaction, task)?;
     Ok(true)
+}
+
+fn update_task_record_if_status(
+    transaction: &Transaction<'_>,
+    task: &SecretaryTask,
+    expected_status: &str,
+) -> Result<bool, LedgerError> {
+    let changed = transaction.execute(
+        "
+        UPDATE secretary_tasks
+        SET title = ?3, request = ?4, status = ?5, priority = ?6, schedule_at = ?7,
+            next_step = ?8, public_plan = ?9, summary = ?10, updated_at = ?11
+        WHERE id = ?1 AND project_id = ?2 AND status = ?12
+        ",
+        params![
+            task.id,
+            task.project_id,
+            task.title,
+            task.request,
+            task.status,
+            task.priority,
+            task.schedule_at,
+            task.next_step,
+            task.public_plan,
+            task.summary,
+            task.updated_at,
+            expected_status,
+        ],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    if changed != 1 {
+        return Err(LedgerError::Unavailable);
+    }
+    index_task(transaction, task)?;
+    Ok(true)
+}
+
+const GLOBAL_SCHEDULER_LEASE_ID: i64 = 1;
+
+fn is_releasing_task_status(status: &str) -> bool {
+    matches!(status, "paused" | "completed" | "failed" | "cancelled")
+}
+
+/// The lease is intentionally a single SQLite row rather than an in-memory flag. This keeps
+/// separate windows and scheduler instances from starting different tasks at the same time.
+/// A lease held by a terminal/missing task is stale and may be replaced in the same transaction;
+/// a live or approval-waiting task blocks the new start until the user reviews it.
+fn acquire_global_scheduler_lease(
+    transaction: &Transaction<'_>,
+    task_id: &str,
+) -> Result<bool, LedgerError> {
+    let holder = transaction
+        .query_row(
+            "SELECT task_id, acquired_at FROM secretary_scheduler_lease WHERE id = ?1",
+            params![GLOBAL_SCHEDULER_LEASE_ID],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?;
+
+    match holder {
+        None => {
+            transaction.execute(
+                "INSERT INTO secretary_scheduler_lease(id, task_id, acquired_at) VALUES (?1, ?2, ?3)",
+                params![GLOBAL_SCHEDULER_LEASE_ID, task_id, unix_millis()],
+            )?;
+            Ok(true)
+        }
+        Some((holder, _acquired_at)) if holder == task_id => Ok(true),
+        Some((holder, acquired_at)) => {
+            let status = transaction
+                .query_row(
+                    "SELECT status FROM secretary_tasks WHERE id = ?1",
+                    params![holder],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if matches!(status.as_deref(), Some("running" | "awaiting_approval"))
+                && is_fresh_scheduler_lease(acquired_at, unix_millis())
+            {
+                return Ok(false);
+            }
+
+            transaction.execute(
+                "DELETE FROM secretary_scheduler_lease WHERE id = ?1 AND task_id = ?2",
+                params![GLOBAL_SCHEDULER_LEASE_ID, holder],
+            )?;
+            transaction.execute(
+                "INSERT INTO secretary_scheduler_lease(id, task_id, acquired_at) VALUES (?1, ?2, ?3)",
+                params![GLOBAL_SCHEDULER_LEASE_ID, task_id, unix_millis()],
+            )?;
+            Ok(true)
+        }
+    }
+}
+
+fn scheduler_lease_is_fresh(
+    transaction: &Transaction<'_>,
+    task_id: &str,
+) -> Result<bool, LedgerError> {
+    let acquired_at = transaction
+        .query_row(
+            "SELECT acquired_at FROM secretary_scheduler_lease WHERE id = ?1 AND task_id = ?2",
+            params![GLOBAL_SCHEDULER_LEASE_ID, task_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(acquired_at
+        .map(|value| is_fresh_scheduler_lease(value, unix_millis()))
+        .unwrap_or(false))
+}
+
+fn is_fresh_scheduler_lease(acquired_at: i64, now: i64) -> bool {
+    acquired_at >= 0 && now >= acquired_at && now - acquired_at <= SCHEDULER_LEASE_FRESHNESS_MS
+}
+
+fn release_global_scheduler_lease(
+    transaction: &Transaction<'_>,
+    task_id: &str,
+) -> Result<(), LedgerError> {
+    transaction.execute(
+        "DELETE FROM secretary_scheduler_lease WHERE id = ?1 AND task_id = ?2",
+        params![GLOBAL_SCHEDULER_LEASE_ID, task_id],
+    )?;
+    Ok(())
 }
 
 fn validate_task_progress_events(events: &[RecordEventInput]) -> Result<(), LedgerError> {
@@ -3042,6 +3343,19 @@ mod tests {
         std::env::temp_dir().join(format!("papyrus-secretary-ledger-{}", Uuid::new_v4()))
     }
 
+    fn expire_scheduler_lease(directory: &Path) {
+        let connection = Connection::open(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        connection
+            .execute(
+                "UPDATE secretary_scheduler_lease SET acquired_at = ?1 WHERE id = ?2",
+                params![
+                    unix_millis() - SCHEDULER_LEASE_FRESHNESS_MS - 1,
+                    GLOBAL_SCHEDULER_LEASE_ID
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn initializes_a_versioned_fts5_ledger_and_reports_health() {
         let directory = test_dir();
@@ -3081,9 +3395,17 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let scheduler_lease_table: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'secretary_scheduler_lease'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(migrations, SECRETARY_LEDGER_SCHEMA_VERSION);
         assert_eq!(projects_table, "secretary_projects");
+        assert_eq!(scheduler_lease_table, "secretary_scheduler_lease");
 
         drop(connection);
         fs::remove_dir_all(directory).unwrap();
@@ -3410,6 +3732,53 @@ mod tests {
     }
 
     #[test]
+    fn rejects_reactivating_a_completed_task_through_generic_updates() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let mut completed_input = task_input("project-a");
+        completed_input.status = Some("completed".into());
+        let completed = ledger.create_task(&project_a, completed_input).unwrap();
+
+        assert!(matches!(
+            ledger.persist_task_progress(
+                &project_a,
+                &completed.id,
+                progress_input("unsafe_reactivate")
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert!(matches!(
+            ledger.update_task(
+                &project_a,
+                &completed.id,
+                UpdateTaskInput {
+                    title: None,
+                    request: None,
+                    status: Some("running".into()),
+                    priority: None,
+                    schedule_at: TaskFieldPatch::Unchanged,
+                    next_step: TaskFieldPatch::Unchanged,
+                    public_plan: TaskFieldPatch::Unchanged,
+                    summary: TaskFieldPatch::Unchanged,
+                },
+            ),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert_eq!(
+            ledger
+                .get_task(&project_a, &completed.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn atomically_claims_a_queued_task_for_only_one_concurrent_scheduler() {
         let directory = test_dir();
         let path = directory.join("papyrus-secretary.sqlite3");
@@ -3462,6 +3831,449 @@ mod tests {
             .load_latest_checkpoint(&project_a, &task.id)
             .unwrap()
             .is_some());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn holds_one_global_scheduler_lease_across_different_tasks_until_terminal_state() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let first = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        let second = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+
+        ledger
+            .claim_task(&project_a, &first.id, progress_input("first_started"))
+            .unwrap()
+            .expect("first task should acquire the scheduler lease");
+        assert!(matches!(
+            ledger.claim_task(&project_a, &second.id, progress_input("second_started")),
+            Err(LedgerError::TaskBusy)
+        ));
+
+        let mut completed = progress_input("first_completed");
+        completed.task.status = Some("completed".into());
+        completed.task.next_step = TaskFieldPatch::Set("任务已完成。".into());
+        ledger
+            .persist_task_progress(&project_a, &first.id, completed)
+            .expect("terminal progress should release the scheduler lease");
+
+        assert!(ledger
+            .claim_task(&project_a, &second.id, progress_input("second_started"))
+            .unwrap()
+            .is_some());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_reconcile_a_task_while_its_scheduler_lease_is_fresh() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+
+        ledger
+            .claim_task(&project_a, &task.id, progress_input("started"))
+            .unwrap()
+            .expect("queued task should be claimed before recovery is considered");
+
+        assert!(matches!(
+            ledger.reconcile_recovery(&project_a, &task.id),
+            Err(LedgerError::TaskBusy)
+        ));
+        assert_eq!(
+            ledger
+                .get_task(&project_a, &task.id)
+                .unwrap()
+                .expect("task must remain present")
+                .status,
+            "running"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovery_review_releases_a_stranded_scheduler_lease_before_replanning() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let first = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        let second = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+
+        ledger
+            .claim_task(&project_a, &first.id, progress_input("first_started"))
+            .unwrap()
+            .expect("first task should be running before recovery");
+        expire_scheduler_lease(&directory);
+        ledger
+            .reconcile_recovery(&project_a, &first.id)
+            .unwrap()
+            .expect("interrupted task should become a reviewed pause");
+
+        assert!(ledger
+            .claim_task(&project_a, &second.id, progress_input("second_started"))
+            .unwrap()
+            .is_some());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reconciles_a_running_task_to_paused_with_a_fixed_unconfirmed_result_review() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        ledger
+            .claim_task(&project_a, &task.id, progress_input("started"))
+            .unwrap()
+            .expect("queued task should be claimed");
+        expire_scheduler_lease(&directory);
+
+        let reconciled = ledger
+            .reconcile_recovery(&project_a, &task.id)
+            .unwrap()
+            .expect("a stale running task must require recovery review");
+
+        assert_eq!(reconciled.task.status, "paused");
+        assert_eq!(
+            reconciled.task.summary.as_deref(),
+            Some("上次运行未正常结束，执行结果尚未确认。请先核对当前状态，再决定是否继续。")
+        );
+        assert_eq!(reconciled.events.len(), 1);
+        assert_eq!(reconciled.events[0].event_type, "recovery_review_required");
+        assert_eq!(
+            reconciled.events[0].payload,
+            serde_json::json!({
+                "kind": "recovery_review_required",
+                "previousStatus": "running",
+                "resultUnconfirmed": true,
+                "summary": "上次运行未正常结束，执行结果尚未确认。请先核对当前状态，再决定是否继续。"
+            })
+        );
+        assert_eq!(
+            reconciled.checkpoint.context_snapshot,
+            serde_json::json!({
+                "kind": "recovery_review_required",
+                "previousStatus": "running",
+                "resultUnconfirmed": true,
+                "summary": "上次运行未正常结束，执行结果尚未确认。请先核对当前状态，再决定是否继续。"
+            })
+        );
+        assert_eq!(
+            reconciled.checkpoint.next_step,
+            "先重新核对当前状态和已完成结果，再决定下一步。"
+        );
+        assert_eq!(
+            ledger.list_events(&project_a, &task.id, 10).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            ledger
+                .load_latest_checkpoint(&project_a, &task.id)
+                .unwrap()
+                .expect("recovery review checkpoint should be durable"),
+            reconciled.checkpoint
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reconciles_awaiting_approval_by_expiring_the_old_approval_without_copying_its_data() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        ledger
+            .claim_task(&project_a, &task.id, progress_input("started"))
+            .unwrap()
+            .expect("queued task should be claimed before it can await approval");
+        let obsolete_preview_marker = "obsolete-approval-preview-marker";
+        ledger
+            .persist_task_progress(
+                &project_a,
+                &task.id,
+                PersistTaskProgressInput {
+                    task: UpdateTaskInput {
+                        title: None,
+                        request: None,
+                        status: Some("awaiting_approval".into()),
+                        priority: None,
+                        schedule_at: TaskFieldPatch::Clear,
+                        next_step: TaskFieldPatch::Set("等待旧审批".into()),
+                        public_plan: TaskFieldPatch::Unchanged,
+                        summary: TaskFieldPatch::Set("等待旧审批".into()),
+                    },
+                    events: vec![RecordEventInput {
+                        event_type: "approval_waiting".into(),
+                        payload: serde_json::json!({ "legacyPreview": obsolete_preview_marker }),
+                    }],
+                    checkpoint: SaveCheckpointInput {
+                        context_snapshot: serde_json::json!({
+                            "legacyPreview": obsolete_preview_marker,
+                            "legacyForm": "old-form-marker"
+                        }),
+                        next_step: "等待旧审批".into(),
+                    },
+                },
+            )
+            .unwrap();
+        expire_scheduler_lease(&directory);
+
+        let reconciled = ledger
+            .reconcile_recovery(&project_a, &task.id)
+            .unwrap()
+            .expect("a stale approval must be invalidated during recovery");
+
+        assert_eq!(reconciled.task.status, "paused");
+        assert_eq!(
+            reconciled.task.summary.as_deref(),
+            Some("上次等待的审批已失效。旧预览、授权和一次性令牌均不会恢复；请重新核对当前状态并生成新的预览。")
+        );
+        assert_eq!(
+            reconciled.events[0].payload,
+            serde_json::json!({
+                "approvalExpired": true,
+                "kind": "recovery_review_required",
+                "previousStatus": "awaiting_approval",
+                "summary": "上次等待的审批已失效。旧预览、授权和一次性令牌均不会恢复；请重新核对当前状态并生成新的预览。"
+            })
+        );
+        assert_eq!(
+            reconciled.checkpoint.context_snapshot,
+            serde_json::json!({
+                "approvalExpired": true,
+                "kind": "recovery_review_required",
+                "previousStatus": "awaiting_approval",
+                "summary": "上次等待的审批已失效。旧预览、授权和一次性令牌均不会恢复；请重新核对当前状态并生成新的预览。"
+            })
+        );
+        let stored_event = serde_json::to_string(&reconciled.events[0].payload).unwrap();
+        let stored_checkpoint =
+            serde_json::to_string(&reconciled.checkpoint.context_snapshot).unwrap();
+        assert!(!stored_event.contains(obsolete_preview_marker));
+        assert!(!stored_checkpoint.contains(obsolete_preview_marker));
+        assert!(!stored_event.contains("old-form-marker"));
+        assert!(!stored_checkpoint.contains("old-form-marker"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn leaves_nonrecoverable_or_terminal_task_statuses_unchanged() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let queued = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        let mut completed_input = task_input("project-a");
+        completed_input.status = Some("completed".into());
+        let completed = ledger.create_task(&project_a, completed_input).unwrap();
+
+        assert!(ledger
+            .reconcile_recovery(&project_a, &queued.id)
+            .unwrap()
+            .is_none());
+        assert!(ledger
+            .reconcile_recovery(&project_a, &completed.id)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            ledger
+                .get_task(&project_a, &queued.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "queued"
+        );
+        assert_eq!(
+            ledger
+                .get_task(&project_a, &completed.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert!(ledger
+            .list_events(&project_a, &queued.id, 10)
+            .unwrap()
+            .is_empty());
+        assert!(ledger
+            .load_latest_checkpoint(&project_a, &completed.id)
+            .unwrap()
+            .is_none());
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn atomically_reconciles_a_stale_task_only_once_under_concurrency() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        ledger
+            .claim_task(&project_a, &task.id, progress_input("started"))
+            .unwrap()
+            .expect("queued task should be claimed");
+        expire_scheduler_lease(&directory);
+
+        let barrier = Arc::new(Barrier::new(3));
+        let first_ledger = ledger.clone();
+        let first_access = project_a.clone();
+        let first_task_id = task.id.clone();
+        let first_barrier = barrier.clone();
+        let first = thread::spawn(move || {
+            first_barrier.wait();
+            first_ledger.reconcile_recovery(&first_access, &first_task_id)
+        });
+        let second_ledger = ledger.clone();
+        let second_access = project_a.clone();
+        let second_task_id = task.id.clone();
+        let second_barrier = barrier.clone();
+        let second = thread::spawn(move || {
+            second_barrier.wait();
+            second_ledger.reconcile_recovery(&second_access, &second_task_id)
+        });
+
+        barrier.wait();
+        let results = [
+            first.join().unwrap().unwrap(),
+            second.join().unwrap().unwrap(),
+        ];
+        assert_eq!(results.iter().filter(|result| result.is_some()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_none()).count(), 1);
+        assert_eq!(
+            ledger
+                .get_task(&project_a, &task.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "paused"
+        );
+        assert_eq!(
+            ledger.list_events(&project_a, &task.id, 10).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            ledger
+                .load_latest_checkpoint(&project_a, &task.id)
+                .unwrap()
+                .expect("reconciliation checkpoint should exist")
+                .next_step,
+            "先重新核对当前状态和已完成结果，再决定下一步。"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn refuses_to_reconcile_a_recovery_task_outside_the_current_project() {
+        let directory = test_dir();
+        let ledger = SecretaryLedger::open_at(directory.join("papyrus-secretary.sqlite3")).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        create_project(&ledger, "project-b", "乙项目");
+        let project_b = access("project-b", false);
+        let task = ledger
+            .create_task(&project_b, task_input("project-b"))
+            .unwrap();
+        ledger
+            .claim_task(&project_b, &task.id, progress_input("started"))
+            .unwrap()
+            .expect("queued task should be claimed");
+        let cross_project_access = access("project-a", true);
+
+        assert!(matches!(
+            ledger.reconcile_recovery(&cross_project_access, &task.id),
+            Err(LedgerError::InvalidInput)
+        ));
+        assert_eq!(
+            ledger
+                .get_task(&project_b, &task.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rolls_back_recovery_reconciliation_when_its_event_cannot_be_appended() {
+        let directory = test_dir();
+        let path = directory.join("papyrus-secretary.sqlite3");
+        let ledger = SecretaryLedger::open_at(&path).unwrap();
+        create_project(&ledger, "project-a", "甲项目");
+        let project_a = access("project-a", false);
+        let task = ledger
+            .create_task(&project_a, task_input("project-a"))
+            .unwrap();
+        ledger
+            .claim_task(&project_a, &task.id, progress_input("started"))
+            .unwrap()
+            .expect("queued task should be claimed");
+        expire_scheduler_lease(&directory);
+        let checkpoint_before = ledger
+            .load_latest_checkpoint(&project_a, &task.id)
+            .unwrap()
+            .expect("running task should have an initial checkpoint");
+
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO secretary_task_events(task_id, sequence, event_type, payload, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![task.id, MAX_SAFE_JSON_INTEGER, "seed", "{}", 1_i64],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            ledger.reconcile_recovery(&project_a, &task.id),
+            Err(LedgerError::InvalidInput)
+        ));
+        let persisted = ledger.get_task(&project_a, &task.id).unwrap().unwrap();
+        assert_eq!(persisted.status, "running");
+        assert_eq!(
+            ledger
+                .load_latest_checkpoint(&project_a, &task.id)
+                .unwrap()
+                .expect("failed recovery must not append a checkpoint"),
+            checkpoint_before
+        );
+        assert_eq!(
+            ledger.list_events(&project_a, &task.id, 10).unwrap().len(),
+            2
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }

@@ -18,6 +18,14 @@ export type BrowserBridgeConnectionState =
   | 'stale'
   | 'error'
 
+export type BrowserBridgeConnectionPresentation = {
+  state: BrowserBridgeConnectionState
+  title: string
+  detail: string
+  action: 'pair' | 'disconnect' | 'refresh' | 'none'
+  actionLabel?: string
+}
+
 export type BrowserBridgeStatus = {
   running: boolean
   paired: boolean
@@ -164,13 +172,84 @@ export const browserSubmit = (elementToken: string, pageRevision: string, approv
 export const webExtract = (url: string) => call<WebExtractResult>('web_extract', { url })
 
 export function deriveBrowserBridgeState(
-  status: Pick<BrowserBridgeStatus, 'running' | 'paired' | 'sessionId' | 'error'>,
+  status: Pick<BrowserBridgeStatus, 'running' | 'paired' | 'sessionId' | 'expiresAt' | 'error'>,
+  nowSeconds = Math.floor(Date.now() / 1000),
 ): BrowserBridgeConnectionState {
   if (status.error) {
     return /stale|expired|changed|过期|变化/i.test(status.error) ? 'stale' : 'error'
+  }
+  if (status.expiresAt !== undefined && status.expiresAt <= nowSeconds && (status.paired || status.sessionId)) {
+    return 'stale'
   }
   if (!status.running) return 'disabled'
   if (status.paired) return 'connected'
   if (status.sessionId) return 'pairing'
   return 'listening'
+}
+
+export function getBrowserBridgeConnectionPresentation(
+  status: BrowserBridgeStatus,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): BrowserBridgeConnectionPresentation {
+  // `connectionState` is a snapshot from the last native status read.  The
+  // lease can expire while this component stays open, so always derive the
+  // state against the current clock before presenting a control action.
+  const state = deriveBrowserBridgeState(status, nowSeconds)
+  const remaining = status.expiresAt === undefined
+    ? undefined
+    : Math.max(0, Math.ceil(status.expiresAt - nowSeconds))
+  const leaseSuffix = remaining === undefined ? '' : `本次授权约 ${remaining} 秒后失效。`
+
+  switch (state) {
+    case 'connected':
+      return {
+        state,
+        title: '正在协助当前标签页',
+        detail: `${status.origin ?? '已授权的当前页面'}。${leaseSuffix}`,
+        action: 'disconnect',
+        actionLabel: '停止并断开',
+      }
+    case 'pairing':
+      return {
+        state,
+        title: '等待浏览器确认',
+        detail: `请在需要协助的页面点击浏览器工具栏中的 Papyrus Browser Bridge。${leaseSuffix}`,
+        action: 'disconnect',
+        actionLabel: '取消连接',
+      }
+    case 'listening':
+      return {
+        state,
+        title: '浏览器连接已待命',
+        detail: '打开需要协助的页面，然后点击浏览器工具栏中的 Papyrus Browser Bridge。',
+        action: 'pair',
+        actionLabel: '连接当前标签页',
+      }
+    case 'stale':
+      return {
+        state,
+        title: '浏览器授权已过期',
+        detail: '页面或本次授权已经变化，未执行任何动作。请重新连接当前标签页。',
+        action: 'pair',
+        actionLabel: '重新连接',
+      }
+    case 'error':
+      return {
+        state,
+        title: '浏览器连接暂不可用',
+        detail: status.error || '本次浏览器连接未就绪，未执行任何动作。',
+        action: 'pair',
+        actionLabel: '重新准备连接',
+      }
+    case 'disabled':
+      return {
+        state,
+        title: '浏览器连接未启动',
+        detail: '点击后会准备本机连接；只有你在浏览器里确认的当前标签页可以被协助。',
+        action: 'pair',
+        actionLabel: '准备浏览器连接',
+      }
+    default:
+      return { state, title: '浏览器状态未知', detail: '请刷新浏览器连接状态。', action: 'refresh', actionLabel: '刷新状态' }
+  }
 }

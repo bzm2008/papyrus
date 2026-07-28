@@ -284,6 +284,7 @@ export function SettingsPanel() {
                           </div>
                         ) : null}
                         {(scallionQuota?.autoMonthlyRemaining !== undefined ||
+                          scallionQuota?.autoDailyUnlimited === true ||
                           scallionQuota?.autoDailyRemaining !== undefined) ? (
                           <div className="grid gap-1 border-t border-[#f0e8da] pt-2 text-xs text-[#6f7168]">
                             <div className="font-medium text-[#4f4a3d]">Auto 体验额度</div>
@@ -296,7 +297,9 @@ export function SettingsPanel() {
                                     : ''}
                                 </span>
                               ) : null}
-                              {scallionQuota.autoDailyRemaining !== undefined ? (
+                              {scallionQuota.autoDailyUnlimited === true ? (
+                                <span>日限额不限</span>
+                              ) : scallionQuota.autoDailyRemaining !== undefined ? (
                                 <span>
                                   日余 {scallionQuota.autoDailyRemaining}
                                   {scallionQuota.autoDailyCalls !== undefined

@@ -70,6 +70,23 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
+      - name: Run application and release checks
+        run: npm run ci:desktop
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Install Chromium dependencies on Linux
+        if: runner.os == 'Linux'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Chromium on macOS and Windows
+        if: runner.os != 'Linux'
+        run: npx playwright install chromium
+
+      - name: Run real Chromium browser tests
+        run: npm run test:browser:e2e
+
       - name: Verify release version
         shell: bash
         run: |
@@ -161,7 +178,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' 'Papyrus 1.1.0 production release.' 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
+          gh release create "${{ steps.version.outputs.tag }}" --repo "${GITHUB_REPOSITORY}" --title "Papyrus ${{ steps.version.outputs.version }}" --notes-file <(printf '%s\n' "Papyrus ${{ steps.version.outputs.version }} production release." 'Includes signed Windows, Linux and macOS bundles, WPS add-in and updater metadata.')
           mapfile -d '' release_files < <(find release-assets -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.sig' -o -name 'Papyrus-WPS-Addin_*.zip' \) -print0)
           gh release upload "${{ steps.version.outputs.tag }}" "${release_files[@]}" release-assets/latest.json release-assets/SHA256SUMS --repo "${GITHUB_REPOSITORY}" --clobber
       - name: Upload Debian 13 integration bundle

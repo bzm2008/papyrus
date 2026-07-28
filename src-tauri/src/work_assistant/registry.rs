@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use uuid::Uuid;
 
-const MAX_CANCELLED_RUNS: usize = 256;
 const MAX_RUN_ID_LENGTH: usize = 128;
 
 pub fn capability_statuses() -> Vec<CapabilityStatus> {
@@ -342,13 +341,9 @@ fn record_cancelled_run(state: &WorkAssistantState, run: String) -> Result<(), W
     if runs.contains(&run) {
         return Ok(());
     }
-    if runs.len() >= MAX_CANCELLED_RUNS {
-        return Err(WorkAssistantError {
-            code: "blocked".into(),
-            message: "cancelled run capacity has been reached".into(),
-            recoverable: true,
-        });
-    }
+    // A cancellation is a fail-safe, not a cache entry. Rejecting it because
+    // previous runs were cancelled can let an already-approved action proceed.
+    // Run IDs are bounded and this process-local state is cleared on exit.
     runs.insert(run);
 
     Ok(())
@@ -480,22 +475,20 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_rejects_new_runs_when_full_without_discarding_existing_ids() {
+    fn cancellation_keeps_recording_new_runs_after_a_large_history() {
         let state = test_state();
-        for index in 0..256 {
+        for index in 0..300 {
             record_cancelled_run(&state, format!("run-{index}")).unwrap();
         }
 
         record_cancelled_run(&state, "run-0".into()).unwrap();
-        let overflow = record_cancelled_run(&state, "overflow".into()).unwrap_err();
+        record_cancelled_run(&state, "overflow".into()).unwrap();
 
         let runs = state.cancelled_runs.lock().unwrap();
-        assert_eq!(runs.len(), 256);
+        assert_eq!(runs.len(), 301);
         assert!(runs.contains("run-0"));
-        assert!(runs.contains("run-255"));
-        assert!(!runs.contains("overflow"));
-        assert_eq!(overflow.code, "blocked");
-        assert!(overflow.recoverable);
+        assert!(runs.contains("run-299"));
+        assert!(runs.contains("overflow"));
     }
 
     #[test]

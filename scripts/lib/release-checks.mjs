@@ -48,10 +48,14 @@ const DEFAULT_DOCS = [
   'docs/testing/WORK_ASSISTANT_TEST_RECORD_TEMPLATE.md',
 ]
 
+const UPDATER_PUBLIC_KEY_PATH = 'src-tauri/keys/papyrus-updater-public.key'
+
 const RELEASE_WORKFLOWS = [
   '.github/workflows/desktop-ci.yml',
   '.github/workflows/desktop-packages.yml',
 ]
+
+const PRODUCTION_RELEASE_WORKFLOW = '.github/workflows/desktop-release.yml'
 
 const PLATFORM_MARKERS = {
   windows: ['windows-latest'],
@@ -232,6 +236,74 @@ async function checkExtensionOutput(rootDir) {
   return failures
 }
 
+const PRODUCTION_RELEASE_MARKERS = [
+  ['be triggered by semantic version tags', "tags:\n      - 'v*.*.*'"],
+  ['load the protected updater signing key', 'TAURI_SIGNING_PRIVATE_KEY'],
+  ['install JavaScript dependencies before signing', 'npm ci'],
+  ['run the aggregate desktop checks before signing', 'npm run ci:desktop'],
+  ['run Rust tests before signing', 'cargo test --manifest-path src-tauri/Cargo.toml'],
+  ['install Chromium dependencies before signing', 'npx playwright install --with-deps chromium'],
+  ['install Chromium on non-Linux release runners', 'npx playwright install chromium'],
+  ['run real Chromium browser tests before signing', 'npm run test:browser:e2e'],
+  ['build signed updater bundles', 'Build signed Tauri bundle'],
+  ['not hard-code a stale release title', 'Papyrus ${{ steps.version.outputs.version }} production release.'],
+]
+
+async function checkFirefoxExtensionOutput(rootDir) {
+  const failures = []
+  const sourcePath = 'apps/browser-bridge/manifest.firefox-esr.json'
+  const { value: source, error: sourceError } = await readJson(rootDir, sourcePath)
+  if (sourceError) failures.push(sourceError)
+  else if (!source) failures.push(`missing Firefox ESR Browser Bridge manifest: ${sourcePath}`)
+  else {
+    failures.push(...checkManifestPermissions(source, sourcePath))
+    if (source.manifest_version !== 3 || source.background?.service_worker !== 'service_worker.js') {
+      failures.push('Firefox ESR Browser Bridge manifest must use MV3 service_worker')
+    }
+    if (source.browser_specific_settings?.gecko?.id !== 'browser-bridge@papyrus.scallion') {
+      failures.push('Firefox ESR Browser Bridge manifest must declare the stable Gecko extension id')
+    }
+  }
+
+  const outputPath = 'dist-browser-bridge/firefox-esr/manifest.json'
+  const { value: output, error: outputError } = await readJson(rootDir, outputPath)
+  if (outputError) failures.push(outputError)
+  else if (!output) failures.push(`missing Firefox ESR Browser Bridge build output: ${outputPath}`)
+  else {
+    failures.push(...checkManifestPermissions(output, outputPath))
+    const packageJson = await readJson(rootDir, 'package.json')
+    if (packageJson.error) {
+      failures.push(packageJson.error)
+    } else if (output.version !== packageJson.value?.version) {
+      failures.push(`Firefox ESR Browser Bridge manifest ${outputPath} version must match package.json.version (${packageJson.value?.version})`)
+    }
+  }
+  return failures
+}
+
+async function checkUpdaterPublicKey(rootDir) {
+  const failures = []
+  const canonical = await readText(rootDir, UPDATER_PUBLIC_KEY_PATH)
+  if (canonical === null) return [`missing canonical updater public key: ${UPDATER_PUBLIC_KEY_PATH}`]
+  const normalized = canonical.trimEnd().replace(/\r\n/g, '\n') + '\n'
+  const lines = normalized.split('\n')
+  if (
+    lines.length !== 3 ||
+    !lines[0].startsWith('untrusted comment: minisign public key: ') ||
+    !/^[A-Za-z0-9+/=]+$/.test(lines[1])
+  ) {
+    return [`${UPDATER_PUBLIC_KEY_PATH} is not a valid two-line Minisign public key`]
+  }
+  const { value: tauriConfig, error } = await readJson(rootDir, 'src-tauri/tauri.conf.json')
+  if (error) return [error]
+  const configured = tauriConfig?.plugins?.updater?.pubkey
+  const expected = Buffer.from(normalized, 'utf8').toString('base64')
+  if (typeof configured !== 'string' || configured !== expected) {
+    failures.push('updater public key Base64 does not match canonical Minisign key')
+  }
+  return failures
+}
+
 async function checkVersionConsistency(rootDir) {
   const failures = []
   const { value: packageJson, error: packageError } = await readJson(rootDir, 'package.json')
@@ -351,6 +423,12 @@ async function checkReleaseWorkflows(rootDir) {
   failures.push(...await checkWorkflow(rootDir, RELEASE_WORKFLOWS[1], PLATFORM_MARKERS))
   failures.push(...await checkWorkflowSemantics(rootDir, RELEASE_WORKFLOWS[0], WORKFLOW_SEMANTIC_MARKERS[RELEASE_WORKFLOWS[0]]))
   failures.push(...await checkWorkflowSemantics(rootDir, RELEASE_WORKFLOWS[1], WORKFLOW_SEMANTIC_MARKERS[RELEASE_WORKFLOWS[1]]))
+  const productionWorkflow = await readText(rootDir, PRODUCTION_RELEASE_WORKFLOW)
+  if (productionWorkflow === null) {
+    failures.push(`missing production release workflow: ${PRODUCTION_RELEASE_WORKFLOW}`)
+  } else {
+    failures.push(...await checkWorkflowSemantics(rootDir, PRODUCTION_RELEASE_WORKFLOW, PRODUCTION_RELEASE_MARKERS))
+  }
   failures.push(...await checkReleaseScripts(rootDir))
   const overlays = {
     'src-tauri/ci/windows.json': ['nsis'],
@@ -390,7 +468,9 @@ export async function runReleaseChecks({ rootDir = process.cwd(), phase = 'local
   failures.push(...await checkCsp(rootDir))
   failures.push(...await checkCommands(rootDir))
   failures.push(...await checkExtensionOutput(rootDir))
+  failures.push(...await checkFirefoxExtensionOutput(rootDir))
   failures.push(...await checkVersionConsistency(rootDir))
+  failures.push(...await checkUpdaterPublicKey(rootDir))
   failures.push(...await checkDocumentation(rootDir))
   if (phase === 'release') failures.push(...await checkReleaseWorkflows(rootDir))
   return { phase, failures }
@@ -402,6 +482,8 @@ export const _internal = {
   checkCsp,
   checkCommands,
   checkVersionConsistency,
+  checkUpdaterPublicKey,
+  checkFirefoxExtensionOutput,
   checkDocumentation,
   checkWorkflowSemantics,
   checkReleaseScripts,

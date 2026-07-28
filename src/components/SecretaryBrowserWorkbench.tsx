@@ -2,11 +2,10 @@ import { useCallback, useEffect, useState } from 'react'
 
 import {
   browserSnapshot,
-  deriveBrowserBridgeState,
   disconnectBrowserBridge,
+  getBrowserBridgeConnectionPresentation,
   getBrowserBridgeStatus,
   startBrowserBridgePairing,
-  type BrowserBridgePairing,
   type BrowserBridgeStatus,
 } from '../services/browserBridgeClient'
 import type { BrowserSnapshot } from '../services/browserBridgePolicy'
@@ -23,20 +22,25 @@ const stateLabels = {
 export function SecretaryBrowserWorkbench() {
   const [status, setStatus] = useState<BrowserBridgeStatus>({ running: false, paired: false })
   const [snapshot, setSnapshot] = useState<BrowserSnapshot>()
-  const [pairing, setPairing] = useState<BrowserBridgePairing>()
+  const [awaitingPairing, setAwaitingPairing] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1000))
 
   const refresh = useCallback(async () => {
     try {
       const next = await getBrowserBridgeStatus()
       setStatus(next)
+      setNowSeconds(Math.floor(Date.now() / 1000))
+      const presentation = getBrowserBridgeConnectionPresentation(next)
       if (next.paired) {
-        setPairing(undefined)
+        setAwaitingPairing(false)
         setMessage('')
       }
-      if (next.paired) {
+      if (presentation.state === 'connected') {
         setSnapshot(await browserSnapshot())
+      } else {
+        setSnapshot(undefined)
       }
       setError(next.error ?? '')
       if (next.error) setMessage('')
@@ -51,15 +55,18 @@ export function SecretaryBrowserWorkbench() {
   }, [refresh])
 
   useEffect(() => {
-    if (!pairing) return undefined
-    const timer = globalThis.setInterval(() => void refresh(), 1000)
+    if (!awaitingPairing && !status.expiresAt) return undefined
+    const timer = globalThis.setInterval(() => {
+      setNowSeconds(Math.floor(Date.now() / 1000))
+      if (awaitingPairing) void refresh()
+    }, 1000)
     return () => globalThis.clearInterval(timer)
-  }, [pairing, refresh])
+  }, [awaitingPairing, refresh, status.expiresAt])
 
   const pair = async () => {
     try {
-      const next = await startBrowserBridgePairing()
-      setPairing(next)
+      await startBrowserBridgePairing()
+      setAwaitingPairing(true)
       setStatus(await getBrowserBridgeStatus())
       setError('')
       setMessage('Browser Bridge 已待命。打开扩展后点击“连接当前标签页”即可自动完成一次性授权。')
@@ -71,16 +78,31 @@ export function SecretaryBrowserWorkbench() {
 
   const disconnect = async () => {
     await disconnectBrowserBridge()
-    setPairing(undefined)
+    setAwaitingPairing(false)
     setSnapshot(undefined)
     setMessage('')
     await refresh()
   }
 
+  const presentation = getBrowserBridgeConnectionPresentation(status, nowSeconds)
+  const runConnectionAction = async () => {
+    if (presentation.action === 'disconnect') {
+      await disconnect()
+      return
+    }
+    if (presentation.action === 'pair') {
+      await pair()
+      return
+    }
+    if (presentation.action === 'refresh') {
+      await refresh()
+    }
+  }
+
   return (
     <div className="papyrus-scrollbar h-full overflow-y-auto px-4 py-3 text-sm text-[#332f27]">
       {(() => {
-        const state = status.connectionState ?? deriveBrowserBridgeState(status)
+        const state = presentation.state
         return (
       <div className="flex items-start justify-between gap-3 border-b border-[#e4ded2] pb-3">
         <div>
@@ -94,30 +116,19 @@ export function SecretaryBrowserWorkbench() {
         )
       })()}
 
+      <section aria-label="浏览器连接租约" className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] px-3 py-2 text-xs text-[#625c50]">
+        <div className="font-medium text-[#332f27]">{presentation.title}</div>
+        <p className="mt-1 leading-5">{presentation.detail}</p>
+        {status.tabId !== undefined && presentation.state === 'connected' ? <div className="mt-1 text-[#817a6d]">仅当前已确认标签页可被协助</div> : null}
+      </section>
+
       <div className="mt-3 flex flex-wrap gap-2">
-        <button type="button" onClick={() => void pair()} className="rounded-md bg-[#20201d] px-2.5 py-1.5 text-xs text-white">准备浏览器连接</button>
-        <button type="button" onClick={() => void refresh()} className="rounded-md border border-[#d8cfc0] px-2.5 py-1.5 text-xs">刷新快照</button>
-        {status.paired ? <button type="button" onClick={() => void disconnect()} className="rounded-md border border-[#e6c9bf] px-2.5 py-1.5 text-xs text-[#9a4338]">断开</button> : null}
+        {presentation.action !== 'none' ? <button type="button" onClick={() => void runConnectionAction()} className={presentation.action === 'disconnect' ? 'rounded-md border border-[#e6c9bf] px-2.5 py-1.5 text-xs text-[#9a4338]' : 'rounded-md bg-[#20201d] px-2.5 py-1.5 text-xs text-white'}>{presentation.actionLabel}</button> : null}
+        <button type="button" onClick={() => void refresh()} className="rounded-md border border-[#d8cfc0] px-2.5 py-1.5 text-xs">{presentation.state === 'connected' ? '刷新快照' : '刷新状态'}</button>
       </div>
 
-      {pairing ? (
-        <details className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3 text-xs leading-5">
-          <summary className="cursor-pointer text-[#817a6d]">兼容模式：查看配对信息</summary>
-          <div className="mt-2">
-            <div>WebSocket：{pairing.wsUrl}</div>
-            <div className="break-all">一次性 Token：{pairing.token}</div>
-            <div className="break-all">Nonce：{pairing.nonce}</div>
-          </div>
-        </details>
-      ) : null}
-      {status.tabId !== undefined || status.origin ? (
-        <div className="mt-3 grid gap-1 rounded-lg bg-[#fffefa] px-3 py-2 text-xs text-[#625c50]">
-          {status.tabId !== undefined ? <div>当前标签页：{status.tabId}</div> : null}
-          {status.origin ? <div className="truncate">来源：{status.origin}</div> : null}
-        </div>
-      ) : null}
       {message ? <div className="mt-3 rounded-lg bg-[#edf6eb] p-2 text-xs text-[#315d39]">{message}</div> : null}
-      {error ? <div className="mt-3 rounded-lg bg-[#fff4ef] p-2 text-xs text-[#92483d]">{error}</div> : null}
+      {error && presentation.state !== 'error' ? <div className="mt-3 rounded-lg bg-[#fff4ef] p-2 text-xs text-[#92483d]">{error}</div> : null}
 
       {snapshot ? (
         <section className="mt-3 rounded-lg border border-[#e8ddc7] bg-[#fffdf7] p-3">

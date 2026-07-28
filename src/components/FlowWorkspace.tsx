@@ -14,6 +14,7 @@ import {
   Square,
   Trash2,
   Undo2,
+  X,
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useAgentStream } from '../hooks/useAgentStream'
@@ -26,8 +27,9 @@ import { formatChangeStat } from '../services/documentChangeStatsService'
 import { sendFlowMessage } from '../services/flowOrchestrator'
 import { getModelCacheStats } from '../services/modelCallCacheService'
 import { formatScallionPlanName } from '../services/scallionModelCatalog'
-import { getScallionQuotaDisplay } from '../services/scallionAccountService'
+import { getScallionQuotaDisplay, getScallionSendBlockReason } from '../services/scallionAccountService'
 import { shouldShowSecretaryPartialReply } from '../services/secretaryPartialReply'
+import { partitionSecretaryToolTimeline } from '../services/secretaryTimelinePresentation'
 import { createSecretaryGoalFromRequest, shouldAutoCreateSecretaryGoal } from '../services/secretaryGoalService'
 import {
   buildSecretaryLedgerResumePrompt,
@@ -80,9 +82,11 @@ type ReceiptSnapshot = {
 
 export function FlowWorkspace() {
   const [prompt, setPrompt] = useState('')
+  const [sendFailure, setSendFailure] = useState<{ message: string; prompt: string } | undefined>()
   const [inlineWorkbenchView, setInlineWorkbenchView] = useState<WorkbenchView>('run')
   const [taskCenterDrawerOpen, setTaskCenterDrawerOpen] = useState(false)
   const [workbenchOpen, setWorkbenchOpen] = useState(false)
+  const [activeLedgerTaskId, setActiveLedgerTaskId] = useState<string>()
   const [receiptSnapshots, setReceiptSnapshots] = useState<Record<string, ReceiptSnapshot>>({})
   const processingQueuedIdRef = useRef<string | null>(null)
   const autoStartTaskIdRef = useRef<string | null>(null)
@@ -125,6 +129,10 @@ export function FlowWorkspace() {
   const selectWorkAssistantTool = useWorkAssistantStore((state) => state.selectToolCall)
   const selectedWorkAssistantToolId = useWorkAssistantStore((state) => state.selectedToolCallId)
   const activeWorkAssistantCalls = activeWorkAssistantRun ? Object.values(activeWorkAssistantRun.toolCalls) : []
+  const toolTimeline = useMemo(
+    () => partitionSecretaryToolTimeline(activeWorkAssistantRun),
+    [activeWorkAssistantRun],
+  )
   const selectedWorkAssistantCall = activeWorkAssistantCalls.find((call) => call.id === selectedWorkAssistantToolId)
   const showCancelledPartialReply = shouldShowSecretaryPartialReply(activeWorkAssistantRun, activeAgentRunId)
   const filePlanCall = selectedWorkAssistantCall?.name === 'file_plan_batch' ? selectedWorkAssistantCall : [...activeWorkAssistantCalls].reverse().find((call) => call.name === 'file_plan_batch')
@@ -245,50 +253,91 @@ export function FlowWorkspace() {
   ) => {
     const cleanPrompt = rawPrompt.trim()
 
-    if (!cleanPrompt) {
-      return
-    }
+    if (!cleanPrompt) return false
 
     const resolved = resolveSlashCommandPrompt(cleanPrompt)
 
     if (secretaryPlanDraft && secretaryPlanDraft.status === 'draft') {
       await reviseSecretaryPlanDraft(resolved.displayPrompt)
-      return
+      return true
     }
 
     if (resolved.isPlanCommand) {
       const request = resolved.argumentsText || '请先写出需要规划的任务'
       await createSecretaryPlanDraft(resolved.displayPrompt || '/plan', resolved.executionPrompt || request)
-      return
+      if (!options.queuedInputId) setPrompt('')
+      return true
     }
+
+    const state = useAppStore.getState()
+    const provider = state.providerConfigs[state.activeProviderId]
+    const quotaBlock = getScallionSendBlockReason({
+      token: state.scallionToken,
+      quota: state.scallionQuota,
+      syncStatus: state.scallionSync.quota.status,
+      routingMode: state.modelRoutingMode,
+      isScallionProvider: provider?.type === 'scallion_proxy',
+    })
+    if (quotaBlock) {
+      setSendFailure({ message: quotaBlock.message, prompt: cleanPrompt })
+      state.setLlmRunState('error', quotaBlock.message)
+      return false
+    }
+    setSendFailure(undefined)
+    const shouldClearComposer = !options.queuedInputId
 
     if (resolved.isGoalCommand) {
       const request = resolved.argumentsText || '请描述长程写作目标'
       const goal = createSecretaryGoalFromRequest(request)
+      if (shouldClearComposer) setPrompt('')
       await runGoalCycle(goal, resolved.executionPrompt || request, resolved.displayPrompt || `/goal ${request}`, options.queuedInputId)
-      return
+      return true
     }
 
     if (!activeSecretaryGoal && shouldAutoCreateSecretaryGoal(resolved.displayPrompt || resolved.executionPrompt)) {
       const request = resolved.displayPrompt || resolved.executionPrompt
       const goal = createSecretaryGoalFromRequest(request)
+      if (shouldClearComposer) setPrompt('')
       await runGoalCycle(goal, resolved.executionPrompt, request, options.queuedInputId)
-      return
+      return true
     }
 
-    await sendFlowMessage(resolved.executionPrompt, {
-      displayPrompt: options.displayPrompt ?? resolved.displayPrompt,
-      thinkingEffort: flowThinkingEffort,
-      goalId: activeSecretaryGoal?.status === 'active' ? activeSecretaryGoal.id : undefined,
-      queuedInputId: options.queuedInputId,
-      ledgerTaskId: options.ledgerTaskId,
-    })
+    if (shouldClearComposer) setPrompt('')
+    if (options.ledgerTaskId) setActiveLedgerTaskId(options.ledgerTaskId)
+    try {
+      const outcome = await sendFlowMessage(resolved.executionPrompt, {
+        displayPrompt: options.displayPrompt ?? resolved.displayPrompt,
+        thinkingEffort: flowThinkingEffort,
+        goalId: activeSecretaryGoal?.status === 'active' ? activeSecretaryGoal.id : undefined,
+        queuedInputId: options.queuedInputId,
+        ledgerTaskId: options.ledgerTaskId,
+      })
+      if (outcome?.status === 'failed') {
+        const message = outcome.error || '本轮请求未完成，可稍后重试。'
+        setSendFailure({ message, prompt: cleanPrompt })
+        if (shouldClearComposer) setPrompt(cleanPrompt)
+        return false
+      }
+      return true
+    } finally {
+      if (options.ledgerTaskId) {
+        setActiveLedgerTaskId((current) => current === options.ledgerTaskId ? undefined : current)
+      }
+    }
   }, [activeSecretaryGoal, flowThinkingEffort, runGoalCycle, secretaryPlanDraft])
 
   const startPersistentTask = useCallback((
     task: { id: string; request: string },
     recovery?: SecretaryLedgerRecoveryItem,
   ) => {
+    if (recovery?.health.state === 'blocked') {
+      setSendFailure({ message: recovery.health.message, prompt: task.request })
+      return
+    }
+    if (recovery?.health.state === 'requires_review' && !recovery.prepared) {
+      setSendFailure({ message: '请先完成恢复复核，再重新规划此任务。', prompt: task.request })
+      return
+    }
     if (llmRunState === 'running' || llmRunState === 'reconnecting') {
       pendingPersistentTaskRef.current = { task, recovery }
       setPrompt(`继续任务：${task.request}`)
@@ -355,9 +404,13 @@ export function FlowWorkspace() {
 
     processingQueuedIdRef.current = nextQueued.id
     updateQueuedUserInput(nextQueued.id, { status: 'sending' })
-    void dispatchPrompt(nextQueued.content, { queuedInputId: nextQueued.id }).finally(() => {
-      removeQueuedUserInput(nextQueued.id)
-      processingQueuedIdRef.current = null
+    // Defer the stateful send until after this effect has committed. The ref
+    // remains the single-flight guard if the queue store updates meanwhile.
+    queueMicrotask(() => {
+      void dispatchPrompt(nextQueued.content, { queuedInputId: nextQueued.id }).finally(() => {
+        removeQueuedUserInput(nextQueued.id)
+        processingQueuedIdRef.current = null
+      })
     })
   }, [dispatchPrompt, llmRunState, queuedUserInputs, removeQueuedUserInput, updateQueuedUserInput])
 
@@ -369,14 +422,32 @@ export function FlowWorkspace() {
       return
     }
 
-    setPrompt('')
-
     if (llmRunState === 'running' || llmRunState === 'reconnecting') {
       enqueueUserInput(cleanPrompt)
+      setPrompt('')
       return
     }
 
     void dispatchPrompt(cleanPrompt)
+  }
+
+  const retryFailedPrompt = () => {
+    const retry = sendFailure
+    if (!retry || llmRunState === 'running' || llmRunState === 'reconnecting') return
+
+    // A quota/auth rejection was never accepted by the service. Remove only
+    // the matching terminal failure pair before retrying so the chat does not
+    // gain duplicate user messages or duplicate pending patches.
+    const messages = useAppStore.getState().flowMessages
+    const userIndex = [...messages].reverse().findIndex((message) => message.role === 'user' && message.content === retry.prompt)
+    const absoluteUserIndex = userIndex < 0 ? -1 : messages.length - 1 - userIndex
+    const following = absoluteUserIndex >= 0 ? messages[absoluteUserIndex + 1] : undefined
+    if (following?.role === 'assistant' && /本条消息未发送|本轮请求未完成/.test(following.content)) {
+      setFlowMessages(messages.slice(0, absoluteUserIndex))
+    }
+    setSendFailure(undefined)
+    setPrompt(retry.prompt)
+    void dispatchPrompt(retry.prompt)
   }
 
   const pickCommand = (command: SlashCommand) => {
@@ -457,6 +528,7 @@ export function FlowWorkspace() {
           onStartTask={startPersistentTask}
           onPauseActiveTask={() => pauseSecretaryRun()}
           onCancelActiveTask={() => cancelSecretaryRun()}
+          activeTaskId={activeLedgerTaskId}
           onOpenMaterials={() => {
             openWorkbench('files')
           }}
@@ -555,7 +627,8 @@ export function FlowWorkspace() {
                 ) : null}
                 {showCancelledPartialReply ? <SecretaryPartialReply text={activeWorkAssistantRun?.messageText ?? ''} /> : null}
                 {activeWorkAssistantRun && ['running', 'awaiting_approval', 'completed', 'failed', 'cancelled'].includes(activeWorkAssistantRun.status)
-                  ? Object.values(activeWorkAssistantRun.toolCalls).map((toolCall) => (
+                  ? <>
+                    {toolTimeline.visible.map((toolCall) => (
                       <SecretaryToolStep
                         key={toolCall.id}
                         toolCall={toolCall}
@@ -564,7 +637,22 @@ export function FlowWorkspace() {
                         onSelect={() => selectWorkAssistantTool(toolCall.id)}
                         onRetry={toolCall.result?.recoverable ? () => setPrompt(toolCall.result?.errorCode === 'stale_preview' ? '请根据当前文件状态重新生成预览' : `请重试：${toolCall.intent}`) : undefined}
                       />
-                    ))
+                    ))}
+                    {toolTimeline.folded.length ? (
+                      <details className="rounded-lg border border-[#e1dccf] bg-[#fffdf8]/72 px-3 py-2 text-xs text-[#625c50]">
+                        <summary className="cursor-pointer select-none font-medium text-[#6f685c]">本次处理过程 · {toolTimeline.folded.length} 项</summary>
+                        <div className="mt-2 space-y-2">
+                          {toolTimeline.folded.map((toolCall) => (
+                            <SecretaryToolStep
+                              key={toolCall.id}
+                              toolCall={toolCall}
+                              onSelect={() => selectWorkAssistantTool(toolCall.id)}
+                            />
+                          ))}
+                        </div>
+                      </details>
+                    ) : null}
+                  </>
                   : null}
               </AnimatePresence>
             </div>
@@ -595,6 +683,29 @@ export function FlowWorkspace() {
               onEdit={(id, content) => updateQueuedUserInput(id, { content })}
               onGuide={(id) => sendQueuedInputAsGuidance(id)}
             />
+          ) : null}
+          {sendFailure ? (
+            <div role="alert" className="mx-auto mb-2 flex max-w-[920px] items-center gap-2 rounded-lg border border-[#e5c7aa] bg-[#fff7ed] px-3 py-2 text-xs leading-5 text-[#7a482d]">
+              <span className="min-w-0 flex-1">{sendFailure.message}</span>
+              <button
+                type="button"
+                onClick={retryFailedPrompt}
+                disabled={llmRunState === 'running' || llmRunState === 'reconnecting'}
+                className="papyrus-control inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-[#7a482d] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RotateCcw size={13} />
+                重试
+              </button>
+              <button
+                type="button"
+                title="关闭提示"
+                aria-label="关闭提示"
+                onClick={() => setSendFailure(undefined)}
+                className="papyrus-control grid size-7 shrink-0 place-items-center rounded-md text-[#7a482d]"
+              >
+                <X size={13} />
+              </button>
+            </div>
           ) : null}
           <SecretaryRunStatusStack run={activeWorkAssistantRun} todos={agentTodos} queuedCount={queuedUserInputs.filter((input) => input.status === 'queued').length} />
           <form onSubmit={submitFlowPrompt} className="papyrus-command-bar mx-auto max-w-[920px] rounded-xl p-2">
@@ -700,6 +811,7 @@ export function FlowWorkspace() {
                 onStartTask={startPersistentTask}
                 onPauseActiveTask={() => pauseSecretaryRun()}
                 onCancelActiveTask={() => cancelSecretaryRun()}
+                activeTaskId={activeLedgerTaskId}
                 onOpenMaterials={() => {
                   openWorkbench('files')
                   setTaskCenterDrawerOpen(false)
@@ -952,8 +1064,8 @@ function SecretaryUsageOverview({
     : quotaDisplay.source === 'cached'
       ? quotaDisplay.status === 'stale' ? '缓存·可能过期' : '缓存'
       : quotaDisplay.status === 'error' ? '同步失败' : scallionToken ? '同步中' : '未登录'
-  const autoQuotaLabel = scallionQuota?.autoMonthlyRemaining !== undefined || scallionQuota?.autoDailyRemaining !== undefined
-    ? `Auto 月余 ${scallionQuota.autoMonthlyRemaining ?? '-'} · 日余 ${scallionQuota.autoDailyRemaining ?? '-'}`
+  const autoQuotaLabel = scallionQuota?.autoMonthlyRemaining !== undefined || scallionQuota?.autoDailyUnlimited === true || scallionQuota?.autoDailyRemaining !== undefined
+    ? `Auto 月余 ${scallionQuota.autoMonthlyRemaining ?? '-'} · ${scallionQuota.autoDailyUnlimited === true ? '日限额不限' : `日余 ${scallionQuota.autoDailyRemaining ?? '-'}`}`
     : undefined
   const planLabel =
     scallionQuota?.planName ??

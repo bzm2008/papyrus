@@ -59,6 +59,7 @@ pub fn run() {
             secretary_ledger::secretary_ledger_create_task,
             secretary_ledger::secretary_ledger_start_task,
             secretary_ledger::secretary_ledger_claim_task,
+            secretary_ledger::secretary_ledger_reconcile_recovery,
             secretary_ledger::secretary_ledger_persist_task_progress,
             secretary_ledger::secretary_ledger_get_task,
             secretary_ledger::secretary_ledger_list_tasks,
@@ -84,8 +85,8 @@ pub fn run() {
             work_assistant::work_assistant_desktop_open_url,
             work_assistant::work_assistant_desktop_open_file,
             work_assistant::work_assistant_desktop_reveal_file,
-            work_assistant::work_assistant_validate_application_selection,
             work_assistant::work_assistant_list_applications,
+            work_assistant::work_assistant_list_available_applications,
             work_assistant::work_assistant_register_application_from_picker,
             work_assistant::work_assistant_remove_application,
             work_assistant::work_assistant_launch_application,
@@ -94,6 +95,7 @@ pub fn run() {
             work_assistant::work_assistant_preview,
             work_assistant::work_assistant_approve,
             work_assistant::work_assistant_execute,
+            work_assistant::work_assistant_execute_native_action,
             work_assistant::work_assistant_doctor,
             work_assistant::browser_bridge_status,
             work_assistant::browser_bridge_start_pairing,
@@ -285,11 +287,17 @@ mod tests {
     #[test]
     fn scallion_chat_endpoint_ignores_stale_local_paths() {
         assert_eq!(
-            chat_endpoint("https://api.sca-hub.cn/api/papyrus/llm/models", "scallion_proxy"),
+            chat_endpoint(
+                "https://api.sca-hub.cn/api/papyrus/llm/models",
+                "scallion_proxy"
+            ),
             "https://api.sca-hub.cn/api/papyrus/llm/chat"
         );
         assert_eq!(
-            chat_endpoint("https://api.sca-hub.cn/api/papyrus/llm/chat", "scallion_proxy"),
+            chat_endpoint(
+                "https://api.sca-hub.cn/api/papyrus/llm/chat",
+                "scallion_proxy"
+            ),
             "https://api.sca-hub.cn/api/papyrus/llm/chat"
         );
     }
@@ -571,37 +579,10 @@ async fn llm_chat(request: LlmChatRequest) -> Result<String, String> {
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    let trimmed = url.trim();
-
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
-        return Err("only http(s) URLs can be opened".into());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", trimmed])
-            .spawn()
-            .map_err(|error| format!("open browser failed: {}", error))?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(trimmed)
-            .spawn()
-            .map_err(|error| format!("open browser failed: {}", error))?;
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(trimmed)
-            .spawn()
-            .map_err(|error| format!("open browser failed: {}", error))?;
-    }
-
-    Ok(())
+    // Login and authorization links are still user-visible external actions, but must not
+    // receive a looser opener than the controlled desktop assistant. In particular, Windows
+    // URLs must never cross cmd.exe, where `&` and other metacharacters are interpreted.
+    work_assistant::open_url_from_native(&url).map_err(|error| error.message)
 }
 
 #[tauri::command]
@@ -953,6 +934,7 @@ mod security_tests {
                 "secretary_ledger::secretary_ledger_create_task",
                 "secretary_ledger::secretary_ledger_start_task",
                 "secretary_ledger::secretary_ledger_claim_task",
+                "secretary_ledger::secretary_ledger_reconcile_recovery",
                 "secretary_ledger::secretary_ledger_persist_task_progress",
                 "secretary_ledger::secretary_ledger_get_task",
                 "secretary_ledger::secretary_ledger_list_tasks",
@@ -978,8 +960,8 @@ mod security_tests {
                 "work_assistant::work_assistant_desktop_open_url",
                 "work_assistant::work_assistant_desktop_open_file",
                 "work_assistant::work_assistant_desktop_reveal_file",
-                "work_assistant::work_assistant_validate_application_selection",
                 "work_assistant::work_assistant_list_applications",
+                "work_assistant::work_assistant_list_available_applications",
                 "work_assistant::work_assistant_register_application_from_picker",
                 "work_assistant::work_assistant_remove_application",
                 "work_assistant::work_assistant_launch_application",
@@ -988,6 +970,7 @@ mod security_tests {
                 "work_assistant::work_assistant_preview",
                 "work_assistant::work_assistant_approve",
                 "work_assistant::work_assistant_execute",
+                "work_assistant::work_assistant_execute_native_action",
                 "work_assistant::work_assistant_doctor",
                 "work_assistant::browser_bridge_status",
                 "work_assistant::browser_bridge_start_pairing",
@@ -1013,6 +996,44 @@ mod security_tests {
                 "update_protection::verify_update_snapshot",
             ]
         );
+    }
+
+    #[test]
+    fn external_url_command_uses_the_safe_platform_opener() {
+        let source = include_str!("lib.rs");
+        let command_start = source
+            .find("fn open_external_url")
+            .expect("external URL command must be declared");
+        let command_end = command_start
+            + 1
+            + source[command_start + 1..]
+                .find("#[tauri::command]")
+                .expect("external URL command must end before the next command");
+        let command = &source[command_start..command_end];
+
+        assert!(
+            command.contains("work_assistant::open_url_from_native"),
+            "external links must reuse the validated fixed-path platform opener"
+        );
+        assert!(
+            !command.contains("Command::new(\"cmd\")"),
+            "external links must never pass user-controlled URLs through cmd.exe"
+        );
+    }
+
+    #[test]
+    fn external_url_command_rejects_non_http_and_ambiguous_urls_before_opening() {
+        for url in [
+            "file:///C:/Windows/System32/cmd.exe",
+            "javascript:alert(1)",
+            " https://example.com",
+            "https://example.com\nnext",
+        ] {
+            assert!(
+                super::open_external_url(url.to_owned()).is_err(),
+                "must reject {url:?} without opening it"
+            );
+        }
     }
 }
 

@@ -449,7 +449,8 @@ describe('Scallion production contract', () => {
             manual_models: [],
             auto_models: ['agnes-2.0-flash'],
             auto_monthly_calls: 300,
-            auto_daily_calls: 10,
+            auto_daily_calls: null,
+            auto_daily_unlimited: true,
             external_api: 'deeper',
           },
         }),
@@ -474,7 +475,8 @@ describe('Scallion production contract', () => {
         manualModels: [],
         autoModels: ['agnes-2.0-flash'],
         autoMonthlyCalls: 300,
-        autoDailyCalls: 10,
+        autoDailyCalls: null,
+        autoDailyUnlimited: true,
         externalApi: 'deeper',
       }),
     )
@@ -540,6 +542,35 @@ describe('Scallion production contract', () => {
     await expect(
       callOpenAICompatible(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }]),
     ).rejects.toMatchObject({ code: 'auto_quota_exhausted', status: 429 })
+  })
+
+  it('does not downgrade an explicit Auto quota rejection into a second chat request', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input
+      void _init
+      return jsonResponse(
+        {
+          error: {
+            message: '当前套餐的 Auto 调用额度已用完',
+            type: 'auto_quota_exhausted',
+            auto_quota: { monthly_limit: 300, monthly_remaining: 0, daily_remaining: null },
+          },
+        },
+        429,
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }], { onToken: vi.fn() }),
+    ).rejects.toMatchObject({ code: 'auto_quota_exhausted', status: 429 })
+
+    const chatRequests = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/chat') && (init as RequestInit | undefined)?.method === 'POST',
+    )
+    expect(chatRequests).toHaveLength(1)
   })
 
   it('classifies model catalog network failures as recoverable', async () => {

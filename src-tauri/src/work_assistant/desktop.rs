@@ -5,30 +5,130 @@
 //! application launches use an opaque persisted alias with no caller supplied arguments.
 
 use crate::work_assistant::{
-    append_audit_entry, platform, AssistantErrorPayload, AuthorizedRoot, DesktopStatus, DiskStatus,
-    PathPolicy, RegisteredApplication, WorkAssistantError, WorkAssistantState,
+    append_audit_entry, platform, AssistantErrorPayload, AuditEntry, AuthorizedRoot, DesktopStatus,
+    DiskStatus, PathPolicy, RegisteredApplication, WorkAssistantError, WorkAssistantState,
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    env, fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::MutexGuard,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 /// Extensions that are never passed to an external opener.  The list intentionally includes
 /// executable, shell, installer, and desktop-launcher formats used on the supported platforms.
 const BLOCKED_OPEN_EXTENSIONS: &[&str] = &[
-    "exe", "dll", "msi", "msix", "app", "dmg", "pkg", "deb", "rpm", "run", "bin", "elf", "sh",
-    "bash", "zsh", "fish", "csh", "ksh", "bat", "cmd", "ps1", "psm1", "com", "scr", "lnk",
-    "desktop", "py", "pyw", "js", "mjs", "cjs", "ts", "tsx", "jsx", "vbs", "vbe", "wsf", "wsh",
-    "hta", "jar", "war", "class",
+    "exe",
+    "dll",
+    "msi",
+    "msix",
+    "app",
+    "dmg",
+    "pkg",
+    "deb",
+    "rpm",
+    "run",
+    "bin",
+    "elf",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "csh",
+    "ksh",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "com",
+    "scr",
+    "lnk",
+    "url",
+    "webloc",
+    "website",
+    "scf",
+    "library-ms",
+    "settingcontent-ms",
+    "search-ms",
+    "inetloc",
+    "desktop",
+    "py",
+    "pyw",
+    "js",
+    "mjs",
+    "cjs",
+    "ts",
+    "tsx",
+    "jsx",
+    "vbs",
+    "vbe",
+    "wsf",
+    "wsh",
+    "hta",
+    "jar",
+    "war",
+    "class",
 ];
 
 const MAX_APPLICATION_LABEL_LENGTH: usize = 128;
 const DEFAULT_AUDIT_LIMIT: usize = 50;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableApplication {
+    pub id: String,
+    pub label: String,
+    pub platform: String,
+    pub kind: String,
+}
+
+/// WebView-safe view of a user-registered application. The executable path stays in the native
+/// registry and is resolved only when a preview-bound action is executed.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredApplicationSummary {
+    pub id: String,
+    pub label: String,
+    pub platform: String,
+    pub created_at: u64,
+}
+
+impl From<&RegisteredApplication> for RegisteredApplicationSummary {
+    fn from(application: &RegisteredApplication) -> Self {
+        Self {
+            id: application.id.clone(),
+            label: application.label.clone(),
+            platform: application.platform.clone(),
+            created_at: application.created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedApplication {
+    id: String,
+    label: String,
+    platform: String,
+    kind: String,
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApplicationLaunchBinding {
+    pub app_id: String,
+    pub label: String,
+    pub canonical_path: PathBuf,
+    pub kind: String,
+    pub target_kind: String,
+    pub fingerprint: String,
+}
 
 /// Validate an external URL before it reaches a platform opener.
 pub fn validate_open_url(value: &str) -> Result<(), WorkAssistantError> {
@@ -88,6 +188,61 @@ pub fn validate_open_file(path: impl AsRef<Path>) -> Result<(), WorkAssistantErr
     Ok(())
 }
 
+pub(crate) fn open_url_from_native(url: &str) -> Result<(), WorkAssistantError> {
+    validate_open_url(url)?;
+    platform::desktop::open_url(url)
+}
+
+pub(crate) fn validate_open_file_from_native(
+    state: &WorkAssistantState,
+    root_id: &str,
+    path: &str,
+) -> Result<(), WorkAssistantError> {
+    let roots = state
+        .roots
+        .read()
+        .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))?;
+    resolve_open_path(&roots, root_id, Path::new(path)).map(|_| ())
+}
+
+pub(crate) fn open_file_from_native(
+    state: &WorkAssistantState,
+    root_id: &str,
+    path: &str,
+) -> Result<(), WorkAssistantError> {
+    let roots = state
+        .roots
+        .read()
+        .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))?;
+    let resolved = resolve_open_path(&roots, root_id, Path::new(path))?;
+    platform::desktop::open_path(&resolved)
+}
+
+pub(crate) fn validate_reveal_file_from_native(
+    state: &WorkAssistantState,
+    root_id: &str,
+    path: &str,
+) -> Result<(), WorkAssistantError> {
+    let roots = state
+        .roots
+        .read()
+        .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))?;
+    resolve_reveal_path(&roots, root_id, Path::new(path)).map(|_| ())
+}
+
+pub(crate) fn reveal_file_from_native(
+    state: &WorkAssistantState,
+    root_id: &str,
+    path: &str,
+) -> Result<(), WorkAssistantError> {
+    let roots = state
+        .roots
+        .read()
+        .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))?;
+    let resolved = resolve_reveal_path(&roots, root_id, Path::new(path))?;
+    platform::desktop::reveal_file(&resolved)
+}
+
 fn file_looks_executable(
     path: &Path,
     _metadata: &fs::Metadata,
@@ -131,9 +286,9 @@ fn file_looks_executable(
     Ok(false)
 }
 
-/// Canonicalize a path selected by the user for an application alias.  This is intentionally a
-/// separate validation entry point: the frontend must obtain the path from its native picker
-/// before calling the `*_from_picker` registration command.
+/// Canonicalize a path selected by the native application picker for an application alias.
+/// This helper is deliberately native-only; the public command owns picker invocation and never
+/// accepts a path from the WebView.
 pub fn validate_application_alias_path(
     selected_path: impl AsRef<Path>,
 ) -> Result<PathBuf, WorkAssistantError> {
@@ -281,8 +436,11 @@ pub fn work_assistant_desktop_status() -> DesktopStatus {
 
 #[tauri::command]
 pub fn work_assistant_desktop_open_url(url: String) -> Result<(), AssistantErrorPayload> {
-    validate_open_url(&url).map_err(AssistantErrorPayload::from)?;
-    platform::desktop::open_url(&url).map_err(Into::into)
+    let _ = url;
+    Err(WorkAssistantError::blocked(
+        "URL opening requires a native preview and one-time approval token",
+    )
+    .into())
 }
 
 #[tauri::command]
@@ -291,14 +449,11 @@ pub fn work_assistant_desktop_open_file(
     root_id: String,
     path: String,
 ) -> Result<(), AssistantErrorPayload> {
-    let roots = state
-        .roots
-        .read()
-        .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))
-        .map_err(AssistantErrorPayload::from)?;
-    let resolved = resolve_open_path(&roots, &root_id, Path::new(&path))
-        .map_err(AssistantErrorPayload::from)?;
-    platform::desktop::open_path(&resolved).map_err(Into::into)
+    let _ = (state, root_id, path);
+    Err(WorkAssistantError::blocked(
+        "file opening requires a native preview and one-time approval token",
+    )
+    .into())
 }
 
 #[tauri::command]
@@ -307,42 +462,208 @@ pub fn work_assistant_desktop_reveal_file(
     root_id: String,
     path: String,
 ) -> Result<(), AssistantErrorPayload> {
-    let roots = state
-        .roots
-        .read()
-        .map_err(|_| WorkAssistantError::protocol("authorized roots lock is unavailable"))
-        .map_err(AssistantErrorPayload::from)?;
-    let resolved = resolve_reveal_path(&roots, &root_id, Path::new(&path))
-        .map_err(AssistantErrorPayload::from)?;
-    platform::desktop::reveal_file(&resolved).map_err(Into::into)
-}
-
-#[tauri::command]
-pub fn work_assistant_validate_application_selection(
-    path: String,
-) -> Result<String, AssistantErrorPayload> {
-    validate_application_alias_path(path)
-        .map(|path| path.to_string_lossy().into_owned())
-        .map_err(Into::into)
+    let _ = (state, root_id, path);
+    Err(WorkAssistantError::blocked(
+        "file reveal requires a native preview and one-time approval token",
+    )
+    .into())
 }
 
 #[tauri::command]
 pub fn work_assistant_list_applications(
     state: State<'_, WorkAssistantState>,
-) -> Result<Vec<RegisteredApplication>, AssistantErrorPayload> {
+) -> Result<Vec<RegisteredApplicationSummary>, AssistantErrorPayload> {
     let _guard = application_guard(&state).map_err(AssistantErrorPayload::from)?;
-    load_applications(&applications_path(&state)).map_err(Into::into)
+    load_applications(&applications_path(&state))
+        .map(|applications| {
+            applications
+                .iter()
+                .map(RegisteredApplicationSummary::from)
+                .collect()
+        })
+        .map_err(Into::into)
 }
 
-/// Register a path that was selected by the native picker.  This command deliberately has no
-/// model-facing tool manifest; the agent can only launch an already persisted opaque id.
+/// Return only opaque launch targets to model-facing callers.  Executable paths remain native
+/// state and are never included in this response.
 #[tauri::command]
-pub fn work_assistant_register_application_from_picker(
+pub fn work_assistant_list_available_applications(
+    state: State<'_, WorkAssistantState>,
+) -> Result<Vec<AvailableApplication>, AssistantErrorPayload> {
+    list_available_applications(&state).map_err(Into::into)
+}
+
+pub fn list_available_applications(
+    state: &WorkAssistantState,
+) -> Result<Vec<AvailableApplication>, WorkAssistantError> {
+    let _guard = application_guard(state)?;
+    let mut applications = load_applications(&applications_path(state))?
+        .into_iter()
+        .filter_map(|application| {
+            (application.platform == std::env::consts::OS
+                && validate_application_alias_path(&application.executable_path).is_ok())
+            .then(|| AvailableApplication {
+                id: application.id,
+                label: application.label,
+                platform: application.platform,
+                kind: "registered".into(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    applications.extend(
+        discover_builtin_applications()
+            .into_iter()
+            .map(|application| AvailableApplication {
+                id: application.id,
+                label: application.label,
+                platform: application.platform,
+                kind: application.kind,
+            }),
+    );
+    Ok(applications)
+}
+
+/// Confirm that an opaque application id still resolves to a currently trusted launch target.
+/// The model never receives the path and execution repeats the stronger path validation before
+/// spawning the process.
+pub(crate) fn validate_available_application_id(
+    state: &WorkAssistantState,
+    application_id: &str,
+) -> Result<(), WorkAssistantError> {
+    bind_application_launch_target(state, application_id).map(|_| ())
+}
+
+fn discover_builtin_applications() -> Vec<ResolvedApplication> {
+    builtin_browser_candidates()
+        .into_iter()
+        .filter_map(|(id, label, path)| {
+            let valid = validate_builtin_application_path(&path).is_ok();
+            valid.then(|| ResolvedApplication {
+                id: id.into(),
+                label: label.into(),
+                platform: std::env::consts::OS.into(),
+                kind: "browser".into(),
+                path,
+            })
+        })
+        .collect()
+}
+
+fn builtin_browser_candidates() -> Vec<(&'static str, &'static str, PathBuf)> {
+    #[cfg(windows)]
+    {
+        let mut candidates = Vec::new();
+        for (id, label, relative_paths) in [
+            (
+                "browser.chrome",
+                "Google Chrome",
+                &[
+                    "Google\\Chrome\\Application\\chrome.exe",
+                    "Google\\Chrome Beta\\Application\\chrome.exe",
+                ][..],
+            ),
+            (
+                "browser.edge",
+                "Microsoft Edge",
+                &["Microsoft\\Edge\\Application\\msedge.exe"][..],
+            ),
+            (
+                "browser.firefox",
+                "Mozilla Firefox",
+                &["Mozilla Firefox\\firefox.exe"][..],
+            ),
+        ] {
+            for root in [
+                env::var_os("ProgramFiles"),
+                env::var_os("ProgramFiles(x86)"),
+            ] {
+                if let Some(root) = root {
+                    for relative in relative_paths {
+                        candidates.push((id, label, PathBuf::from(root.clone()).join(relative)));
+                    }
+                }
+            }
+        }
+        return candidates;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return vec![
+            (
+                "browser.chrome",
+                "Google Chrome",
+                PathBuf::from("/usr/bin/google-chrome"),
+            ),
+            (
+                "browser.chrome",
+                "Google Chrome",
+                PathBuf::from("/usr/bin/google-chrome-stable"),
+            ),
+            (
+                "browser.chromium",
+                "Chromium",
+                PathBuf::from("/usr/bin/chromium"),
+            ),
+            (
+                "browser.edge",
+                "Microsoft Edge",
+                PathBuf::from("/usr/bin/microsoft-edge"),
+            ),
+            (
+                "browser.firefox",
+                "Mozilla Firefox",
+                PathBuf::from("/usr/bin/firefox"),
+            ),
+            (
+                "browser.firefox",
+                "Mozilla Firefox",
+                PathBuf::from("/usr/bin/firefox-esr"),
+            ),
+        ];
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return [
+            ("browser.chrome", "Google Chrome", "Google Chrome.app"),
+            ("browser.edge", "Microsoft Edge", "Microsoft Edge.app"),
+            ("browser.firefox", "Mozilla Firefox", "Firefox.app"),
+        ]
+        .into_iter()
+        .map(|(id, label, bundle)| (id, label, PathBuf::from("/Applications").join(bundle)))
+        .collect();
+    }
+
+    #[allow(unreachable_code)]
+    Vec::new()
+}
+
+/// Ask the operating system to select and register an application alias. The WebView supplies
+/// only a display label; it cannot submit or replace the selected path.
+#[tauri::command]
+pub async fn work_assistant_register_application_from_picker(
+    app: AppHandle,
     state: State<'_, WorkAssistantState>,
     label: String,
-    path: String,
-) -> Result<RegisteredApplication, AssistantErrorPayload> {
-    register_application_from_picker(&state, label, path).map_err(Into::into)
+) -> Result<Option<RegisteredApplicationSummary>, AssistantErrorPayload> {
+    let Some(selected_path) = app
+        .dialog()
+        .file()
+        .set_title("选择要注册的应用")
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let selected_path = selected_path.into_path().map_err(|_| {
+        AssistantErrorPayload::from(WorkAssistantError::blocked(
+            "selected application must be a local file",
+        ))
+    })?;
+    register_application_from_picker(&state, label, selected_path)
+        .map(|application| Some(RegisteredApplicationSummary::from(&application)))
+        .map_err(Into::into)
 }
 
 pub fn register_application_from_picker(
@@ -387,10 +708,7 @@ pub fn register_application_from_picker(
         state,
         &crate::work_assistant::AuditEntry::new(
             "application_registered",
-            format!(
-                "applicationId={};label={}",
-                application.id, application.label
-            ),
+            format!("applicationId={}", application.id),
         ),
     );
     Ok(application)
@@ -432,24 +750,279 @@ pub fn remove_registered_application(
 
 #[tauri::command]
 pub fn work_assistant_launch_application(
-    state: State<'_, WorkAssistantState>,
-    application_id: String,
+    _state: State<'_, WorkAssistantState>,
+    _application_id: String,
 ) -> Result<(), AssistantErrorPayload> {
-    launch_registered_application(&state, &application_id).map_err(Into::into)
+    Err(WorkAssistantError::blocked(
+        "application launch requires a native preview and one-time approval token",
+    )
+    .into())
+}
+
+pub(crate) fn bind_application_launch_target(
+    state: &WorkAssistantState,
+    application_id: &str,
+) -> Result<ApplicationLaunchBinding, WorkAssistantError> {
+    let _guard = application_guard(state)?;
+    let (kind, label, canonical_path) = resolve_application_launch_path(state, application_id)?;
+    let target_kind = application_target_kind(&canonical_path)?;
+    let fingerprint = fingerprint_application_target(&canonical_path)?;
+    Ok(ApplicationLaunchBinding {
+        app_id: application_id.to_owned(),
+        label,
+        canonical_path,
+        kind,
+        target_kind,
+        fingerprint,
+    })
+}
+
+pub(crate) fn launch_bound_application(
+    state: &WorkAssistantState,
+    binding: &ApplicationLaunchBinding,
+) -> Result<(), WorkAssistantError> {
+    let canonical_path = {
+        let _guard = application_guard(state)?;
+        let (kind, label, canonical_path) =
+            resolve_application_launch_path(state, &binding.app_id)?;
+        if kind != binding.kind
+            || label != binding.label
+            || canonical_path != binding.canonical_path
+        {
+            return Err(WorkAssistantError::stale_preview(
+                "application target changed; create a new preview",
+            ));
+        }
+        let target_kind = application_target_kind(&canonical_path)?;
+        if target_kind != binding.target_kind {
+            return Err(WorkAssistantError::stale_preview(
+                "application target type changed; create a new preview",
+            ));
+        }
+        let fingerprint = fingerprint_application_target(&canonical_path)?;
+        if fingerprint != binding.fingerprint {
+            return Err(WorkAssistantError::stale_preview(
+                "application target changed; create a new preview",
+            ));
+        }
+        canonical_path
+    };
+
+    let result = platform::desktop::launch_application(&canonical_path);
+    let outcome = if result.is_ok() { "ok" } else { "failed" };
+    let _ = append_audit_entry(
+        state,
+        &AuditEntry::new(
+            "application_launch",
+            format!(
+                "applicationId={};kind={};outcome={outcome}",
+                binding.app_id, binding.kind
+            ),
+        ),
+    );
+    result
 }
 
 pub fn launch_registered_application(
     state: &WorkAssistantState,
     application_id: &str,
 ) -> Result<(), WorkAssistantError> {
-    let _guard = application_guard(state)?;
+    let binding = bind_application_launch_target(state, application_id)?;
+    launch_bound_application(state, &binding)
+}
+
+fn resolve_application_launch_path(
+    state: &WorkAssistantState,
+    application_id: &str,
+) -> Result<(String, String, PathBuf), WorkAssistantError> {
+    if application_id.trim().is_empty() || application_id.chars().count() > 160 {
+        return Err(WorkAssistantError::blocked("application id is invalid"));
+    }
+    if let Some(application) = discover_builtin_applications()
+        .into_iter()
+        .find(|application| application.id == application_id)
+    {
+        let path = validate_builtin_application_path(&application.path)?;
+        return Ok(("browser".to_owned(), application.label, path));
+    }
+
     let applications = load_applications(&applications_path(state))?;
     let application = applications
         .iter()
         .find(|application| application.id == application_id)
         .ok_or_else(|| WorkAssistantError::blocked("registered application was not found"))?;
+    if application.platform != std::env::consts::OS {
+        return Err(WorkAssistantError::blocked(
+            "registered application belongs to another platform",
+        ));
+    }
     let path = validate_application_alias_path(&application.executable_path)?;
-    platform::desktop::launch_application(&path)
+    Ok(("registered".to_owned(), application.label.clone(), path))
+}
+
+fn application_target_kind(path: &Path) -> Result<String, WorkAssistantError> {
+    let metadata = fs::metadata(path)
+        .map_err(|_| WorkAssistantError::blocked("application target could not be inspected"))?;
+    if metadata.is_file() {
+        return Ok("file".to_owned());
+    }
+    if cfg!(target_os = "macos") && metadata.is_dir() {
+        return Ok("macos_bundle".to_owned());
+    }
+    Err(WorkAssistantError::blocked("application target is invalid"))
+}
+
+fn fingerprint_application_target(path: &Path) -> Result<String, WorkAssistantError> {
+    let metadata = fs::metadata(path)
+        .map_err(|_| WorkAssistantError::blocked("application target could not be inspected"))?;
+    if metadata.is_file() {
+        return fingerprint_file(path);
+    }
+    if cfg!(target_os = "macos") && metadata.is_dir() {
+        return fingerprint_macos_bundle(path);
+    }
+    Err(WorkAssistantError::blocked("application target is invalid"))
+}
+
+fn fingerprint_file(path: &Path) -> Result<String, WorkAssistantError> {
+    let mut file = fs::File::open(path)
+        .map_err(|_| WorkAssistantError::blocked("application target could not be opened"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| WorkAssistantError::blocked("application target could not be read"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn fingerprint_macos_bundle(path: &Path) -> Result<String, WorkAssistantError> {
+    let contents = path.join("Contents");
+    let info_plist = contents.join("Info.plist");
+    let executable_dir = contents.join("MacOS");
+    if fs::symlink_metadata(&info_plist)
+        .map_err(|_| WorkAssistantError::blocked("macOS application bundle is incomplete"))?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(WorkAssistantError::blocked(
+            "macOS application bundle contains an unsafe link",
+        ));
+    }
+    if !fs::metadata(&info_plist)
+        .map_err(|_| WorkAssistantError::blocked("macOS application bundle is incomplete"))?
+        .is_file()
+    {
+        return Err(WorkAssistantError::blocked(
+            "macOS application bundle is incomplete",
+        ));
+    }
+    if !fs::metadata(&executable_dir)
+        .map_err(|_| WorkAssistantError::blocked("macOS application bundle is incomplete"))?
+        .is_dir()
+    {
+        return Err(WorkAssistantError::blocked(
+            "macOS application bundle is incomplete",
+        ));
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"papyrus-macos-bundle-v1");
+    hash_named_file(&mut hasher, "Contents/Info.plist", &info_plist)?;
+
+    let mut executables = fs::read_dir(&executable_dir)
+        .map_err(|_| WorkAssistantError::blocked("macOS application bundle could not be read"))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| WorkAssistantError::blocked("macOS application bundle could not be read"))?;
+    executables.sort();
+    let mut executable_count = 0usize;
+    for executable in executables {
+        let metadata = fs::symlink_metadata(&executable).map_err(|_| {
+            WorkAssistantError::blocked("macOS application executable could not be inspected")
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(WorkAssistantError::blocked(
+                "macOS application bundle contains an unsafe link",
+            ));
+        }
+        if metadata.is_file() {
+            let relative = executable
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    WorkAssistantError::blocked("macOS application executable name is invalid")
+                })?;
+            hash_named_file(
+                &mut hasher,
+                &format!("Contents/MacOS/{relative}"),
+                &executable,
+            )?;
+            executable_count += 1;
+        }
+    }
+    if executable_count == 0 {
+        return Err(WorkAssistantError::blocked(
+            "macOS application bundle has no executable",
+        ));
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_named_file(hasher: &mut Sha256, name: &str, path: &Path) -> Result<(), WorkAssistantError> {
+    hasher.update(name.as_bytes());
+    hasher.update([0]);
+    let digest = fingerprint_file(path)?;
+    hasher.update(digest.as_bytes());
+    hasher.update([0]);
+    Ok(())
+}
+
+fn validate_builtin_application_path(path: &Path) -> Result<PathBuf, WorkAssistantError> {
+    let canonical = fs::canonicalize(path).map_err(|_| {
+        WorkAssistantError::blocked("detected browser application is no longer available")
+    })?;
+    // Built-in IDs are resolved from the catalog on every launch. Requiring the canonical path
+    // to match a current catalog entry prevents a discovered browser from being replaced with an
+    // arbitrary executable or workspace symlink between discovery and execution.
+    let catalog_match = builtin_browser_candidates()
+        .into_iter()
+        .filter_map(|(_, _, candidate)| fs::canonicalize(candidate).ok())
+        .any(|candidate| candidate == canonical);
+    if !catalog_match {
+        return Err(WorkAssistantError::blocked(
+            "detected browser path is not a trusted system installation",
+        ));
+    }
+    let metadata = fs::metadata(&canonical).map_err(|_| {
+        WorkAssistantError::blocked("detected browser application could not be inspected")
+    })?;
+    if cfg!(target_os = "macos") {
+        if !metadata.is_dir() {
+            return Err(WorkAssistantError::blocked(
+                "detected browser bundle is invalid",
+            ));
+        }
+    } else if !metadata.is_file() {
+        return Err(WorkAssistantError::blocked(
+            "detected browser executable is invalid",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(WorkAssistantError::blocked(
+                "detected browser executable is not executable",
+            ));
+        }
+    }
+    Ok(canonical)
 }
 
 fn applications_path(state: &WorkAssistantState) -> PathBuf {
@@ -631,6 +1204,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_shortcut_and_shell_formats_instead_of_treating_them_as_documents() {
+        for extension in [
+            "url",
+            "webloc",
+            "website",
+            "scf",
+            "library-ms",
+            "settingcontent-ms",
+            "search-ms",
+            "inetloc",
+        ] {
+            let path = PathBuf::from(format!("shortcut.{extension}"));
+            assert_eq!(
+                validate_open_file(&path).unwrap_err().code,
+                "blocked",
+                "{extension}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_existing_executable_signatures_and_shebang_files_but_allows_plain_files() {
         let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
@@ -713,6 +1307,36 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_bundle_fingerprint_changes_for_metadata_and_executable_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("papyrus-macos-bundle-{}", Uuid::new_v4()));
+        let bundle = directory.join("Editor.app");
+        let contents = bundle.join("Contents");
+        let executable_dir = contents.join("MacOS");
+        fs::create_dir_all(&executable_dir).unwrap();
+        let info = contents.join("Info.plist");
+        let executable = executable_dir.join("Editor");
+        fs::write(&info, "original metadata").unwrap();
+        fs::write(&executable, b"original executable").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let initial = fingerprint_macos_bundle(&bundle).unwrap();
+        fs::write(&executable, b"replaced executable").unwrap();
+        let executable_replaced = fingerprint_macos_bundle(&bundle).unwrap();
+        assert_ne!(initial, executable_replaced);
+
+        fs::write(&info, "replaced metadata").unwrap();
+        let metadata_replaced = fingerprint_macos_bundle(&bundle).unwrap();
+        assert_ne!(executable_replaced, metadata_replaced);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[test]
     fn application_aliases_persist_and_launch_by_opaque_id_contract() {
         let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
@@ -757,6 +1381,115 @@ mod tests {
             assert!(launch_registered_application(&state, "missing").is_err());
         }
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn registered_application_summary_never_serializes_the_executable_path() {
+        let executable_sentinel = "C:/private/PAPYRUS_EXECUTABLE_SENTINEL.exe";
+        let application = RegisteredApplication {
+            id: "app-1".into(),
+            label: "Editor".into(),
+            executable_path: PathBuf::from(executable_sentinel),
+            platform: "windows".into(),
+            created_at: 1,
+        };
+
+        let serialized = serde_json::to_string(&RegisteredApplicationSummary::from(&application))
+            .expect("summary must be serializable");
+
+        assert!(!serialized.contains(executable_sentinel));
+        assert!(!serialized.contains("executablePath"));
+        assert!(serialized.contains("app-1"));
+        assert!(serialized.contains("Editor"));
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[test]
+    fn application_registration_audit_never_records_the_user_supplied_label() {
+        let directory = std::env::temp_dir().join(format!("papyrus-desktop-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let state = test_state(&directory);
+        let executable = directory.join(if cfg!(windows) { "tool.exe" } else { "tool" });
+        fs::write(&executable, b"placeholder").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&executable, permissions).unwrap();
+        }
+
+        let sensitive_label = "PAPYRUS_AUDIT_LABEL_SENTINEL_7f312a";
+        register_application_from_picker(&state, sensitive_label.into(), &executable).unwrap();
+
+        let audit = crate::work_assistant::read_audit_entries(&state.audit_path).unwrap();
+        let entry = audit
+            .iter()
+            .find(|entry| entry.event == "application_registered")
+            .expect("registration should leave an audit receipt");
+        assert!(!entry.detail.contains(sensitive_label));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn builtin_application_validation_rejects_an_unregistered_path() {
+        let directory = std::env::temp_dir().join(format!("papyrus-builtin-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join(if cfg!(windows) {
+            "browser.exe"
+        } else {
+            "browser"
+        });
+        fs::write(
+            &candidate,
+            if cfg!(windows) {
+                b"MZ\x90\0".as_slice()
+            } else {
+                b"#!/bin/sh\n".as_slice()
+            },
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&candidate).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&candidate, permissions).unwrap();
+        }
+        assert_eq!(
+            validate_builtin_application_path(&candidate)
+                .unwrap_err()
+                .code,
+            "blocked"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn builtin_browser_catalog_excludes_user_writable_install_locations() {
+        let candidates = builtin_browser_candidates();
+
+        #[cfg(windows)]
+        {
+            if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+                let local_app_data = PathBuf::from(local_app_data);
+                assert!(candidates
+                    .iter()
+                    .all(|(_, _, path)| !path.starts_with(&local_app_data)));
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        assert!(candidates
+            .iter()
+            .all(|(_, _, path)| path.starts_with("/Applications")));
+
+        #[cfg(target_os = "linux")]
+        assert!(candidates
+            .iter()
+            .all(|(_, _, path)| path.starts_with("/usr/bin")));
     }
 
     #[test]

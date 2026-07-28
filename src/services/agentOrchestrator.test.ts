@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
 import {
+  assertPersistentLedgerTaskClaimed,
   canUseSecretarySubAgents,
+  formatSecretaryRunFailure,
   isLightweightSecretaryTask,
   planAgentRun,
   sendFlowMessage,
   shouldContinueSecretaryGoalCycle,
 } from './agentOrchestrator'
+import { LlmRequestError } from './llmClient'
 import { activeSecretaryRunId, cancelSecretaryRun, finishSecretaryRun } from './secretaryRunController'
 import { useAppStore } from '../stores/useAppStore'
 
@@ -20,6 +23,27 @@ afterEach(() => {
 })
 
 describe('secretary goal cycle cancellation', () => {
+  it('stops a persisted recovery task when the ledger claim is missing', () => {
+    expect(() => assertPersistentLedgerTaskClaimed('task-recovery-1', undefined))
+      .toThrow('未能安全认领')
+  })
+
+  it('uses specific no-send wording for quota and authentication failures', () => {
+    expect(formatSecretaryRunFailure(new LlmRequestError('raw', {
+      code: 'auto_quota_exhausted',
+      autoQuota: { monthly_used: 300, monthly_limit: 300, monthly_remaining: 0, daily_remaining: null },
+    }))).toBe('本月 Auto 额度已用完，已用 300 / 300 次，请等待下月刷新或升级套餐。本条消息未发送。')
+    expect(formatSecretaryRunFailure(new LlmRequestError('raw', { code: 'quota_exhausted' })))
+      .toContain('积分余额不足，本条消息未发送')
+    expect(formatSecretaryRunFailure(new LlmRequestError('raw', { code: 'unauthorized' })))
+      .toContain('登录已过期')
+  })
+
+  it('does not claim a request was unsent when the transport result is uncertain', () => {
+    expect(formatSecretaryRunFailure(new LlmRequestError('raw', { code: 'request_uncertain' })))
+      .toContain('请求结果不确定')
+  })
+
   it('keeps a greeting out of the planner and tool todo path', async () => {
     const plan = await planAgentRun('你好', 'high')
 

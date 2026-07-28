@@ -184,7 +184,8 @@ export type ScallionPlan = {
   manualModels?: string[]
   autoModels?: string[]
   autoMonthlyCalls?: number
-  autoDailyCalls?: number
+  autoDailyCalls?: number | null
+  autoDailyUnlimited?: boolean
   externalApi?: boolean | string
   updatedAt: number
 }
@@ -228,11 +229,12 @@ export type ScallionQuota = {
   manualModels?: string[]
   autoModels?: string[]
   autoMonthlyCalls?: number
-  autoDailyCalls?: number
+  autoDailyCalls?: number | null
+  autoDailyUnlimited?: boolean
   autoMonthlyUsed?: number
   autoDailyUsed?: number
   autoMonthlyRemaining?: number
-  autoDailyRemaining?: number
+  autoDailyRemaining?: number | null
   externalApi?: boolean | string
   memberPriceLabel: string
   upgradeUrl: string
@@ -4275,6 +4277,8 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
   }
 
   const item = value as Partial<ScallionQuota>
+  const planKey = typeof item.planKey === 'string' ? item.planKey.trim() || undefined : undefined
+  const autoDailyUnlimited = item.autoDailyUnlimited === true
   return {
     remaining: Math.max(0, Number(item.remaining ?? 0)),
     pointsBalance:
@@ -4282,7 +4286,7 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
     balance: item.balance === undefined ? undefined : Math.max(0, Number(item.balance) || 0),
     quota: item.quota === undefined ? undefined : Math.max(0, Number(item.quota) || 0),
     unifiedPoints: item.unifiedPoints === true,
-    planKey: typeof item.planKey === 'string' ? item.planKey.trim() || undefined : undefined,
+    planKey,
     planName: typeof item.planName === 'string' ? item.planName.trim() || undefined : undefined,
     planExpiresAt:
       typeof item.planExpiresAt === 'string' || item.planExpiresAt === null
@@ -4297,11 +4301,16 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
     manualModels: sanitizeStringArray(item.manualModels),
     autoModels: sanitizeStringArray(item.autoModels),
     autoMonthlyCalls: sanitizeNonNegativeNumber(item.autoMonthlyCalls),
-    autoDailyCalls: sanitizeNonNegativeNumber(item.autoDailyCalls),
+    autoDailyCalls: sanitizeOptionalQuotaLimit(item.autoDailyCalls),
+    autoDailyUnlimited: autoDailyUnlimited ? true : undefined,
     autoMonthlyUsed: sanitizeNonNegativeNumber(item.autoMonthlyUsed),
     autoDailyUsed: sanitizeNonNegativeNumber(item.autoDailyUsed),
     autoMonthlyRemaining: sanitizeNonNegativeNumber(item.autoMonthlyRemaining),
-    autoDailyRemaining: sanitizeNonNegativeNumber(item.autoDailyRemaining),
+    // A pre-1.1.1 Free cache may contain daily_remaining: 0 from the old
+    // server policy. Never use that stale value as a local send blocker.
+    autoDailyRemaining: planKey === 'free' && !autoDailyUnlimited
+      ? undefined
+      : sanitizeOptionalQuotaLimit(item.autoDailyRemaining),
     externalApi:
       typeof item.externalApi === 'boolean'
         ? item.externalApi
@@ -4353,7 +4362,8 @@ function sanitizeScallionPlan(value: unknown): ScallionPlan | undefined {
     manualModels: list(item.manualModels),
     autoModels: list(item.autoModels),
     autoMonthlyCalls: number(item.autoMonthlyCalls),
-    autoDailyCalls: number(item.autoDailyCalls),
+    autoDailyCalls: item.autoDailyCalls === null ? null : number(item.autoDailyCalls),
+    autoDailyUnlimited: item.autoDailyUnlimited === true ? true : undefined,
     externalApi,
     updatedAt: typeof item.updatedAt === 'number' ? item.updatedAt : Date.now(),
   }
@@ -4369,6 +4379,11 @@ function sanitizeNonNegativeNumber(value: unknown) {
   if (value === undefined || value === null || value === '') return undefined
   const number = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(number) ? Math.max(0, number) : undefined
+}
+
+function sanitizeOptionalQuotaLimit(value: unknown) {
+  if (value === null) return null
+  return sanitizeNonNegativeNumber(value)
 }
 
 function sanitizeModelCallCacheMetrics(value: unknown): ModelCallCacheMetric[] {

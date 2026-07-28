@@ -268,6 +268,11 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                         {scallionQuota?.autoMonthlyRemaining !== undefined
                           ? ` · Auto 月余 ${scallionQuota.autoMonthlyRemaining}`
                           : ''}
+                        {scallionQuota?.autoDailyUnlimited === true
+                          ? ' · 日限额不限'
+                          : scallionQuota?.autoDailyRemaining !== undefined
+                            ? ` · 日余 ${scallionQuota.autoDailyRemaining}`
+                            : ''}
                         {scallionQuota?.planExpiresAt ? ` · 到期 ${formatExpiry(scallionQuota.planExpiresAt)}` : ''}
                         {scallionQuota?.updatedAt ? ` · ${formatSyncTime(scallionQuota.updatedAt)}` : ''}
                         {scallionSync.quota.error ? ` · ${scallionSync.quota.error}` : ''}

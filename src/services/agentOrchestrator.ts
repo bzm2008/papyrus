@@ -23,6 +23,7 @@ import {
   callOpenAICompatible,
   callOpenAICompatibleStream,
   canCallProvider,
+  LlmRequestError,
   type ChatMessage,
 } from './llmClient'
 import { getAgentSamplingProfile, type AgentSamplingProfile } from './agentSamplingService'
@@ -49,8 +50,8 @@ import { finishSecretaryRun, secretaryRunPauseRequested, startSecretaryRun } fro
 import {
   beginSecretaryLedgerRun,
   checkpointSecretaryLedgerRun,
+  checkpointSecretaryLedgerToolResult,
   finishSecretaryLedgerRun,
-  recordSecretaryLedgerToolReceipt,
   type SecretaryLedgerRun,
 } from './secretaryLedgerRuntime'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
@@ -132,6 +133,68 @@ export function shouldContinueSecretaryGoalCycle(
   return outcome?.status === 'completed' && outcome.conversationOnly !== true
 }
 
+/**
+ * A recovery run must own the persisted task it was asked to resume.  The
+ * ledger claim is a safety boundary: continuing without it could execute an
+ * old request twice or operate on another scheduler's task.
+ */
+export function assertPersistentLedgerTaskClaimed(
+  taskId: string | undefined,
+  ledgerRun: Pick<SecretaryLedgerRun, 'taskId'> | undefined,
+): asserts ledgerRun is Pick<SecretaryLedgerRun, 'taskId'> {
+  if (taskId && (!ledgerRun || ledgerRun.taskId !== taskId)) {
+    throw new Error(`持久任务 ${taskId} 未能安全认领，已停止恢复。`)
+  }
+}
+
+/**
+ * The visible message must distinguish a request that was never accepted
+ * from a transport result whose charge/execution state is genuinely unknown.
+ */
+export function formatSecretaryRunFailure(error: unknown) {
+  if (error instanceof LlmRequestError) {
+    if (error.code === 'auto_quota_exhausted') {
+      const quota = error.autoQuota && typeof error.autoQuota === 'object'
+        ? error.autoQuota as Record<string, unknown>
+        : undefined
+      const monthlyRemaining = numberFromQuota(quota?.monthly_remaining ?? quota?.monthlyRemaining)
+      const dailyRemaining = numberFromQuota(quota?.daily_remaining ?? quota?.dailyRemaining)
+      const monthlyUsed = numberFromQuota(quota?.monthly_used ?? quota?.monthlyUsed)
+      const monthlyLimit = numberFromQuota(quota?.monthly_limit ?? quota?.monthlyLimit)
+      if (monthlyRemaining === 0) {
+        const used = monthlyUsed ?? monthlyLimit ?? 0
+        const limit = monthlyLimit ?? used
+        return `本月 Auto 额度已用完，已用 ${used} / ${limit} 次，请等待下月刷新或升级套餐。本条消息未发送。`
+      }
+      if (dailyRemaining === 0) {
+        return '今日 Auto 额度已用完，明日刷新；本条消息未发送。'
+      }
+      return 'Auto 额度已用完，本条消息未发送。请等待额度刷新或升级套餐。'
+    }
+    if (error.code === 'quota_exhausted') {
+      return '积分余额不足，本条消息未发送。请充值或进入主站升级套餐。'
+    }
+    if (error.code === 'unauthorized') {
+      return '登录已过期，请重新登录主站。本条消息未发送。'
+    }
+    if (error.code === 'plan_model_forbidden') {
+      return '当前套餐不可用该模型。本条消息未发送；已刷新模型目录和额度，请选择套餐内模型后重试。'
+    }
+    if (error.code === 'model_unavailable') {
+      return '当前模型已下线或暂不可用。本条消息未发送；请刷新模型目录后重试。'
+    }
+    if (error.code === 'request_uncertain') {
+      return 'Scallion 请求结果不确定，未自动重试以避免重复扣费。请确认额度和历史记录后再重试。'
+    }
+  }
+  return `本轮请求未完成：${error instanceof Error ? error.message : '未知错误'}。未执行后续工具操作，可修改后重试。`
+}
+
+function numberFromQuota(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) && number >= 0 ? Math.round(number) : undefined
+}
+
 /** Low effort is deliberately a single-agent path to keep latency and cost predictable. */
 export function canUseSecretarySubAgents(thinkingEffort: FlowThinkingEffort) {
   return thinkingEffort !== 'low'
@@ -173,7 +236,7 @@ type SendFlowMessageOptions = Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mod
 const sharedAgentRules = [
   'Papyrus 是一位偏文科的本地优先秘书，默认帮助用户完成写作、研究、沟通、整理和办公工作。',
   '你可以使用联网搜索、项目上下文和文稿补丁工具。不要因为训练截止时间而拒绝实时问题；需要实时信息时应主动规划联网搜索。',
-  '秘书模式具备受控的电脑、浏览器和终端助手：可以读取授权工作区、查看桌面状态、打开应用或网址、读取已连接浏览器页面，并在安全预览和用户审批后运行固定的 Git/npm/Cargo/版本诊断命令。终端不接受 shell 字符串或任意脚本，密码、验证码、支付和敏感表单永远不会代为操作。',
+  '秘书模式具备受控的电脑、浏览器和终端助手：可以读取授权工作区、查看桌面状态、打开已识别的常见应用或网址、读取已连接浏览器页面，并在安全预览和用户审批后运行只读 Git/版本/系统诊断。终端不接受 shell 字符串、项目脚本或任意可执行路径，密码、验证码、支付和敏感表单永远不会代为操作。',
   '不要笼统声称“无法访问电脑或浏览器”；如果用户只是询问能力，说明上述真实能力和审批边界。如果用户提出具体操作，交给受控电脑助手或 Browser Bridge，不要虚构已完成。',
   '事实、推断、设定和建议必须分开。不要编造来源。',
   '只有当任务需要产出正文、续写、改写、插入、替换或用户明确要求写入文稿时，才生成文稿补丁。',
@@ -277,16 +340,10 @@ export async function sendFlowMessage(
     if (event.type === 'tool.completed') {
       const toolName = toolNamesById.get(event.toolCallId) ?? 'other'
       enqueueLedgerWrite(async () => {
-        await recordSecretaryLedgerToolReceipt(ledgerRun, {
+        await checkpointSecretaryLedgerToolResult(ledgerRun, {
           toolName,
           ok: event.result.ok,
           errorCode: event.result.errorCode,
-        })
-        await checkpointSecretaryLedgerRun(ledgerRun, {
-          phase: 'tool_result',
-          summary: '受控工具结果已记录。',
-          nextStep: '继续秘书任务。',
-          status: 'running',
         })
       })
     }
@@ -364,6 +421,9 @@ export async function sendFlowMessage(
         endedAt: Date.now(),
       })
     }
+    // A task-center resume is different from a normal local run: if its
+    // persisted task was not claimed, stop before any model or tool work.
+    assertPersistentLedgerTaskClaimed(harnessInput.ledgerTaskId, ledgerRun)
     if (ledgerRun) {
       try {
         await checkpointSecretaryLedgerRun(ledgerRun, {
@@ -407,6 +467,10 @@ export async function sendFlowMessage(
         availability,
         availableToolNames: capabilityStatus.filter((status) => status.available).map((status) => status.name),
       }).filter((tool) => classification.domain !== 'mixed' || tool.defaultRisk === 'read')
+      const capabilityNotes = capabilityStatus
+        .filter((status) => !status.available)
+        .slice(0, 24)
+        .map((status) => `${status.name}: ${status.reason || '当前不可用'}`)
       const workRouting = selectModelForRole('agent', {
         complexity: classification.complexity,
         writeIntent: false,
@@ -421,6 +485,7 @@ export async function sendFlowMessage(
         prompt: routedExecutionContent,
         toolNames: definitions.map((tool) => tool.name),
         toolSchemas: definitions.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+        capabilityNotes,
         modelCall: (messages, currentSignal) => callOpenAICompatible(workRouting.provider, messages, currentSignal, sampling),
         executeTool: (toolCall, currentSignal) => executeAssistantToolCall({ runId: run.id, toolCall, signal: currentSignal }),
         finalStream: classification.domain === 'work_assistant'
@@ -578,21 +643,22 @@ export async function sendFlowMessage(
       dispatchOrderedWorkAssistantEvent({ type: 'run.failed', runId: run.id, code: 'secretary_run_failed', message: error instanceof Error ? error.message : '秘书运行失败。', recoverable: true, at: Date.now() })
     }
     failAgentRun(run, error)
+    const message = formatSecretaryRunFailure(error)
     useAppStore.getState().addFlowMessage({
       role: 'assistant',
       agentId: 'writer',
-      content: `Agent 编排失败：${error instanceof Error ? error.message : '未知错误'}`,
+      content: message,
     })
-    useAppStore.getState().setLlmRunState('error', 'Agent 编排失败')
+    useAppStore.getState().setLlmRunState('error', message)
     await finalizeLedger({
       status: 'failed',
-      summary: error instanceof Error ? error.message : '秘书运行失败。',
+      summary: message,
       nextStep: '可从任务中心重试，或调整请求后重新发送。',
     })
     return {
       status: 'failed',
       runId: run.id,
-      error: error instanceof Error ? error.message : '未知错误',
+      error: message,
     }
   } finally {
     finishSecretaryRun(run.id)

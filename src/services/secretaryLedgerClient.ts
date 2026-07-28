@@ -25,6 +25,7 @@ export type SecretaryLedgerFailureCode =
   | 'native_unavailable'
   | 'invalid_payload'
   | 'invalid_input'
+  | 'task_busy'
 
 export type SecretaryLedgerSuccess<T> = {
   ok: true
@@ -273,6 +274,7 @@ type SecretaryLedgerCommand =
   | 'secretary_ledger_create_task'
   | 'secretary_ledger_start_task'
   | 'secretary_ledger_claim_task'
+  | 'secretary_ledger_reconcile_recovery'
   | 'secretary_ledger_persist_task_progress'
   | 'secretary_ledger_get_task'
   | 'secretary_ledger_list_tasks'
@@ -419,6 +421,14 @@ export function claimSecretaryLedgerTask(
   return callWithAccess('secretary_ledger_claim_task', access, { id, input: normalizedInput }, parseOptionalTaskProgress)
 }
 
+/**
+ * A recovery reconciliation never resumes work. It only atomically converts
+ * a stranded running/approval task into a paused task with a safe checkpoint.
+ */
+export function reconcileSecretaryLedgerRecovery(access: SecretaryLedgerProjectAccess, id: string) {
+  return callWithAccess('secretary_ledger_reconcile_recovery', access, { id }, parseOptionalTaskProgress)
+}
+
 export function persistSecretaryLedgerTaskProgress(
   access: SecretaryLedgerProjectAccess,
   id: string,
@@ -516,8 +526,8 @@ async function callLedger<T>(
     const value = parser(payload)
     if (value === invalidPayload) return invalidPayloadResult()
     return { ok: true, value }
-  } catch {
-    return nativeUnavailableResult()
+  } catch (error) {
+    return nativeFailureResult(error)
   }
 }
 
@@ -1038,6 +1048,20 @@ function nativeUnavailableResult(): SecretaryLedgerFailure {
     code: 'native_unavailable',
     message: '秘书账本暂不可用，请稍后重试。',
   }
+}
+
+const TASK_BUSY_MESSAGE = '另一个秘书任务仍在进行，请先在项目现场完成、暂停或复核它。'
+
+function nativeFailureResult(error: unknown): SecretaryLedgerFailure {
+  const message = typeof error === 'string'
+    ? error
+    : error instanceof Error
+      ? error.message
+      : ''
+  if (message === TASK_BUSY_MESSAGE) {
+    return { ok: false, code: 'task_busy', message: TASK_BUSY_MESSAGE }
+  }
+  return nativeUnavailableResult()
 }
 
 function invalidPayloadResult(): SecretaryLedgerFailure {

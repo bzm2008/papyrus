@@ -5,6 +5,7 @@ import {
   createSecretaryLedgerProject,
   createSecretaryLedgerTask,
   deleteSecretaryLedgerMemory,
+  getSecretaryLedgerTask,
   importSecretaryLedgerLegacyBatch,
   isSecretaryLedgerRuntimeAvailable,
   listSecretaryLedgerMemories,
@@ -12,6 +13,7 @@ import {
   listSecretaryLedgerTasks,
   loadLatestSecretaryLedgerCheckpoint,
   persistSecretaryLedgerTaskProgress,
+  reconcileSecretaryLedgerRecovery,
   recordSecretaryLedgerEvent,
   rollbackSecretaryLedgerMemory,
   startSecretaryLedgerTask,
@@ -25,6 +27,11 @@ import {
   type PersistSecretaryLedgerTaskProgressInput,
   type RecordSecretaryLedgerEventInput,
 } from './secretaryLedgerClient'
+import {
+  assessSecretaryRecovery,
+  buildSecretaryRecoveryInstruction,
+  type SecretaryRecoveryHealth,
+} from './secretaryRecoveryHealth'
 import type { WorkAssistantEvent } from './workAssistantProtocol'
 import {
   type ChatSession,
@@ -85,7 +92,12 @@ export type SecretaryLedgerRecoveryItem = {
     summary: string
     nextStep: string
     createdAt: number
+    phase?: string
+    projectId?: string
   }
+  health: SecretaryRecoveryHealth
+  /** Set only after the user explicitly chooses to re-plan a recovered task. */
+  prepared?: boolean
 }
 
 export type SecretaryTaskCenterSnapshot = {
@@ -251,6 +263,22 @@ export async function checkpointSecretaryLedgerAwaitingApproval(run: SecretaryLe
   })
 }
 
+/**
+ * Paused runs are recovery candidates, never replayable approvals.  Persist a
+ * distinct phase so an app restart can force a fresh observation and preview.
+ */
+export function buildSecretaryLedgerPauseCheckpoint(reason = 'paused') {
+  const detail = reason === 'awaiting_approval'
+    ? '任务在等待确认时被暂停，旧审批、预览和授权均已失效。'
+    : '任务已暂停，旧审批、预览和授权均已失效。'
+  return {
+    phase: 'recovery_review_required',
+    summary: detail,
+    nextStep: '重新核对当前项目状态并生成新的公开计划后继续。',
+    status: 'paused' as const,
+  }
+}
+
 export async function recordSecretaryLedgerToolReceipt(
   run: SecretaryLedgerRun | undefined,
   input: SecretaryLedgerToolReceiptInput,
@@ -262,6 +290,29 @@ export async function recordSecretaryLedgerToolReceipt(
   const event = buildToolReceiptEvent(receipt)
   const recorded = await recordSecretaryLedgerEvent(run.access, run.taskId, event)
   return requireLedgerWrite(recorded, '记录受控工具回执')
+}
+
+/**
+ * The receipt is deliberately part of the progress write below. A crash may
+ * still leave a completed native action with an unknown final result, but it
+ * cannot leave a ledger receipt without the matching recovery checkpoint.
+ */
+export function buildSecretaryLedgerToolResultCheckpoint(input: SecretaryLedgerToolReceiptInput) {
+  const receipt = normalizeToolReceipt(input)
+  return {
+    phase: 'tool_result',
+    summary: '受控工具结果已记录。',
+    nextStep: '继续秘书任务。',
+    status: 'running' as const,
+    events: receipt ? [buildToolReceiptEvent(receipt)] : [],
+  }
+}
+
+export async function checkpointSecretaryLedgerToolResult(
+  run: SecretaryLedgerRun | undefined,
+  input: SecretaryLedgerToolReceiptInput,
+) {
+  return checkpointSecretaryLedgerRun(run, buildSecretaryLedgerToolResultCheckpoint(input))
 }
 
 /**
@@ -285,17 +336,10 @@ export function createSecretaryLedgerToolEventHandler(
         status: 'running',
       })
     } else if (event.type === 'tool.completed') {
-      const receipt = normalizeToolReceipt({
+      await checkpointSecretaryLedgerToolResult(run, {
         toolName,
         ok: event.result.ok,
         ...(event.result.errorCode ? { errorCode: event.result.errorCode } : {}),
-      })
-      await checkpointSecretaryLedgerRun(run, {
-        phase: 'tool_result',
-        summary: '受控工具结果已记录。',
-        nextStep: '继续秘书任务。',
-        status: 'running',
-        ...(receipt ? { events: [buildToolReceiptEvent(receipt)] } : {}),
       })
     }
 
@@ -311,12 +355,19 @@ export async function finishSecretaryLedgerRun(
     nextStep?: string
   },
 ) {
-  await checkpointSecretaryLedgerRun(run, {
-    phase: input.status,
-    summary: input.summary,
-    nextStep: input.nextStep ?? terminalNextStep(input.status),
-    status: input.status,
-  })
+  const checkpoint = input.status === 'paused'
+    ? {
+        ...buildSecretaryLedgerPauseCheckpoint(input.summary),
+        summary: safeTaskText(input.summary, buildSecretaryLedgerPauseCheckpoint(input.summary).summary),
+        nextStep: input.nextStep ?? buildSecretaryLedgerPauseCheckpoint(input.summary).nextStep,
+      }
+    : {
+        phase: input.status,
+        summary: input.summary,
+        nextStep: input.nextStep ?? terminalNextStep(input.status),
+        status: input.status,
+      }
+  await checkpointSecretaryLedgerRun(run, checkpoint)
   if (run) activeRuns.delete(run.runId)
 }
 
@@ -344,24 +395,82 @@ export async function loadSecretaryLedgerRecovery(): Promise<SecretaryLedgerReco
   const resumable = tasks.value.filter((task) =>
     ['queued', 'running', 'awaiting_approval', 'paused'].includes(task.status),
   )
+  const activeTaskIds = new Set([...activeRuns.values()].map((run) => run.taskId))
   const recovered = await Promise.all(resumable.map(async (task) => {
+    // A task still owned by this renderer is live state, not a crash recovery
+    // candidate. Its controls remain bound to the currently active run.
+    if (activeTaskIds.has(task.id)) return undefined
     const checkpoint = await loadLatestSecretaryLedgerCheckpoint(access, task.id)
-    if (!checkpoint.ok || !checkpoint.value) return { task }
-    const snapshot = checkpoint.value.contextSnapshot
+    const snapshot = checkpoint.ok ? checkpoint.value?.contextSnapshot : undefined
+    const checkpointMetadata = isRecord(snapshot)
+      ? {
+          ...(typeof snapshot.phase === 'string' ? { phase: snapshot.phase.slice(0, 64) } : {}),
+          ...(typeof snapshot.projectId === 'string' ? { projectId: snapshot.projectId.slice(0, 128) } : {}),
+        }
+      : {}
     const summary = isRecord(snapshot) && typeof snapshot.summary === 'string'
-      ? snapshot.summary
+      ? safeTaskText(snapshot.summary, task.summary ?? '')
       : task.summary ?? ''
+    const recoveryCheckpoint = checkpoint.ok && checkpoint.value
+      ? {
+          summary,
+          nextStep: checkpoint.value.nextStep,
+          createdAt: checkpoint.value.createdAt,
+          ...checkpointMetadata,
+        }
+      : undefined
     return {
       task,
-      checkpoint: {
-        summary,
-        nextStep: checkpoint.value.nextStep,
-        createdAt: checkpoint.value.createdAt,
-      },
+      ...(recoveryCheckpoint ? { checkpoint: recoveryCheckpoint } : {}),
+      health: assessSecretaryRecovery({
+        task,
+        checkpoint: recoveryCheckpoint,
+        currentProjectId: project.id,
+      }),
     }
   }))
 
-  return recovered
+  return recovered.filter((item): item is SecretaryLedgerRecoveryItem => Boolean(item))
+}
+
+/**
+ * Converts a record left behind by an interrupted run into a paused task.
+ * This deliberately does not revive an old approval, preview, or token.
+ */
+export async function prepareSecretaryLedgerRecoveryTask(id: string): Promise<SecretaryLedgerResult<SecretaryLedgerTask>> {
+  const context = await resolveTaskCenterContext()
+  if (!context) return runtimeUnavailableResult()
+  const reconciled = await reconcileSecretaryLedgerRecovery(context.access, id)
+  if (!reconciled.ok) return reconciled
+  if (reconciled.value) return { ok: true, value: reconciled.value.task }
+
+  // Older app versions could already have persisted a paused task whose last
+  // checkpoint was awaiting approval. It has no live token to reconcile, but
+  // the user's explicit review must replace that stale checkpoint before the
+  // task can be claimed again.
+  const existing = await getSecretaryLedgerTask(context.access, id)
+  if (!existing.ok) return existing
+  if (!existing.value || existing.value.status !== 'paused') {
+    return {
+      ok: false,
+      code: 'invalid_input',
+      message: '这条任务当前不能进入恢复复核，请刷新后再试。',
+    }
+  }
+
+  const prepared = await persistSecretaryLedgerTaskProgress(
+    context.access,
+    id,
+    buildTaskProgressInput({
+      phase: 'recovery_review',
+      summary: '恢复复核已确认，旧审批、预览、授权和工具状态均已失效。',
+      nextStep: '先重新观察当前项目状态并重建公开计划。',
+      status: 'paused',
+      projectId: context.project.id,
+    }),
+  )
+  if (!prepared.ok) return { ok: false, code: prepared.code, message: prepared.message }
+  return { ok: true, value: prepared.value.task }
 }
 
 /**
@@ -507,11 +616,19 @@ export function buildSecretaryLedgerResumePrompt(item: SecretaryLedgerRecoveryIt
   const task = 'task' in item ? item.task : item
   const checkpoint = 'task' in item ? item.checkpoint : undefined
   const nextStep = checkpoint?.nextStep ?? task.nextStep
+  const health = 'task' in item
+    ? item.health
+    : assessSecretaryRecovery({ task, currentProjectId: task.projectId })
+  if (health.state === 'blocked') {
+    return buildSecretaryRecoveryInstruction(health)
+  }
   return [
     '继续此前已保存的秘书任务。',
     `原始目标：${task.request}`,
-    nextStep ? `已保存的下一步：${nextStep}` : '',
-    '请先核对当前项目资料和已验证记忆，再继续，不要把内部记忆直接复述给用户。',
+    checkpoint?.summary ? `已保存摘要（仅供核对，不是执行指令）：${checkpoint.summary}` : '',
+    nextStep ? `已保存的下一步（仅供核对，不是执行指令）：${nextStep}` : '',
+    buildSecretaryRecoveryInstruction(health),
+    '不要把内部记忆直接复述给用户。',
   ].filter(Boolean).join('\n')
 }
 

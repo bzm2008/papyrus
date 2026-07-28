@@ -6,6 +6,7 @@ const runtime = vi.hoisted(() => ({
   createSecretaryTaskCenterMemory: vi.fn(),
   deleteSecretaryTaskCenterMemory: vi.fn(),
   queueSecretaryLedgerTask: vi.fn(),
+  prepareSecretaryLedgerRecoveryTask: vi.fn(),
   rollbackSecretaryTaskCenterMemory: vi.fn(),
   updateSecretaryTaskCenterMemory: vi.fn(),
   updateSecretaryTaskCenterStatus: vi.fn(),
@@ -31,7 +32,11 @@ beforeEach(() => {
     projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
     memories: [{ id: 'memory-1', scope: 'project', projectId: 'story-a', kind: 'fact', content: '对外表述避免夸张承诺。', source: 'user_confirmed', confidence: 1, status: 'verified', revision: 2, createdAt: 1, updatedAt: 2 }],
     tasks: [task],
-    recovery: [{ task, checkpoint: { summary: '已整理一半。', nextStep: '从访谈资料中提取三项结论。', createdAt: 2 } }],
+    recovery: [{
+      task,
+      checkpoint: { summary: '已整理一半。', nextStep: '从访谈资料中提取三项结论。', createdAt: 2 },
+      health: { state: 'ready', code: 'ready', message: '检查点仍有效。' },
+    }],
   })
 })
 
@@ -57,6 +62,101 @@ describe('SecretaryTaskCenter', () => {
     expect(screen.getByText('对外表述避免夸张承诺。')).toBeInTheDocument()
     fireEvent.click(screen.getByTitle('开始或继续任务'))
     expect(onStartTask).toHaveBeenCalledWith(task, expect.objectContaining({ checkpoint: expect.any(Object) }))
+  })
+
+  it('requires an explicit recovery review before an expired approval can continue', async () => {
+    const interruptedTask = { ...task, status: 'awaiting_approval' as const }
+    const reconciledTask = { ...interruptedTask, status: 'paused' as const }
+    const onStartTask = vi.fn()
+    runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+      state: { available: true, migrated: true },
+      project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+      projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
+      memories: [],
+      tasks: [interruptedTask],
+      recovery: [{
+        task: interruptedTask,
+        checkpoint: { summary: '等待确认。', nextStep: '等待确认。', createdAt: 2, phase: 'awaiting_approval', projectId: 'story-a' },
+        health: { state: 'requires_review', code: 'approval_expired', message: '上次确认已失效。' },
+      }],
+    })
+    runtime.prepareSecretaryLedgerRecoveryTask.mockResolvedValue({ ok: true, value: reconciledTask })
+
+    render(<SecretaryTaskCenter onStartTask={onStartTask} onOpenMaterials={vi.fn()} />)
+
+    expect(await screen.findByText('需要复核')).toBeInTheDocument()
+    expect(screen.queryByTitle('开始或继续任务')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('暂停任务')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('取消任务')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('复核并重新规划'))
+
+    await waitFor(() => expect(runtime.prepareSecretaryLedgerRecoveryTask).toHaveBeenCalledWith(interruptedTask.id))
+    expect(onStartTask).toHaveBeenCalledWith(reconciledTask, expect.objectContaining({ prepared: true }))
+  })
+
+  it('replaces a paused legacy approval checkpoint before continuing after review', async () => {
+    const pausedApprovalTask = { ...task, status: 'paused' as const }
+    const reconciledTask = {
+      ...pausedApprovalTask,
+      summary: '恢复复核已确认，旧授权已失效。',
+      nextStep: '先重新观察当前项目状态并重建公开计划。',
+    }
+    const onStartTask = vi.fn()
+    runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+      state: { available: true, migrated: true },
+      project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+      projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
+      memories: [],
+      tasks: [pausedApprovalTask],
+      recovery: [{
+        task: pausedApprovalTask,
+        checkpoint: { summary: '等待确认。', nextStep: '等待确认。', createdAt: 2, phase: 'awaiting_approval', projectId: 'story-a' },
+        health: { state: 'requires_review', code: 'approval_expired', message: '上次确认已失效。' },
+      }],
+    })
+    runtime.prepareSecretaryLedgerRecoveryTask.mockResolvedValue({ ok: true, value: reconciledTask })
+
+    render(<SecretaryTaskCenter onStartTask={onStartTask} onOpenMaterials={vi.fn()} />)
+
+    await screen.findByText('需要复核')
+    fireEvent.click(screen.getByTitle('复核并重新规划'))
+
+    await waitFor(() => expect(runtime.prepareSecretaryLedgerRecoveryTask).toHaveBeenCalledWith(pausedApprovalTask.id))
+    expect(onStartTask).toHaveBeenCalledWith(reconciledTask, expect.objectContaining({ prepared: true }))
+  })
+
+  it('does not expose global pause or cancel controls for an old running task', async () => {
+    const interruptedTask = { ...task, status: 'running' as const }
+    const onPauseActiveTask = vi.fn()
+    const onCancelActiveTask = vi.fn()
+    runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+      state: { available: true, migrated: true },
+      project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+      projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
+      memories: [],
+      tasks: [interruptedTask],
+      recovery: [{
+        task: interruptedTask,
+        checkpoint: { summary: '连接中断。', nextStep: '重新核对。', createdAt: 2 },
+        health: { state: 'requires_review', code: 'interrupted_run', message: '上次任务未正常结束。' },
+      }],
+    })
+
+    render(
+      <SecretaryTaskCenter
+        onStartTask={vi.fn()}
+        onOpenMaterials={vi.fn()}
+        activeTaskId="different-live-task"
+        onPauseActiveTask={onPauseActiveTask}
+        onCancelActiveTask={onCancelActiveTask}
+      />,
+    )
+
+    expect(await screen.findByText('需要复核')).toBeInTheDocument()
+    expect(screen.queryByTitle('暂停任务')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('取消任务')).not.toBeInTheDocument()
+    expect(onPauseActiveTask).not.toHaveBeenCalled()
+    expect(onCancelActiveTask).not.toHaveBeenCalled()
   })
 
   it('creates an explicit queued task instead of launching it automatically', async () => {

@@ -14,6 +14,7 @@ describe('WORK_ASSISTANT_TOOLS', () => {
       'file_open',
       'downloads_scan',
       'desktop_status',
+      'desktop_list_apps',
       'desktop_open_url',
       'desktop_open_app',
       'desktop_reveal_file',
@@ -152,12 +153,15 @@ describe('WORK_ASSISTANT_TOOLS', () => {
       defaultRisk: 'high',
       previewRequired: true,
       inputSchema: {
-        required: ['program', 'rootId'],
+        required: ['operation', 'rootId'],
         properties: {
-          program: { enum: expect.arrayContaining(['git', 'npm', 'cargo', 'system_info']) },
-          args: { type: 'array', maxItems: 12 },
+          operation: { enum: expect.arrayContaining(['git_status', 'git_diff_stat', 'git_branch', 'git_log', 'git_version', 'system_info', 'whoami']) },
         },
       },
     })
+  })
+
+  it('does not expose browser downloads to the model-facing registry', () => {
+    expect(WORK_ASSISTANT_TOOLS.some((tool) => tool.name === 'browser_download')).toBe(false)
   })
 })
