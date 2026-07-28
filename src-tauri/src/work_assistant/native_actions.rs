@@ -724,6 +724,12 @@ mod tests {
     }
 
     fn application_test_path(directory: &std::path::Path, stem: &str) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            return directory.join(format!("{stem}.app"));
+        }
+
+        #[cfg(not(target_os = "macos"))]
         directory.join(if cfg!(windows) {
             format!("{stem}.exe")
         } else {
@@ -732,8 +738,28 @@ mod tests {
     }
 
     fn write_application_test_file(path: &std::path::Path, contents: &[u8]) {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .expect("test application bundle must have a valid name");
+            let contents_directory = path.join("Contents");
+            let executable = contents_directory.join("MacOS").join(stem);
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(contents_directory.join("Info.plist"), "test metadata").unwrap();
+            fs::write(&executable, contents).unwrap();
+            let mut permissions = fs::metadata(&executable).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(executable, permissions).unwrap();
+            return;
+        }
+
+        #[cfg(not(target_os = "macos"))]
         fs::write(path, contents).unwrap();
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             use std::os::unix::fs::PermissionsExt;
 
