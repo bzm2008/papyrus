@@ -62,6 +62,9 @@ pub fn handle_window_event(window: &tauri::Window, event: &WindowEvent) {
 
 #[tauri::command]
 pub fn complete_explicit_exit(app: AppHandle) {
+    if let Some(window) = app.get_webview_window("mascot") {
+        let _ = window.destroy();
+    }
     app.exit(0);
 }
 

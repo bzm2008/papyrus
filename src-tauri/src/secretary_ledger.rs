@@ -416,6 +416,22 @@ impl SecretaryLedger {
         &self.path
     }
 
+    /// Flush the WAL before the application is replaced by an updater. The
+    /// ledger remains usable when a checkpoint is blocked, but callers must
+    /// treat that as a failed update preparation rather than copying a
+    /// potentially incomplete database snapshot.
+    pub fn checkpoint_for_update(&self) -> Result<LedgerHealth, LedgerError> {
+        let connection = self.connection()?;
+        let busy = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        if busy != 0 {
+            return Err(LedgerError::Unavailable);
+        }
+        drop(connection);
+        self.health()
+    }
+
     pub fn create_project(
         &self,
         input: CreateProjectInput,

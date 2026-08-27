@@ -25,50 +25,47 @@ const PRIMARY_MODEL = 'agnes-2.0-flash'
 const FALLBACK_MODEL = 'agnes-2.0-flash'
 const REQUEST_TIMEOUT_MS = 45000
 
-type ScallionModelPayload =
-  | Array<{
-      id?: string
-      modelName?: string
-      model_name?: string
-      name?: string
-      available?: boolean
-      enabled?: boolean
-      plan_available?: boolean
-      planAvailable?: boolean
-      available_for_plan?: boolean
-      availableForPlan?: boolean
-      allowed?: boolean
-    }>
-  | {
-      data?: Array<{
-        id?: string
-        modelName?: string
-        model_name?: string
-        name?: string
-        available?: boolean
-        enabled?: boolean
-        plan_available?: boolean
-        planAvailable?: boolean
-        available_for_plan?: boolean
-        availableForPlan?: boolean
-        allowed?: boolean
-      }>
-      models?: Array<{
-        id?: string
-        modelName?: string
-        model_name?: string
-        name?: string
-        available?: boolean
-        enabled?: boolean
-        plan_available?: boolean
-        planAvailable?: boolean
-        available_for_plan?: boolean
-        availableForPlan?: boolean
-        allowed?: boolean
-      }>
-    }
+type RawScallionModel = {
+  id?: string
+  modelName?: string
+  model_name?: string
+  name?: string
+  available?: boolean
+  enabled?: boolean
+  plan_available?: boolean
+  planAvailable?: boolean
+  available_for_plan?: boolean
+  availableForPlan?: boolean
+  allowed?: boolean
+  manual_available?: boolean
+  manualAvailable?: boolean
+  auto_available?: boolean
+  autoAvailable?: boolean
+  auto_only?: boolean
+  autoOnly?: boolean
+  auto_required_plan?: string
+  autoRequiredPlan?: string
+  required_plan?: string
+  requiredPlan?: string
+}
 
-let modelListPromise: Promise<string[]> | undefined
+type ScallionModelPayload = {
+  data?: RawScallionModel[]
+  models?: RawScallionModel[]
+  plan?: {
+    manual_models?: unknown
+    manualModels?: unknown
+    auto_models?: unknown
+    autoModels?: unknown
+  }
+}
+
+type ResolvedScallionModel = {
+  id: string
+  routingMode: 'manual' | 'auto'
+}
+
+let modelListPromise: Promise<RawScallionModel[]> | undefined
 let modelListToken: string | undefined
 
 type LlmPayload = {
@@ -83,6 +80,9 @@ type LlmPayload = {
     type?: string
     code?: string
   }
+  message?: string
+  type?: string
+  code?: string
 }
 
 type WpsAgentPlan = {
@@ -410,11 +410,18 @@ export async function callScallion(
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
   temperature: number,
   maxTokens: number,
-  options: { stream?: boolean; signal?: AbortSignal; onDraft?: (draft: string) => void; onRuntime?: AgentRunInput['onRuntime'] } = {},
+  options: {
+    stream?: boolean
+    signal?: AbortSignal
+    onDraft?: (draft: string) => void
+    onRuntime?: AgentRunInput['onRuntime']
+    routingMode?: 'manual' | 'auto'
+  } = {},
   allowModelRecovery = true,
 ) {
   throwIfAborted(options.signal)
-  const resolvedModel = await resolveScallionModel(token, model, options.signal)
+  const resolved = await resolveScallionModel(token, model, options.signal, options.routingMode)
+  const resolvedModel = resolved.id
   inputRuntime(options, resolvedModel, options.stream && supportsStreaming() ? 'stream' : 'non_stream', false)
   if (options.stream && supportsStreaming()) {
     let receivedToken = false
@@ -422,14 +429,17 @@ export async function callScallion(
       const content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, true, options.signal, (draft) => {
         receivedToken = true
         options.onDraft?.(extractVisibleDraft(draft))
-      })
+      }, resolved.routingMode)
       inputRuntime(options, resolvedModel, 'stream', false)
       return { content, model: resolvedModel, transport: 'stream' as const, usedFallback: false }
     } catch (error) {
       if (allowModelRecovery && isPlanModelForbidden(error)) {
-        const nextModel = await recoverWpsModel(token, resolvedModel, options.signal)
+        const nextModel = await recoverWpsModel(token, resolvedModel, options.signal, resolved.routingMode)
         if (nextModel) {
-          return callScallion(token, nextModel, messages, temperature, maxTokens, options, false)
+          return callScallion(token, nextModel.id, messages, temperature, maxTokens, {
+            ...options,
+            routingMode: nextModel.routingMode,
+          }, false)
         }
       }
       if (!shouldFallbackToNonStream(receivedToken, error)) {
@@ -437,7 +447,7 @@ export async function callScallion(
         // responses (session expiry, plan refresh, or model recovery).
         throw classifyWpsAgentError(error)
       }
-      const content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, false, options.signal)
+      const content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, false, options.signal, undefined, resolved.routingMode)
       options.onDraft?.(extractVisibleDraft(content))
       inputRuntime(options, resolvedModel, 'non_stream', true)
       return { content, model: resolvedModel, transport: 'non_stream' as const, usedFallback: true }
@@ -446,12 +456,15 @@ export async function callScallion(
 
   let content: string
   try {
-    content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, false, options.signal)
+    content = await requestScallion(token, resolvedModel, messages, temperature, maxTokens, false, options.signal, undefined, resolved.routingMode)
   } catch (error) {
     if (allowModelRecovery && isPlanModelForbidden(error)) {
-      const nextModel = await recoverWpsModel(token, resolvedModel, options.signal)
+      const nextModel = await recoverWpsModel(token, resolvedModel, options.signal, resolved.routingMode)
       if (nextModel) {
-        return callScallion(token, nextModel, messages, temperature, maxTokens, options, false)
+        return callScallion(token, nextModel.id, messages, temperature, maxTokens, {
+          ...options,
+          routingMode: nextModel.routingMode,
+        }, false)
       }
     }
     throw classifyWpsAgentError(error)
@@ -469,6 +482,7 @@ async function requestScallion(
   stream: boolean,
   externalSignal?: AbortSignal,
   onDraft?: (draft: string) => void,
+  routingMode: 'manual' | 'auto' = 'auto',
 ): Promise<string> {
   if (externalSignal?.aborted) {
     throw new DOMException('Aborted', 'AbortError')
@@ -497,19 +511,20 @@ async function requestScallion(
         model: resolvedModel,
         messages,
         temperature,
-        max_tokens: maxTokens,
-        stream,
+         max_tokens: maxTokens,
+         routing_mode: routingMode,
+         stream,
       }),
     })
 
     if (!response.ok) {
       const payload = (await response.json().catch(() => ({}))) as LlmPayload
-      const error = new Error(payload.error?.message || `Scallion 模型请求失败: HTTP ${response.status}`) as Error & {
+      const error = new Error(payload.error?.message || payload.message || `Scallion 模型请求失败: HTTP ${response.status}`) as Error & {
         code?: string
         status?: number
         retryable?: boolean
       }
-      error.code = payload.error?.type ?? payload.error?.code
+      error.code = payload.error?.type ?? payload.error?.code ?? payload.type ?? payload.code
       error.status = response.status
       error.retryable = response.status >= 500 || response.status === 408 || response.status === 429
       throw error
@@ -538,13 +553,32 @@ async function requestScallion(
   }
 }
 
-async function resolveScallionModel(token: string | undefined, preferredModel: string, signal?: AbortSignal) {
+async function resolveScallionModel(
+  token: string | undefined,
+  preferredModel: string,
+  signal?: AbortSignal,
+  requestedRoutingMode?: 'manual' | 'auto',
+): Promise<ResolvedScallionModel> {
   try {
     const models = await raceWithAbort(getAvailableScallionModels(token), signal)
     if (!models.length) {
       throw new WpsAgentError('server', '当前套餐没有可用的 Scallion 模型。', false)
     }
-    return models.find((model) => model === preferredModel) ?? models[0]
+    const preferred = models.find(
+      (model) => (model.id || model.modelName || model.model_name || model.name) === preferredModel,
+    )
+    const mode = requestedRoutingMode ?? inferRoutingMode(preferred)
+    const selected =
+      (preferred && isWpsModelCallable(preferred, mode) ? preferred : undefined) ??
+      models.find((model) => isWpsModelCallable(model, mode)) ??
+      models.find((model) => isWpsModelCallable(model, 'auto'))
+    if (!selected) {
+      throw new WpsAgentError('server', '当前套餐没有可用的 Scallion 模型。', false)
+    }
+    return {
+      id: selected.id || selected.modelName || selected.model_name || selected.name || '',
+      routingMode: isWpsModelCallable(selected, mode) ? mode : 'auto',
+    }
   } catch (error) {
     if (error instanceof WpsAgentError) {
       throw error
@@ -566,12 +600,26 @@ async function getAvailableScallionModels(token: string | undefined) {
   return modelListPromise
 }
 
-async function recoverWpsModel(token: string | undefined, failedModel: string, signal?: AbortSignal) {
+async function recoverWpsModel(
+  token: string | undefined,
+  failedModel: string,
+  signal?: AbortSignal,
+  routingMode: 'manual' | 'auto' = 'auto',
+) {
   modelListPromise = undefined
   modelListToken = undefined
   try {
     const models = await raceWithAbort(getAvailableScallionModels(token), signal)
-    return models.find((model) => model !== failedModel) ?? undefined
+    const next = models.find(
+      (model) =>
+        (model.id || model.modelName || model.model_name || model.name) !== failedModel &&
+        isWpsModelCallable(model, routingMode),
+    )
+    if (!next) return undefined
+    return {
+      id: next.id || next.modelName || next.model_name || next.name || '',
+      routingMode,
+    }
   } catch {
     return undefined
   }
@@ -603,19 +651,74 @@ async function fetchAvailableScallionModels(token: string | undefined) {
   const payload = (await response.json().catch(() => ({}))) as ScallionModelPayload
 
   if (!response.ok) {
-    throw new Error(`Scallion 模型列表请求失败: HTTP ${response.status}`)
+    const errorPayload = payload as ScallionModelPayload & { error?: { message?: string; type?: string; code?: string } }
+    const error = new Error(errorPayload.error?.message || `Scallion 模型列表请求失败: HTTP ${response.status}`) as Error & {
+      code?: string
+      status?: number
+    }
+    error.code = errorPayload.error?.type ?? errorPayload.error?.code
+    error.status = response.status
+    throw error
   }
 
   const models = Array.isArray(payload) ? payload : payload.models ?? payload.data ?? []
+  const plan = Array.isArray(payload) ? undefined : payload.plan
+  const manualModels = normalizeModelIds(plan?.manual_models ?? plan?.manualModels)
+  const autoModels = normalizeModelIds(plan?.auto_models ?? plan?.autoModels)
+  const hasManualModels = Array.isArray(plan?.manual_models) || Array.isArray(plan?.manualModels)
+  const hasAutoModels = Array.isArray(plan?.auto_models) || Array.isArray(plan?.autoModels)
+  const byId = new Map<string, RawScallionModel>()
 
-  return models
-    .filter((model) => {
-      const planAvailable =
-        model.plan_available ?? model.planAvailable ?? model.available_for_plan ?? model.availableForPlan ?? model.allowed ?? true
-      return (model.available ?? model.enabled ?? true) && planAvailable
-    })
-    .map((model) => model.id || model.modelName || model.model_name || model.name || '')
-    .filter(Boolean)
+  for (const model of models) {
+    const id = model.id || model.modelName || model.model_name || model.name || ''
+    if (!id) continue
+    const manualAvailable = model.manual_available ?? model.manualAvailable ?? (hasManualModels ? manualModels.includes(id) : undefined)
+    const autoAvailable = model.auto_available ?? model.autoAvailable ?? (hasAutoModels ? autoModels.includes(id) : undefined)
+    const normalized = {
+      ...model,
+      id,
+      manual_available: manualAvailable,
+      auto_available: autoAvailable,
+      auto_only: model.auto_only ?? model.autoOnly ?? (manualAvailable === false && autoAvailable !== false),
+      plan_available:
+        model.plan_available ??
+        model.planAvailable ??
+        model.available_for_plan ??
+        model.availableForPlan ??
+        model.allowed ??
+        (hasManualModels || hasAutoModels ? manualAvailable !== false || autoAvailable !== false : true),
+    }
+    const previous = byId.get(id)
+    byId.set(id, previous ? { ...previous, ...normalized } : normalized)
+  }
+  return Array.from(byId.values())
+}
+
+function normalizeModelIds(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : []
+}
+
+function inferRoutingMode(model?: RawScallionModel): 'manual' | 'auto' {
+  return model && isWpsModelCallable(model, 'manual') ? 'manual' : 'auto'
+}
+
+function isWpsModelCallable(model: RawScallionModel, routingMode: 'manual' | 'auto') {
+  const hasExplicitRoutingAccess =
+    model.manual_available !== undefined ||
+    model.manualAvailable !== undefined ||
+    model.auto_available !== undefined ||
+    model.autoAvailable !== undefined ||
+    model.auto_only === true ||
+    model.autoOnly === true
+  const available =
+    (model.available ?? model.enabled ?? true) &&
+    (hasExplicitRoutingAccess || (model.plan_available ?? model.planAvailable ?? true))
+  if (!available) return false
+  return routingMode === 'auto'
+    ? model.auto_available !== false && model.autoAvailable !== false
+    : model.manual_available !== false && model.manualAvailable !== false && model.auto_only !== true && model.autoOnly !== true
 }
 
 function buildContext(snapshot: WpsDocumentSnapshot) {

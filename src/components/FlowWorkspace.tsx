@@ -75,6 +75,10 @@ import { SecretaryFileWorkbench } from './SecretaryFileWorkbench'
 import { SecretaryBrowserWorkbench } from './SecretaryBrowserWorkbench'
 import { SecretaryPartialReply } from './SecretaryPartialReply'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
+import { getMascotSnapshot } from '../services/mascotRuntime'
+import { toMascotEventSnapshot } from '../services/mascotProtocol'
+import { emitMascotState, showMascotWindow } from '../services/mascotWindowService'
+import headSrc from '../assets/mascot/head.png'
 
 type AgentTodos = AgentTodo[]
 type ReceiptSnapshot = {
@@ -102,6 +106,7 @@ export function FlowWorkspace() {
   const agentSteps = useAppStore((state) => state.agentSteps)
   const flowTraces = useAppStore((state) => state.flowTraces)
   const llmRunState = useAppStore((state) => state.llmRunState)
+  const llmStatusMessage = useAppStore((state) => state.llmStatusMessage)
   const pendingDocumentPatch = useAppStore((state) => state.pendingDocumentPatch)
   const documentChangeStats = useAppStore((state) => state.documentChangeStats)
   const secretaryPlanDraft = useAppStore((state) => state.secretaryPlanDraft)
@@ -134,6 +139,40 @@ export function FlowWorkspace() {
   const activeGoalCheckpoints = activeSecretaryGoal
     ? goalCheckpoints.filter((checkpoint) => checkpoint.goalId === activeSecretaryGoal.id)
     : []
+  const mascotSnapshot = getMascotSnapshot({
+    llmRunState,
+    llmStatusMessage,
+    run: activeWorkAssistantRun,
+    goal: activeSecretaryGoal,
+  })
+  const [mascotFallbackOpen, setMascotFallbackOpen] = useState(false)
+  const mascotSnapshotRef = useRef(mascotSnapshot)
+  const mascotEventSnapshot = useMemo(() => toMascotEventSnapshot(mascotSnapshot), [mascotSnapshot])
+
+  useEffect(() => {
+    mascotSnapshotRef.current = mascotSnapshot
+  }, [mascotSnapshot])
+
+  useEffect(() => {
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    void import('@tauri-apps/api/event').then(async ({ listen }) => {
+      const cleanup = await listen('mascot-ready', () => {
+        void emitMascotState(toMascotEventSnapshot(mascotSnapshotRef.current))
+      })
+      if (disposed) cleanup()
+      else unlisten = cleanup
+      void emitMascotState(toMascotEventSnapshot(mascotSnapshotRef.current))
+    }).catch(() => undefined)
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    void emitMascotState(mascotEventSnapshot)
+  }, [mascotEventSnapshot])
   useAgentStream()
 
   const visibleMessages = flowMessages.filter(
@@ -509,7 +548,23 @@ export function FlowWorkspace() {
               <PenLine size={14} />
             </div>
             <div className="min-w-0 leading-tight">
-              <div className="truncate text-[13px] font-semibold text-[#20201d]">文科秘书</div>
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="truncate text-[13px] font-semibold text-[#20201d]">文科秘书</div>
+                <button
+                  type="button"
+                  title="召唤铭荼"
+                  aria-label={`召唤铭荼，当前状态：${mascotSnapshot.label}`}
+                  onClick={() => {
+                    void showMascotWindow().then((opened) => {
+                      if (!opened) setMascotFallbackOpen((value) => !value)
+                    })
+                  }}
+                  className="mascot-summon-button relative grid size-8 shrink-0 place-items-center rounded-full border border-[#d7aa4f]/55 bg-[#fffefa] shadow-[0_3px_12px_rgba(43,34,19,0.1)]"
+                >
+                  <img src={headSrc} alt="" className="size-7 object-contain" />
+                  <span className={`absolute right-0 top-0 size-2 rounded-full ring-2 ring-[#fffefa] ${mascotSnapshot.mood === 'error' ? 'bg-[#b65b51]' : mascotSnapshot.mood === 'completed' ? 'bg-[#d7aa4f]' : mascotSnapshot.mood === 'idle' ? 'bg-[#8f9781]' : 'bg-[#31a96b]'}`} />
+                </button>
+              </div>
               <div className="truncate text-[11px] text-[#6f7168]">
                 写作、研究、沟通、整理与受控电脑协助
               </div>
@@ -554,6 +609,16 @@ export function FlowWorkspace() {
             </button>
           </div>
         </header>
+
+        {mascotFallbackOpen ? (
+          <div className="absolute right-4 top-12 z-50 w-[220px] rounded-xl border border-[#e8ddc7] bg-[#fffefa] p-3 shadow-[0_20px_64px_rgba(43,34,19,0.16)]">
+            <div className="flex items-center gap-2">
+              <img src={headSrc} alt="铭荼" className="size-12 object-contain" />
+              <div className="min-w-0"><div className="text-xs font-semibold text-[#3f5845]">铭荼 · {mascotSnapshot.label}</div><p className="mt-1 text-[11px] leading-4 text-[#6f7168]">{mascotSnapshot.message}</p></div>
+            </div>
+            <button type="button" onClick={() => setMascotFallbackOpen(false)} className="papyrus-control mt-3 w-full rounded-md px-2 py-1.5 text-[11px]">知道啦</button>
+          </div>
+        ) : null}
 
         <div className="papyrus-scrollbar min-h-0 flex-1 overflow-y-auto px-5 py-5 [scrollbar-gutter:stable]">
           <div className="mx-auto flex min-h-full w-full max-w-[920px] flex-col">
@@ -1201,105 +1266,200 @@ function ThinkingEffortControl({
   hiveTelemetry: ReturnType<typeof useAppStore.getState>['hiveTelemetry']
 }) {
   const shouldReduceMotion = useReducedMotion()
-  const options: Array<{ value: FlowThinkingEffort; label: string }> = [
-    { value: 'low', label: 'low' },
-    { value: 'medium', label: 'medium' },
-    { value: 'high', label: 'high' },
-    { value: 'ultra_hive', label: 'ultra+hive' },
+  const options: Array<{
+    value: FlowThinkingEffort
+    label: string
+    hint: string
+  }> = [
+    { value: 'low', label: 'low', hint: '快速 · 子 Agent 已关闭' },
+    { value: 'medium', label: 'medium', hint: '平衡 · 日常秘书任务' },
+    { value: 'high', label: 'high', hint: '深入 · 可调用协作 Agent' },
+    { value: 'ultra_hive', label: 'ultra+hive', hint: '最强 · Hive 小队协作' },
   ]
   const hiveActive = value === 'ultra_hive'
   const activeIndex = Math.max(0, options.findIndex((option) => option.value === value))
+  const activeOption = options[activeIndex] ?? options[1]
+  const trackRatio = activeIndex / (options.length - 1)
+  const trackPosition = `calc(12.5% + ${trackRatio * 75}%)`
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([])
   const hiveTitle =
     'ultra+hive 蜂巢模式：最大思考强度，会调度多个专长 Agent 小队，适合长文、研究、合规、跨文档、复杂运营和 /goal；优先完成质量，并用缓存和摘要减少重复消耗。'
+  const lowTitle = 'low 快速模式：只使用主 Agent 和必要的单次工具，不调用子 Agent。'
+
+  const selectOption = (nextIndex: number) => {
+    const nextOption = options[nextIndex]
+    if (!nextOption) {
+      return
+    }
+
+    onChange(nextOption.value)
+    optionRefs.current[nextIndex]?.focus()
+  }
+
+  const moveSelection = (direction: -1 | 1) => {
+    const nextIndex = Math.min(options.length - 1, Math.max(0, activeIndex + direction))
+    if (nextIndex !== activeIndex) {
+      selectOption(nextIndex)
+    }
+  }
 
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="min-w-0 w-full max-w-[326px] sm:w-[326px]">
       <div
-        className={`relative grid h-8 w-[326px] grid-cols-4 items-center overflow-hidden rounded-xl border p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(43,34,19,0.05)] ${
-          hiveActive ? 'border-[#d7aa4f]/75 bg-[#fff6df]' : 'border-[#dccfb9] bg-[#f8f4ea]'
+        className={`relative overflow-hidden rounded-xl border px-3 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.75),0_1px_2px_rgba(43,34,19,0.05)] ${
+          hiveActive ? 'border-[#d7aa4f]/75 bg-[#fff6df]' : 'border-[#dccfb9] bg-[#fffefa]'
         }`}
-        title={hiveActive ? hiveTitle : undefined}
+        title={hiveActive ? hiveTitle : value === 'low' ? lowTitle : undefined}
       >
-      {hiveActive ? (
-        <motion.span
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 rounded-xl opacity-60"
-          style={{
-            backgroundImage:
-              'radial-gradient(circle at 1px 1px, rgba(215,170,79,0.32) 1px, transparent 0)',
-            backgroundSize: '8px 8px',
-          }}
-          animate={shouldReduceMotion ? { opacity: 0.5 } : { opacity: [0.38, 0.72, 0.38] }}
-          transition={{ duration: 2.4, repeat: shouldReduceMotion ? 0 : Infinity, ease: 'easeInOut' }}
-        />
-      ) : null}
-      <motion.span
-        aria-hidden="true"
-        className={`pointer-events-none absolute top-1 bottom-1 z-[1] rounded-lg shadow-[0_4px_12px_rgba(32,32,29,0.18)] ${
-          hiveActive ? 'bg-[#2f2a1a] ring-1 ring-[#d7aa4f]/70' : 'bg-[#20201d]'
-        }`}
-        style={{
-          width: 'calc(25% - 2px)',
-          left: `calc(4px + ${activeIndex * 25}% - ${activeIndex * 2}px)`,
-        }}
-        animate={
-          shouldReduceMotion
-            ? undefined
-            : hiveActive
-              ? {
-                  boxShadow: [
-                    '0 4px 12px rgba(32,32,29,0.18), 0 0 0 rgba(215,170,79,0)',
-                    '0 5px 16px rgba(32,32,29,0.2), 0 0 16px rgba(215,170,79,0.34)',
-                    '0 4px 12px rgba(32,32,29,0.18), 0 0 0 rgba(215,170,79,0)',
-                  ],
-                }
-              : undefined
-        }
-        transition={{
-          left: { type: 'spring', stiffness: 520, damping: 38, mass: 0.62 },
-          boxShadow: { duration: 2.2, repeat: shouldReduceMotion || !hiveActive ? 0 : Infinity, ease: 'easeInOut' },
-        }}
-      />
-      {options.map((option) => {
-        const active = value === option.value
-        const isHive = option.value === 'ultra_hive'
-
-        return (
-          <motion.button
-            key={option.value}
-            type="button"
-            title={isHive ? hiveTitle : `思考强度：${option.label}`}
-            onClick={() => onChange(option.value)}
-            whileTap={shouldReduceMotion ? undefined : { scale: 0.96 }}
-            className={`relative z-10 h-6 min-w-0 rounded-lg px-1.5 text-[11px] font-semibold tracking-normal transition-colors ${
-              active ? 'text-[#fffefa]' : 'text-[#6f7168] hover:text-[#20201d]'
-            }`}
+        {hiveActive ? (
+          <motion.span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 rounded-xl opacity-60"
+            style={{
+              backgroundImage:
+                'repeating-linear-gradient(90deg, rgba(215,170,79,0.16) 0, rgba(215,170,79,0.16) 1px, transparent 1px, transparent 9px)',
+              backgroundSize: '18px 100%',
+            }}
+            animate={
+              shouldReduceMotion
+                ? { opacity: 0.42 }
+                : { opacity: [0.28, 0.7, 0.28], backgroundPosition: ['0% 0%', '100% 0%'] }
+            }
+            transition={{
+              opacity: { duration: 2.4, repeat: shouldReduceMotion ? 0 : Infinity, ease: 'easeInOut' },
+              backgroundPosition: { duration: 4.2, repeat: shouldReduceMotion ? 0 : Infinity, ease: 'linear' },
+            }}
+          />
+        ) : null}
+        <div className="relative z-10 flex min-w-0 items-center justify-between gap-2">
+          <div className="flex min-w-0 items-baseline gap-1.5">
+            <span className="shrink-0 text-[10px] font-bold uppercase tracking-[0.08em] text-[#5b5c53]">Effort</span>
+            <span className="truncate text-[11px] text-[#8f897a]">思考强度</span>
+          </div>
+          <motion.span
+            key={activeOption.value}
+            initial={shouldReduceMotion ? false : { opacity: 0, y: 2 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`shrink-0 text-[11px] font-semibold ${hiveActive ? 'text-[#8c661e]' : 'text-[#315d39]'}`}
           >
-            {!active ? (
-              <motion.span
-                className="absolute inset-0 rounded-lg bg-[#fffefa]"
-                initial={false}
-                animate={{ opacity: 0 }}
-                whileHover={{ opacity: 0.86 }}
-                transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
-              />
-            ) : null}
+            {activeOption.label}
+          </motion.span>
+        </div>
+
+        <div className="relative z-10 mt-1.5 flex items-center justify-between gap-2 text-[10px] text-[#9d988a]">
+          <span>Faster</span>
+          <span className="truncate text-center">{activeOption.hint}</span>
+          <span>Smarter</span>
+        </div>
+
+        <div
+          className="relative z-10 mt-1 h-11 min-w-0"
+          role="radiogroup"
+          aria-label="思考强度"
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+              event.preventDefault()
+              moveSelection(-1)
+            } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+              event.preventDefault()
+              moveSelection(1)
+            } else if (event.key === 'Home') {
+              event.preventDefault()
+              selectOption(0)
+            } else if (event.key === 'End') {
+              event.preventDefault()
+              selectOption(options.length - 1)
+            }
+          }}
+        >
+          <span aria-hidden="true" className="absolute left-[12.5%] right-[12.5%] top-[15px] h-1 rounded-full bg-[#e8decb]" />
+          <motion.span
+            aria-hidden="true"
+            className={`absolute left-[12.5%] top-[15px] h-1 rounded-full ${hiveActive ? 'bg-[#d7aa4f]' : 'bg-[#315d39]'}`}
+            style={{ width: `${trackRatio * 75}%` }}
+            initial={false}
+            animate={{ opacity: hiveActive ? [0.7, 1, 0.7] : 1 }}
+            transition={{ opacity: { duration: 1.8, repeat: shouldReduceMotion || !hiveActive ? 0 : Infinity, ease: 'easeInOut' } }}
+          />
+          {hiveActive ? (
             <motion.span
-              className="relative z-10 block truncate"
-              animate={shouldReduceMotion ? undefined : { y: active ? -0.5 : 0 }}
-              transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-            >
-              {option.label}
-            </motion.span>
-          </motion.button>
-        )
-      })}
+              aria-hidden="true"
+              className="pointer-events-none absolute left-[12.5%] right-[12.5%] top-[11px] h-[9px] rounded-full border border-[#d7aa4f]/35"
+              animate={shouldReduceMotion ? { opacity: 0.38 } : { opacity: [0.2, 0.58, 0.2], scaleY: [0.8, 1.18, 0.8] }}
+              transition={{ duration: 1.7, repeat: shouldReduceMotion ? 0 : Infinity, ease: 'easeInOut' }}
+            />
+          ) : null}
+          {options.map((option, optionIndex) => {
+            const active = value === option.value
+            const isHive = option.value === 'ultra_hive'
+            const isLow = option.value === 'low'
+
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                tabIndex={active ? 0 : -1}
+                aria-label={`${option.label}：${option.hint}`}
+                title={isHive ? hiveTitle : isLow ? lowTitle : `思考强度：${option.label}`}
+                onClick={() => onChange(option.value)}
+                ref={(node) => {
+                  optionRefs.current[optionIndex] = node
+                }}
+                className="group absolute inset-y-0 grid w-1/4 min-w-0 grid-rows-[20px_1fr] place-items-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[#315d39]/55 focus-visible:ring-offset-1"
+                style={{ left: `${(optionIndex / options.length) * 100}%` }}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`size-3 rounded-full border-2 transition-all ${
+                    active
+                      ? isHive
+                        ? 'border-[#fffefa] bg-[#d7aa4f] shadow-[0_0_0_2px_#d7aa4f,0_0_12px_rgba(215,170,79,0.52)]'
+                        : 'border-[#fffefa] bg-[#315d39] shadow-[0_0_0_2px_#315d39]'
+                      : 'border-[#b8b09f] bg-[#fffefa] group-hover:border-[#315d39]'
+                  }`}
+                />
+                <span className={`max-w-full truncate px-0.5 text-[10px] font-semibold ${active ? (isHive ? 'text-[#8c661e]' : 'text-[#315d39]') : 'text-[#7d7c72]'}`}>
+                  {option.label}
+                </span>
+              </button>
+            )
+          })}
+          <motion.span
+            aria-hidden="true"
+            className={`pointer-events-none absolute top-[9px] z-[2] size-[15px] -translate-x-1/2 rounded-full border-2 border-[#fffefa] ${
+              hiveActive ? 'bg-[#d7aa4f]' : 'bg-[#315d39]'
+            }`}
+            style={{ left: trackPosition }}
+            animate={
+              shouldReduceMotion || !hiveActive
+                ? undefined
+                : {
+                    boxShadow: [
+                      '0 0 0 2px rgba(215,170,79,0.78), 0 0 4px rgba(215,170,79,0.22)',
+                      '0 0 0 3px rgba(215,170,79,0.52), 0 0 16px rgba(215,170,79,0.62)',
+                      '0 0 0 2px rgba(215,170,79,0.78), 0 0 4px rgba(215,170,79,0.22)',
+                    ],
+                  }
+            }
+            transition={{ boxShadow: { duration: 1.9, repeat: shouldReduceMotion || !hiveActive ? 0 : Infinity, ease: 'easeInOut' } }}
+          />
+        </div>
+
+        <div className="relative z-10 mt-0.5 flex min-h-[16px] items-center justify-between gap-2 text-[10px]">
+          <span className="truncate text-[#8f897a]">{hiveActive ? '动态协作密度已开启' : '可随时切换'}</span>
+          {value === 'low' ? (
+            <span className="shrink-0 rounded-md border border-[#d7aa4f]/45 bg-[#fff8e8] px-1.5 py-0.5 font-medium text-[#8c661e]">
+              子 Agent 已关闭
+            </span>
+          ) : hiveActive && hiveTelemetry.enabled ? (
+            <span className="shrink-0 rounded-md border border-[#d7aa4f]/45 bg-[#fffefa]/82 px-1.5 py-0.5 font-medium text-[#5b4a24]">
+              Hive {hiveTelemetry.activeAgents} / {hiveTelemetry.plannedAgents}
+            </span>
+          ) : null}
+        </div>
       </div>
-      {hiveActive && hiveTelemetry.enabled ? (
-        <span className="shrink-0 rounded-lg border border-[#d7aa4f]/45 bg-[#fffefa]/82 px-2 py-1 text-[10px] font-medium text-[#5b4a24]">
-          Hive 运行中 {hiveTelemetry.activeAgents} / {hiveTelemetry.plannedAgents}
-        </span>
-      ) : null}
     </div>
   )
 }

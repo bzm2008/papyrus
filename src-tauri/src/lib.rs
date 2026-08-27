@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 mod desktop_lifecycle;
 pub mod secretary_ledger;
+mod update_protection;
 mod work_assistant;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -70,6 +71,8 @@ pub fn run() {
             secretary_ledger::secretary_ledger_save_checkpoint,
             secretary_ledger::secretary_ledger_load_latest_checkpoint,
             secretary_ledger::secretary_ledger_import_legacy_batch,
+            update_protection::prepare_update_snapshot,
+            update_protection::verify_update_snapshot,
             desktop_lifecycle::complete_explicit_exit,
             work_assistant::work_assistant_capabilities,
             work_assistant::work_assistant_list_roots,
@@ -177,6 +180,7 @@ struct LlmChatRequest {
     max_tokens: u32,
     frequency_penalty: Option<f32>,
     presence_penalty: Option<f32>,
+    routing_mode: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -455,6 +459,13 @@ fn llm_request_body(request: &LlmChatRequest) -> serde_json::Value {
     }
     if let Some(presence_penalty) = request.presence_penalty {
         body["presence_penalty"] = json!(presence_penalty);
+    }
+    if request.provider_type == "scallion_proxy" {
+        if let Some(routing_mode) = request.routing_mode.as_deref() {
+            if routing_mode == "auto" || routing_mode == "manual" {
+                body["routing_mode"] = json!(routing_mode);
+            }
+        }
     }
     body
 }
@@ -1164,6 +1175,8 @@ mod security_tests {
                 "secretary_ledger::secretary_ledger_save_checkpoint",
                 "secretary_ledger::secretary_ledger_load_latest_checkpoint",
                 "secretary_ledger::secretary_ledger_import_legacy_batch",
+                "update_protection::prepare_update_snapshot",
+                "update_protection::verify_update_snapshot",
                 "desktop_lifecycle::complete_explicit_exit",
                 "work_assistant::work_assistant_capabilities",
                 "work_assistant::work_assistant_list_roots",
@@ -1251,6 +1264,8 @@ mod security_tests {
             "secretary_ledger::secretary_ledger_record_event",
             "secretary_ledger::secretary_ledger_save_checkpoint",
             "secretary_ledger::secretary_ledger_import_legacy_batch",
+            "update_protection::prepare_update_snapshot",
+            "update_protection::verify_update_snapshot",
         ] {
             assert!(
                 handler.contains(command),
@@ -1274,6 +1289,7 @@ mod security_tests {
             max_tokens: 1234,
             frequency_penalty: Some(0.48),
             presence_penalty: Some(0.22),
+            routing_mode: None,
         };
 
         let body = llm_request_body(&request);
@@ -1297,11 +1313,20 @@ mod security_tests {
             max_tokens: 512,
             frequency_penalty: None,
             presence_penalty: None,
+            routing_mode: None,
         };
         let body_without_penalties = llm_request_body(&without_penalties);
 
         assert!(body_without_penalties.get("frequency_penalty").is_none());
         assert!(body_without_penalties.get("presence_penalty").is_none());
+
+        let scallion_request = LlmChatRequest {
+            provider_type: "scallion_proxy".into(),
+            routing_mode: Some("auto".into()),
+            ..without_penalties
+        };
+        let scallion_body = llm_request_body(&scallion_request);
+        assert_eq!(scallion_body["routing_mode"], "auto");
     }
 }
 

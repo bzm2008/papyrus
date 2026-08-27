@@ -63,6 +63,56 @@ describe('WPS Scallion runtime metadata', () => {
     )
   })
 
+  it('normalizes Auto-only permissions, plan limits and duplicate model ids', () => {
+    const models = parseWpsModelPayload({
+      data: [
+        { id: 'agnes-2.0-flash', manual_available: false, auto_available: true, auto_only: true },
+        { id: 'agnes-2.0-flash', context_window_tokens: 1048576 },
+      ],
+      plan: {
+        key: 'free',
+        manual_models: [],
+        auto_models: ['agnes-2.0-flash'],
+        auto_monthly_calls: 300,
+        auto_daily_calls: 10,
+        external_api: 'deeper',
+      },
+    })
+
+    expect(models).toHaveLength(1)
+    expect(models[0]).toEqual(
+      expect.objectContaining({
+        manualAvailable: false,
+        autoAvailable: true,
+        autoOnly: true,
+        contextWindowTokens: 1048576,
+      }),
+    )
+    expect(
+      getWpsModelAccess(models[0]!, 'manual'),
+    ).toEqual(expect.objectContaining({ label: '手动不可用', usable: false }))
+    expect(getWpsModelAccess(models[0]!, 'auto').usable).toBe(true)
+    expect(normalizeWpsQuota({
+      points_balance: 10,
+      auto: {
+        monthly_limit: 300,
+        daily_limit: 10,
+        monthly_used: 4,
+        daily_used: 1,
+        monthly_remaining: 296,
+        daily_remaining: 9,
+      },
+      plan: {
+        key: 'free',
+        manual_models: [],
+        auto_models: ['agnes-2.0-flash'],
+        auto_monthly_calls: 300,
+        auto_daily_calls: 10,
+        external_api: false,
+      },
+    })).toEqual(expect.objectContaining({ autoMonthlyCalls: 300, autoDailyCalls: 10, autoMonthlyUsed: 4, autoDailyRemaining: 9, externalApi: false }))
+  })
+
   it('keeps a successful model directory when the quota request fails', async () => {
     vi.stubGlobal(
       'fetch',

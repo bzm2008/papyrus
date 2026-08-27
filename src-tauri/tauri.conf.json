@@ -13,12 +13,32 @@
     "windows": [
       {
         "title": "Papyrus",
+        "label": "main",
         "width": 1360,
         "height": 860,
         "minWidth": 1040,
         "minHeight": 680,
         "resizable": true,
         "fullscreen": false
+      },
+      {
+        "label": "mascot",
+        "title": "Papyrus 秘书悬浮窗",
+        "url": "index.html?window=mascot",
+        "width": 180,
+        "height": 220,
+        "minWidth": 180,
+        "minHeight": 220,
+        "maxWidth": 180,
+        "maxHeight": 220,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "focus": false,
+        "skipTaskbar": true,
+        "shadow": false
       }
     ],
     "security": {

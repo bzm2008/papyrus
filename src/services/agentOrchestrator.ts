@@ -111,6 +111,8 @@ export type AgentRunPlan = {
   modelRoutingSummary?: string[]
   hiveTopology?: HiveSwarmTopology
   agentBudgetLabel?: string
+  /** Effort captured when the plan was built, so downstream guards can reject stale plans. */
+  thinkingEffort?: FlowThinkingEffort
 }
 
 export type AgentRunResult = {
@@ -129,6 +131,38 @@ export type AgentRunOutcome = {
 
 export function shouldContinueSecretaryGoalCycle(outcome: Pick<AgentRunOutcome, 'status'> | undefined) {
   return outcome?.status === 'completed'
+}
+
+/**
+ * Enforce effort-level dispatch policy at the last boundary before execution.
+ *
+ * Planner output is untrusted and older queued plans may have been created before
+ * the current effort was selected. Low effort is deliberately single-agent: it
+ * may still use ordinary tools, but it must never dispatch a studio Agent or Hive.
+ */
+export function enforceThinkingEffortConstraints(
+  plan: AgentRunPlan,
+  thinkingEffort: FlowThinkingEffort,
+): AgentRunPlan {
+  const capturedPlan = plan.thinkingEffort === thinkingEffort ? plan : { ...plan, thinkingEffort }
+
+  if (thinkingEffort !== 'low') {
+    return capturedPlan
+  }
+
+  return {
+    ...capturedPlan,
+    subAgents: [],
+    maxAgentCount: 0,
+    hiveTopology: undefined,
+    agentBudgetLabel: `low:${capturedPlan.taskComplexity ?? 'standard'}:no-sub-agents`,
+    routingRationale: [
+      capturedPlan.routingRationale,
+      '低思考强度：仅由秘书长单体处理，不调用工作室 Agent 或 Hive。',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  }
 }
 
 type AgentOutput = {
@@ -685,6 +719,9 @@ export async function planAgentRun(
               '你只输出严格 JSON，不要 Markdown，不要解释。',
               '字段必须是：needsWebSearch, subAgents, toolCalls, writeIntent, documentPatchOperation, replyMode, conversationGoal。',
               '简单任务必须避免多 Agent 协作；标准任务最多 2 个执行 Agent；复杂任务最多 3 个主力 + 2 个审查/顾问。',
+              thinkingEffort === 'low'
+                ? '当前是低思考强度：subAgents 必须为空，绝对不要调用任何工作室 Agent 或 Hive；必要的单次工具调用仍可保留。'
+                : '',
               '所有子 Agent 后续会按结构化协议输出，不要安排寒暄、复述背景或重复审查。',
               'subAgents 必须从下方启用的工作室 Agent id 中选择，不能调用已禁用或不存在的 Agent。',
               '先判断任务类别，再选择最多 3 个主力 Agent；如有必要再选择最多 2 个审查/顾问 Agent。复杂 /goal 可分阶段增加，但单阶段仍要克制。',
@@ -788,6 +825,9 @@ export async function executeAgentRun(
   signal?: AbortSignal,
 ): Promise<AgentRunResult> {
   throwIfAborted(signal)
+  // A queued or externally supplied plan may predate the current effort. Recheck
+  // it here so no stale sub-agent or Hive entry can reach the execution loop.
+  plan = enforceThinkingEffortConstraints(plan, thinkingEffort)
   useAppStore.getState().setAgentTodos(createTodos(prompt, plan))
   useAppStore.getState().addFlowTrace({
     kind: 'plan',
@@ -797,7 +837,7 @@ export async function executeAgentRun(
     agentId: 'writer',
     endedAt: Date.now(),
   })
-  const hiveRuntime = startHiveRuntime(plan)
+  const hiveRuntime = startHiveRuntime(plan, thinkingEffort)
   if (plan.hiveTopology?.enabled) {
     useAppStore.getState().setHiveTelemetry({
       enabled: true,
@@ -1798,14 +1838,15 @@ function sanitizePlan(
     maxAgentCount,
     modelRoutingSummary,
     agentBudgetLabel: describeAgentBudget(classification, thinkingEffort, maxAgentCount),
+    thinkingEffort,
   }
-  const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification) : undefined
+  const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification, thinkingEffort) : undefined
 
-  return {
+  return enforceThinkingEffortConstraints({
     ...plan,
     hiveTopology,
     routingRationale: [plan.routingRationale, hiveTopology?.rationale].filter(Boolean).join('\n'),
-  }
+  }, thinkingEffort)
 }
 
 function normalizeToolCalls(toolCalls: AgentRunPlan['toolCalls']) {
@@ -1946,14 +1987,15 @@ function createFallbackPlan(
     maxAgentCount,
     modelRoutingSummary,
     agentBudgetLabel: describeAgentBudget(classification, thinkingEffort, maxAgentCount),
+    thinkingEffort,
   }
-  const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification) : undefined
+  const hiveTopology = hiveEnabled ? buildHiveSwarmTopology(plan, classification, thinkingEffort) : undefined
 
-  return {
+  return enforceThinkingEffortConstraints({
     ...plan,
     hiveTopology,
     routingRationale: [plan.routingRationale, hiveTopology?.rationale].filter(Boolean).join('\n'),
-  }
+  }, thinkingEffort)
 }
 
 function maxAgentsForClassification(
@@ -1961,6 +2003,10 @@ function maxAgentsForClassification(
   hiveEnabled = false,
   thinkingEffort: FlowThinkingEffort = useAppStore.getState().flowThinkingEffort,
 ) {
+  if (thinkingEffort === 'low') {
+    return 0
+  }
+
   if (hiveEnabled) {
     const hardwareLimit = useAppStore.getState().hardwareCapabilityProfile.maxHiveAgents
     return Math.max(4, Math.min(hardwareLimit, classification.expectedAgentCount || hardwareLimit))
@@ -2019,7 +2065,7 @@ function selectLongformAgents(prompt: string, thinkingEffort: FlowThinkingEffort
   const review: FlowAgentId[] = ['proofreader', 'publication-editor']
 
   if (thinkingEffort === 'low') {
-    return uniqueEnabledAgents([...research.slice(0, 1), ...base.slice(0, 3), 'style-editor'])
+    return []
   }
 
   if (thinkingEffort === 'medium') {

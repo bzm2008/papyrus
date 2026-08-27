@@ -154,6 +154,12 @@ export type ScallionPlan = {
   name: string
   expiresAt?: string | null
   availableModels: string[]
+  manualModels?: string[]
+  autoModels?: string[]
+  autoMonthlyCalls?: number
+  autoDailyCalls?: number
+  /** Main-site entitlement flag; legacy clients may have stored a label string. */
+  externalApi?: boolean | string
   updatedAt: number
 }
 
@@ -168,6 +174,10 @@ export type ScallionModelMetadata = {
   contextWindowLabel?: string
   planAvailable?: boolean
   requiredPlan?: string
+  autoAvailable?: boolean
+  manualAvailable?: boolean
+  autoOnly?: boolean
+  autoRequiredPlan?: string
   availabilityReason?: string
   contextWindowTokens?: number
   available: boolean
@@ -207,6 +217,16 @@ export type ScallionQuota = {
   balance?: number
   quota?: number
   unifiedPoints?: boolean
+  autoMonthlyCalls?: number
+  autoDailyCalls?: number
+  autoMonthlyUsed?: number
+  autoDailyUsed?: number
+  autoMonthlyRemaining?: number
+  autoDailyRemaining?: number
+  manualModels?: string[]
+  autoModels?: string[]
+  /** Main-site entitlement flag; legacy clients may have stored a label string. */
+  externalApi?: boolean | string
   planKey?: string
   planName?: string
   planExpiresAt?: string | null
@@ -3104,11 +3124,27 @@ export const useAppStore = create<AppState>()(
         set((state) => {
           const normalized = sanitizeScallionModels(scallionModels)
           const currentProvider = state.providerConfigs.qwen36
+          const routingMode = state.modelRoutingMode
           const primary =
             normalized.find(
-              (model) => model.available && model.planAvailable !== false && model.modelName === currentProvider.modelName,
+              (model) =>
+                model.available &&
+                model.modelName === currentProvider.modelName &&
+                isScallionModelSelectableForMode(model, routingMode),
             ) ??
-            normalized.find((model) => model.available && model.planAvailable !== false)
+            normalized.find(
+              (model) =>
+                model.available &&
+                isScallionModelSelectableForMode(model, routingMode),
+            ) ??
+            // A legacy persisted manual mode can meet a Free catalog that has
+            // no manual models. Keep a valid Auto model selected so the chat
+            // request can still use the gateway's compatibility behavior.
+            normalized.find(
+              (model) =>
+                model.available &&
+                isScallionModelSelectableForMode(model, routingMode),
+            )
 
           if (!primary) {
             return {
@@ -4210,6 +4246,13 @@ function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
             ? item.contextWindowLabel.trim()
             : undefined,
         planAvailable: item.planAvailable !== false,
+        autoAvailable: item.autoAvailable === undefined ? undefined : item.autoAvailable !== false,
+        manualAvailable: item.manualAvailable === undefined ? undefined : item.manualAvailable !== false,
+        autoOnly: item.autoOnly === true,
+        autoRequiredPlan:
+          typeof item.autoRequiredPlan === 'string' && item.autoRequiredPlan.trim()
+            ? item.autoRequiredPlan.trim()
+            : undefined,
         requiredPlan:
           typeof item.requiredPlan === 'string' && item.requiredPlan.trim()
             ? item.requiredPlan.trim()
@@ -4222,7 +4265,7 @@ function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
           typeof item.contextWindowTokens === 'number' && item.contextWindowTokens > 0
             ? Math.round(item.contextWindowTokens)
             : undefined,
-        available: item.available !== false && item.planAvailable !== false,
+        available: item.available !== false,
         tier: item.tier ? normalizeModelCapabilityTier(item.tier) : undefined,
         score:
           typeof item.score === 'number' && Number.isFinite(item.score)
@@ -4238,6 +4281,25 @@ function sanitizeScallionModels(value: unknown): ScallionModelMetadata[] {
     .filter(Boolean) as ScallionModelMetadata[]
 }
 
+function isScallionModelCallableForMode(
+  model: Pick<ScallionModelMetadata, 'manualAvailable' | 'autoAvailable' | 'autoOnly'>,
+  mode: ModelRoutingMode,
+) {
+  if (mode === 'auto') {
+    return model.autoAvailable !== false
+  }
+  return model.manualAvailable !== false && model.autoOnly !== true
+}
+
+function isScallionModelSelectableForMode(
+  model: Pick<ScallionModelMetadata, 'planAvailable' | 'manualAvailable' | 'autoAvailable' | 'autoOnly'>,
+  mode: ModelRoutingMode,
+) {
+  const hasExplicitModeAccess =
+    model.manualAvailable !== undefined || model.autoAvailable !== undefined || model.autoOnly === true
+  return (hasExplicitModeAccess || model.planAvailable !== false) && isScallionModelCallableForMode(model, mode)
+}
+
 function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
   if (!value || typeof value !== 'object') {
     return undefined
@@ -4251,6 +4313,34 @@ function sanitizeScallionQuota(value: unknown): ScallionQuota | undefined {
     balance: item.balance === undefined ? undefined : Math.max(0, Number(item.balance) || 0),
     quota: item.quota === undefined ? undefined : Math.max(0, Number(item.quota) || 0),
     unifiedPoints: item.unifiedPoints === true,
+    autoMonthlyCalls:
+      item.autoMonthlyCalls === undefined ? undefined : Math.max(0, Number(item.autoMonthlyCalls) || 0),
+    autoDailyCalls:
+      item.autoDailyCalls === undefined ? undefined : Math.max(0, Number(item.autoDailyCalls) || 0),
+    autoMonthlyUsed:
+      item.autoMonthlyUsed === undefined ? undefined : Math.max(0, Number(item.autoMonthlyUsed) || 0),
+    autoDailyUsed:
+      item.autoDailyUsed === undefined ? undefined : Math.max(0, Number(item.autoDailyUsed) || 0),
+    autoMonthlyRemaining:
+      item.autoMonthlyRemaining === undefined
+        ? undefined
+        : Math.max(0, Number(item.autoMonthlyRemaining) || 0),
+    autoDailyRemaining:
+      item.autoDailyRemaining === undefined
+        ? undefined
+        : Math.max(0, Number(item.autoDailyRemaining) || 0),
+    manualModels: Array.isArray(item.manualModels)
+      ? item.manualModels.filter((model): model is string => typeof model === 'string' && Boolean(model.trim())).map((model) => model.trim())
+      : undefined,
+    autoModels: Array.isArray(item.autoModels)
+      ? item.autoModels.filter((model): model is string => typeof model === 'string' && Boolean(model.trim())).map((model) => model.trim())
+      : undefined,
+    externalApi:
+      typeof item.externalApi === 'boolean'
+        ? item.externalApi
+        : typeof item.externalApi === 'string'
+          ? item.externalApi.trim() || undefined
+          : undefined,
     planKey: typeof item.planKey === 'string' ? item.planKey.trim() || undefined : undefined,
     planName: typeof item.planName === 'string' ? item.planName.trim() || undefined : undefined,
     planExpiresAt:
@@ -4505,6 +4595,16 @@ function sanitizeScallionPlan(value: unknown): ScallionPlan | undefined {
   const availableModels = Array.isArray(item.availableModels)
     ? item.availableModels.filter((model): model is string => typeof model === 'string' && model.trim().length > 0).map((model) => model.trim())
     : []
+  const manualModels = Array.isArray(item.manualModels)
+    ? item.manualModels
+        .filter((model): model is string => typeof model === 'string' && model.trim().length > 0)
+        .map((model) => model.trim())
+    : []
+  const autoModels = Array.isArray(item.autoModels)
+    ? item.autoModels
+        .filter((model): model is string => typeof model === 'string' && model.trim().length > 0)
+        .map((model) => model.trim())
+    : []
 
   return {
     key: key || name.toLowerCase(),
@@ -4512,6 +4612,18 @@ function sanitizeScallionPlan(value: unknown): ScallionPlan | undefined {
     expiresAt:
       typeof item.expiresAt === 'string' || item.expiresAt === null ? item.expiresAt : undefined,
     availableModels,
+    manualModels,
+    autoModels,
+    autoMonthlyCalls:
+      item.autoMonthlyCalls === undefined ? undefined : Math.max(0, Number(item.autoMonthlyCalls) || 0),
+    autoDailyCalls:
+      item.autoDailyCalls === undefined ? undefined : Math.max(0, Number(item.autoDailyCalls) || 0),
+    externalApi:
+      typeof item.externalApi === 'boolean'
+        ? item.externalApi
+        : typeof item.externalApi === 'string'
+          ? item.externalApi.trim() || undefined
+          : undefined,
     updatedAt: typeof item.updatedAt === 'number' && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now(),
   }
 }
@@ -4526,6 +4638,11 @@ function scallionPlanFromQuota(quota?: ScallionQuota) {
     name: quota.planName,
     expiresAt: quota.planExpiresAt,
     availableModels: [],
+    manualModels: quota.manualModels,
+    autoModels: quota.autoModels,
+    autoMonthlyCalls: quota.autoMonthlyCalls,
+    autoDailyCalls: quota.autoDailyCalls,
+    externalApi: quota.externalApi,
     updatedAt: quota.updatedAt,
   })
 }

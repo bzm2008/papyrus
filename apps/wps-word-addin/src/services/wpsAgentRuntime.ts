@@ -80,6 +80,13 @@ export function classifyWpsAgentError(error: unknown): WpsAgentError {
     })
   }
 
+  if (normalizedDetails.code === 'auto_quota_exhausted') {
+    return new WpsAgentError('server', 'Auto 次数已用尽，请稍后再试或升级套餐。', false, {
+      ...normalizedDetails,
+      retryable: false,
+    })
+  }
+
   if (normalizedDetails.status === 401 || normalizedDetails.code === 'unauthorized') {
     return new WpsAgentError('authentication', '登录状态已失效，请重新登录。', false, {
       ...normalizedDetails,

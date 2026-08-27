@@ -10,6 +10,7 @@ import {
   useAppStore,
   type ProviderId,
   type ScallionModelMetadata,
+  type ScallionPlan,
   type ScallionQuota,
   type ScallionUser,
 } from '../stores/useAppStore'
@@ -45,10 +46,15 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
       scallionModels.find(
         (model) =>
           model.available &&
-          model.planAvailable !== false &&
+          getScallionModelAccess(model, modelRoutingMode).usable &&
           model.modelName === providerConfigs.qwen36.modelName,
-      ) ?? scallionModels.find((model) => model.available && model.planAvailable !== false),
-    [providerConfigs.qwen36.modelName, scallionModels],
+      ) ??
+      scallionModels.find(
+        (model) =>
+          model.available &&
+          getScallionModelAccess(model, modelRoutingMode).usable,
+      ),
+    [modelRoutingMode, providerConfigs.qwen36.modelName, scallionModels],
   )
   const activeLabel =
     modelRoutingMode === 'auto'
@@ -165,7 +171,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectScallionModel = (model: ScallionModelMetadata) => {
-    const access = getScallionModelAccess(model)
+    const access = getScallionModelAccess(model, 'manual')
     if (!access.usable) {
       return
     }
@@ -181,6 +187,17 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectAuto = () => {
+    const autoModel = scallionModels.find(
+      (model) => model.available && getScallionModelAccess(model, 'auto').usable,
+    )
+    if (autoModel) {
+      updateProviderModelMetadata('qwen36', {
+        label: autoModel.label,
+        modelName: autoModel.id || autoModel.modelName,
+        contextWindowTokens: autoModel.contextWindowTokens,
+      })
+      setActiveProviderId('qwen36')
+    }
     setModelRoutingMode('auto')
     close()
   }
@@ -275,6 +292,7 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                           ? formatPoints(scallionQuota, scallionSync.quota.status, scallionUser, scallionToken)
                           : '登录后同步套餐和积分'}
                         {(scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt) ? ` · 到期 ${formatExpiry((scallionQuota?.planExpiresAt ?? scallionPlan?.expiresAt) as string)}` : ''}
+                        {formatAutoQuota(scallionQuota, scallionPlan) ? ` · ${formatAutoQuota(scallionQuota, scallionPlan)}` : ''}
                         {scallionQuota?.updatedAt ? ` · ${formatSyncTime(scallionQuota.updatedAt)}` : ''}
                         {scallionSync.quota.error ? ` · ${scallionSync.quota.error}` : ''}
                       </div>
@@ -298,7 +316,9 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                 {scallionModels.length ? (
                   <section>
                     {(() => {
-                      const restrictedCount = scallionModels.filter((model) => !getScallionModelAccess(model).usable).length
+                      const restrictedCount = scallionModels.filter(
+                        (model) => !getScallionModelAccess(model, modelRoutingMode).usable,
+                      ).length
                       const availableCount = scallionModels.length - restrictedCount
 
                       return (
@@ -312,13 +332,14 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                     })()}
                     <div className="space-y-1">
                       {scallionModels.map((model) => {
-                        const access = getScallionModelAccess(model)
+                        const access = getScallionModelAccess(model, modelRoutingMode)
+                        const manualAccess = getScallionModelAccess(model, 'manual')
                         const active =
                           access.usable &&
                           modelRoutingMode === 'manual' &&
                           activeProviderId === 'qwen36' &&
                           providerConfigs.qwen36.modelName === model.modelName
-                        const disabled = !access.usable
+                        const disabled = !access.usable || modelRoutingMode === 'auto'
 
                         return (
                           <button
@@ -326,7 +347,15 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                             type="button"
                             disabled={disabled}
                             onClick={() => selectScallionModel(model)}
-                            title={disabled ? `${model.label}：${access.detail}` : `${model.label}：当前套餐可调用`}
+                            title={
+                              disabled
+                                ? `${model.label}：${
+                                    modelRoutingMode === 'auto' && access.usable
+                                      ? '当前仅由 Auto 自动调度'
+                                      : access.detail
+                                  }`
+                                : `${model.label}：当前套餐可手动调用`
+                            }
                             className={`flex w-full items-center justify-between gap-3 rounded-lg border px-3 py-2 text-left transition disabled:cursor-not-allowed disabled:opacity-50 ${
                               active
                                 ? 'border-[#171714] bg-[#171714] text-[#fffefa]'
@@ -348,8 +377,16 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                                       : 'text-[#9a4338]'
                                 }`}
                               >
-                                {access.label}
-                                {disabled ? ` · ${access.detail}` : ''}
+                                {modelRoutingMode === 'auto'
+                                  ? manualAccess.usable
+                                    ? 'Auto 路由中'
+                                    : access.usable
+                                      ? '仅 Auto 可用'
+                                      : access.label
+                                  : access.label}
+                                {disabled
+                                  ? ` · ${modelRoutingMode === 'auto' && access.usable ? '由 Auto 自动调度' : access.detail}`
+                                  : ''}
                               </span>
                             </span>
                             {active ? (
@@ -471,4 +508,28 @@ function formatExpiry(value: string) {
 function formatSyncTime(value: number) {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '' : `同步 ${date.toLocaleTimeString('zh-CN')}`
+}
+
+function formatAutoQuota(quota?: ScallionQuota, plan?: ScallionPlan) {
+  const monthlyLimit = quota?.autoMonthlyCalls ?? plan?.autoMonthlyCalls
+  const dailyLimit = quota?.autoDailyCalls ?? plan?.autoDailyCalls
+  const monthlyValue =
+    quota?.autoMonthlyRemaining !== undefined
+      ? `${quota.autoMonthlyRemaining}/${monthlyLimit ?? '?'} 月`
+      : quota?.autoMonthlyUsed !== undefined && monthlyLimit !== undefined
+        ? `${Math.max(0, monthlyLimit - quota.autoMonthlyUsed)}/${monthlyLimit} 月`
+        : monthlyLimit !== undefined
+          ? `${monthlyLimit} 次/月`
+          : ''
+  const dailyValue =
+    quota?.autoDailyRemaining !== undefined
+      ? `${quota.autoDailyRemaining}/${dailyLimit ?? '?'} 日`
+      : quota?.autoDailyUsed !== undefined && dailyLimit !== undefined
+        ? `${Math.max(0, dailyLimit - quota.autoDailyUsed)}/${dailyLimit} 日`
+        : dailyLimit !== undefined
+          ? `${dailyLimit} 次/日`
+          : ''
+
+  if (!monthlyValue && !dailyValue) return ''
+  return `Auto ${[monthlyValue, dailyValue].filter(Boolean).join(' · ')}`
 }

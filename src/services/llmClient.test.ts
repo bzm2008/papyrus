@@ -34,7 +34,10 @@ function setUsableModel(modelName = 'agnes-2.0-flash') {
   })
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // Let the post-call quota refresh scheduled by the client settle before
+  // the next contract test replaces its fetch mock.
+  await new Promise((resolve) => setTimeout(resolve, 0))
   vi.restoreAllMocks()
   vi.mocked(invoke).mockReset()
   useAppStore.setState({
@@ -42,6 +45,7 @@ afterEach(() => {
     scallionModels: [],
     scallionPlan: undefined,
     scallionQuota: undefined,
+    modelRoutingMode: 'manual',
   })
 })
 
@@ -308,6 +312,126 @@ describe('Scallion production contract', () => {
         availabilityReason: '需要 Deeper 套餐',
       }),
     )
+  })
+
+  it('normalizes manual/Auto permissions, plan quotas and removes duplicate catalog ids', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          data: [
+            {
+              id: 'agnes-2.0-flash',
+              name: 'Agnes 2.0 Flash',
+              manual_available: false,
+              auto_available: true,
+              auto_only: true,
+              context_window_tokens: 1048576,
+            },
+            {
+              id: 'agnes-2.0-flash',
+              context_window_label: '1M',
+            },
+          ],
+          plan: {
+            key: 'free',
+            name: 'Free',
+            manual_models: [],
+            auto_models: ['agnes-2.0-flash'],
+            auto_monthly_calls: 300,
+            auto_daily_calls: 10,
+            external_api: 'deeper',
+          },
+        }),
+      ),
+    )
+
+    const catalog = await fetchScallionProxyModelCatalog(defaultProviderConfigs.qwen36)
+
+    expect(catalog.models).toHaveLength(1)
+    expect(catalog.models[0]).toEqual(
+      expect.objectContaining({
+        id: 'agnes-2.0-flash',
+        manualAvailable: false,
+        autoAvailable: true,
+        autoOnly: true,
+        contextWindowTokens: 1048576,
+        contextWindowLabel: '1M',
+      }),
+    )
+    expect(catalog.plan).toEqual(
+      expect.objectContaining({
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoDailyCalls: 10,
+        externalApi: 'deeper',
+      }),
+    )
+  })
+
+  it('sends Auto routing for a legacy manual-mode Free client when no manual models exist', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      modelRoutingMode: 'manual',
+      scallionPlan: {
+        key: 'free',
+        name: 'Free',
+        availableModels: ['agnes-2.0-flash'],
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        updatedAt: Date.now(),
+      },
+      scallionModels: [
+        {
+          id: 'agnes-2.0-flash',
+          label: 'Agnes 2.0 Flash',
+          modelName: 'agnes-2.0-flash',
+          manualAvailable: false,
+          autoAvailable: true,
+          autoOnly: true,
+          available: true,
+          planAvailable: true,
+          updatedAt: Date.now(),
+        },
+      ],
+    })
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ choices: [{ message: { content: '完成' } }] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.qwen36, modelName: 'agnes-2.0-flash' },
+        [{ role: 'user', content: '测试' }],
+      ),
+    ).resolves.toBe('完成')
+
+    const requestInit = (fetchMock.mock.calls as unknown as Array<[RequestInfo, RequestInit]>)[0]?.[1]
+    expect(JSON.parse(String(requestInit?.body))).toMatchObject({
+      model: 'agnes-2.0-flash',
+      routing_mode: 'auto',
+    })
+  })
+
+  it('classifies auto quota exhaustion regardless of HTTP status', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          { error: { message: 'Auto 次数已用尽', type: 'auto_quota_exhausted' } },
+          429,
+        ),
+      ),
+    )
+
+    await expect(
+      callOpenAICompatible(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }]),
+    ).rejects.toMatchObject({ code: 'auto_quota_exhausted', status: 429 })
   })
 
   it('classifies model catalog network failures as recoverable', async () => {

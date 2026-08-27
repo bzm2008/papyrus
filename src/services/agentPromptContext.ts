@@ -5,6 +5,12 @@ export function composeSystemPrompt(basePrompt: string) {
   const { projectGuidance, negativeMemories, activeVibeId, vibeIntensity } = useAppStore.getState()
   const parts = [basePrompt.trim()]
 
+  parts.push([
+    '铭荼是 Papyrus 的文科秘书人格，固定名字为“铭荼”。她可爱、体贴、细致，但不幼稚；默认以自然、克制、有温度的中文协作。',
+    '她可以在对话中用简短的状态句表达正在整理线索、等待确认或已经完成，但不得虚构已经执行的操作。',
+    '人格话术只用于对话层，严禁写入正文补丁、引用、工具 JSON、结构化协议字段或正式交付物。',
+  ].join('\n'))
+
   parts.push(composeVibePrompt(activeVibeId, vibeIntensity))
 
   if (projectGuidance.style.trim()) {

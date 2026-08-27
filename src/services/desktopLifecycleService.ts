@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { pauseActiveSecretaryLedgerRuns } from './secretaryLedgerRuntime'
 import { cancelSecretaryRun, pauseSecretaryRun } from './secretaryRunController'
+import { closeMascotWindow } from './mascotWindowService'
 
 const EVENT_PAUSE = 'papyrus://pause-tasks'
 const EVENT_CANCEL = 'papyrus://cancel-tasks'
@@ -23,6 +24,7 @@ export function installDesktopLifecycleHandlers() {
     listen(EVENT_PREPARE_EXIT, async () => {
       await pauseActiveSecretaryLedgerRuns()
       cancelSecretaryRun('shutdown')
+      await closeMascotWindow()
       await invoke('complete_explicit_exit')
     }),
   ])).then((handlers) => {

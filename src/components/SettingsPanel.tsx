@@ -282,6 +282,9 @@ export function SettingsPanel() {
                             ? ` · 更新于 ${new Date(scallionQuota.updatedAt).toLocaleTimeString('zh-CN')}`
                             : ''}
                         </div>
+                        {formatSettingsAutoQuota(scallionQuota, scallionPlan) ? (
+                          <div className="text-xs text-[#6f7168]">{formatSettingsAutoQuota(scallionQuota, scallionPlan)}</div>
+                        ) : null}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <a
@@ -548,12 +551,13 @@ function ScallionModelDirectory({
   const scallionQuota = useAppStore((state) => state.scallionQuota)
   const scallionPlan = useAppStore((state) => state.scallionPlan)
   const scallionUser = useAppStore((state) => state.scallionUser)
+  const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
   const latestSync = models.reduce<number | undefined>(
     (latest, model) => (latest === undefined || model.updatedAt > latest ? model.updatedAt : latest),
     undefined,
   )
-  const availableCount = models.filter((model) => getScallionModelAccess(model).status === 'available').length
-  const restrictedCount = models.filter((model) => getScallionModelAccess(model).status === 'plan_unavailable').length
+  const availableCount = models.filter((model) => getScallionModelAccess(model, modelRoutingMode).status === 'available').length
+  const restrictedCount = models.filter((model) => getScallionModelAccess(model, modelRoutingMode).status === 'plan_unavailable').length
   const unavailableCount = models.length - availableCount - restrictedCount
   const planLabel =
     scallionQuota?.planName ||
@@ -606,7 +610,7 @@ function ScallionModelDirectory({
       ) : (
         <div className="max-h-80 divide-y divide-[#f0e8da] overflow-y-auto rounded-md border border-[#f0e8da]">
           {models.map((model) => {
-            const access = getScallionModelAccess(model)
+            const access = getScallionModelAccess(model, modelRoutingMode)
             const active = access.usable && (model.id === activeModelId || model.modelName === activeModelId)
 
             return (
@@ -915,6 +919,21 @@ function ProviderUseButton({ providerId }: { providerId: ProviderId }) {
 function formatQuotaExpiry(value: string) {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('zh-CN')
+}
+
+function formatSettingsAutoQuota(
+  quota: ReturnType<typeof useAppStore.getState>['scallionQuota'] | undefined,
+  plan: ReturnType<typeof useAppStore.getState>['scallionPlan'] | undefined,
+) {
+  const monthlyLimit = quota?.autoMonthlyCalls ?? plan?.autoMonthlyCalls
+  const dailyLimit = quota?.autoDailyCalls ?? plan?.autoDailyCalls
+  const monthly = quota?.autoMonthlyRemaining !== undefined
+    ? `${quota.autoMonthlyRemaining}/${monthlyLimit ?? '?'} 月`
+    : monthlyLimit !== undefined ? `${monthlyLimit} 次/月` : ''
+  const daily = quota?.autoDailyRemaining !== undefined
+    ? `${quota.autoDailyRemaining}/${dailyLimit ?? '?'} 日`
+    : dailyLimit !== undefined ? `${dailyLimit} 次/日` : ''
+  return monthly || daily ? `Auto 剩余：${[monthly, daily].filter(Boolean).join(' · ')}` : ''
 }
 
 function formatSyncTime(value: number) {

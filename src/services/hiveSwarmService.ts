@@ -1,4 +1,4 @@
-import type { FlowAgentId, HiveSwarmPhase } from '../stores/useAppStore'
+import type { FlowAgentId, FlowThinkingEffort, HiveSwarmPhase } from '../stores/useAppStore'
 import { useAppStore } from '../stores/useAppStore'
 import type { AgentRunPlan } from './agentOrchestrator'
 import type { SecretaryTaskClassification } from './secretaryTaskClassifier'
@@ -27,13 +27,18 @@ export function shouldUseHiveSwarm(
   effort: string | undefined,
   classification: Pick<SecretaryTaskClassification, 'complexity' | 'hiveRecommended'>,
 ) {
-  return effort === 'ultra_hive' && classification.hiveRecommended !== false && classification.complexity !== 'simple'
+  return effort !== 'low' && effort === 'ultra_hive' && classification.hiveRecommended !== false && classification.complexity !== 'simple'
 }
 
 export function buildHiveSwarmTopology(
   plan: AgentRunPlan,
   classification: SecretaryTaskClassification,
-): HiveSwarmTopology {
+  thinkingEffort?: FlowThinkingEffort,
+): HiveSwarmTopology | undefined {
+  if (thinkingEffort === 'low' || plan.thinkingEffort === 'low') {
+    return undefined
+  }
+
   const hardwareLimit = useAppStore.getState().hardwareCapabilityProfile.maxHiveAgents
   const targetWorkers = Math.max(3, classification.expectedAgentCount ?? 5)
   const workerAgents = plan.subAgents.slice(0, Math.min(hardwareLimit, targetWorkers))

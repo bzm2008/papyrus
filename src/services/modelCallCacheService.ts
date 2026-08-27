@@ -34,6 +34,9 @@ export type CachedModelCallOptions = {
   sampling?: AgentSamplingProfile
   signal?: AbortSignal
   bypass?: boolean
+  routingMode?: 'manual' | 'auto'
+  providerId?: string
+  modelName?: string
 }
 
 export async function callCacheableModel(
@@ -42,7 +45,12 @@ export async function callCacheableModel(
   options: CachedModelCallOptions,
 ) {
   const sampling = resolveSampling(options)
-  const cacheKey = createModelCallCacheKey({ ...options, sampling })
+  const cacheKey = createModelCallCacheKey({
+    ...options,
+    sampling,
+    providerId: provider.id,
+    modelName: provider.modelName,
+  })
   const taskType = cacheTaskType(options, sampling)
 
   if (!options.bypass && isCacheableStage(options.stage)) {
@@ -86,6 +94,9 @@ export function createModelCallCacheKey(options: CachedModelCallOptions) {
     options.taskType,
     options.agentId ?? 'secretary',
     options.providerRole ?? 'default',
+    options.routingMode ?? useAppStore.getState().modelRoutingMode,
+    options.providerId ?? 'provider:none',
+    options.modelName ?? 'model:none',
     options.thinkingEffort ?? 'medium',
     options.contextHash ?? 'ctx:none',
     samplingFingerprint(sampling),

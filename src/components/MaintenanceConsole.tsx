@@ -979,8 +979,9 @@ function ScallionMaintenanceModelDirectory({
   sync: ScallionSyncChannelState
   onRefresh: () => void
 }) {
-  const availableCount = models.filter((model) => getScallionModelAccess(model).status === 'available').length
-  const restrictedCount = models.filter((model) => getScallionModelAccess(model).status === 'plan_unavailable').length
+  const modelRoutingMode = useAppStore((state) => state.modelRoutingMode)
+  const availableCount = models.filter((model) => getScallionModelAccess(model, modelRoutingMode).status === 'available').length
+  const restrictedCount = models.filter((model) => getScallionModelAccess(model, modelRoutingMode).status === 'plan_unavailable').length
   const temporaryCount = models.length - availableCount - restrictedCount
   const planLabel =
     quota?.planName ||
@@ -1027,7 +1028,7 @@ function ScallionMaintenanceModelDirectory({
       ) : (
         <div className="mt-3 max-h-96 divide-y divide-[#f0e8da] overflow-y-auto rounded-lg border border-[#f0e8da]">
           {models.map((model) => {
-            const access = getScallionModelAccess(model)
+            const access = getScallionModelAccess(model, modelRoutingMode)
             return (
               <div key={model.id} className="flex items-start justify-between gap-3 px-3 py-2.5" title={access.detail}>
                 <div className="min-w-0">

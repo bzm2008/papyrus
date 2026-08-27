@@ -156,6 +156,40 @@ describe('normalizeQuota', () => {
     )
   })
 
+  it('normalizes the main-site nested Auto quota and boolean external API flag', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 504,
+        auto: {
+          monthly_limit: 300,
+          daily_limit: 10,
+          monthly_used: 7,
+          daily_used: 2,
+          monthly_remaining: 293,
+          daily_remaining: 8,
+        },
+        plan: {
+          key: 'free',
+          name: 'Free',
+          manual_models: [],
+          auto_models: ['agnes-2.0-flash'],
+          external_api: false,
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        pointsBalance: 504,
+        autoMonthlyCalls: 300,
+        autoDailyCalls: 10,
+        autoMonthlyUsed: 7,
+        autoDailyUsed: 2,
+        autoMonthlyRemaining: 293,
+        autoDailyRemaining: 8,
+        externalApi: false,
+      }),
+    )
+  })
+
   it('stores the live plan and canonical points balance from a quota refresh', async () => {
     useAppStore.setState({ scallionToken: 'jwt-token' })
     vi.stubGlobal(

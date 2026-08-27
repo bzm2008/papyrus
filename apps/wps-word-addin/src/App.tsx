@@ -49,6 +49,8 @@ import type {
   WpsPatchOperation,
   WpsPlanDraft,
   WpsRetryRequest,
+  WpsScallionPlan,
+  WpsScallionQuota,
   WpsScallionRuntimeMetadata,
 } from './types'
 
@@ -99,9 +101,9 @@ export default function App() {
     setRuntimeMetadata((previous) => mergeWpsRuntimeMetadata(previous, metadata))
     if (metadata.modelsSync.status === 'ready') {
       setSelectedModel((current) =>
-        metadata.models.some((model) => model.id === current && model.available && model.planAvailable !== false)
+        metadata.models.some((model) => model.id === current && isWpsModelSelectable(model))
           ? current
-          : metadata.models.find((model) => model.available && model.planAvailable !== false)?.id ?? '',
+          : metadata.models.find(isWpsModelSelectable)?.id ?? '',
       )
     }
   }, [])
@@ -713,6 +715,7 @@ export default function App() {
             {runtimeMetadata?.quota?.planName || runtimeMetadata?.quota?.planKey || runtimeMetadata?.plan?.name || runtimeMetadata?.plan?.key || (session ? '套餐同步中' : '未登录 Scallion')}
             {runtimeMetadata?.plan?.expiresAt ? ` · 到期 ${new Date(runtimeMetadata.plan.expiresAt).toLocaleDateString('zh-CN')}` : ''}
             {runtimeMetadata?.quota && quotaSyncStatus && quotaSyncStatus !== 'ready' ? ' · 可能过期' : ''}
+            {formatWpsAutoQuota(runtimeMetadata?.quota, runtimeMetadata?.plan) ? ` · ${formatWpsAutoQuota(runtimeMetadata?.quota, runtimeMetadata?.plan)}` : ''}
           </strong>
           <span>
             {runtimeMetadata?.quota
@@ -733,10 +736,19 @@ export default function App() {
           >
             <option value="">自动选择套餐内模型</option>
             {(runtimeMetadata?.models ?? []).map((model) => {
-              const access = getWpsModelAccess(model)
+              const manualAccess = getWpsModelAccess(model, 'manual')
+              const autoAccess = getWpsModelAccess(model, 'auto')
+              const access = manualAccess.usable ? manualAccess : autoAccess
+              const autoOnly = !manualAccess.usable && autoAccess.usable
               return (
                 <option key={model.id} value={model.id} disabled={!access.usable}>
-                  {model.name || model.id}{access.usable ? '' : ` · ${access.label} · ${access.detail}`}
+                  {model.name || model.id}{
+                    access.usable
+                      ? autoOnly
+                        ? ' · Auto 专用'
+                        : ''
+                      : ` · ${access.label} · ${access.detail}`
+                  }
                 </option>
               )
             })}
@@ -873,6 +885,28 @@ export default function App() {
       </form>
     </main>
   )
+}
+
+function isWpsModelSelectable(model: Parameters<typeof getWpsModelAccess>[0]) {
+  return getWpsModelAccess(model, 'manual').usable || getWpsModelAccess(model, 'auto').usable
+}
+
+function formatWpsAutoQuota(quota: WpsScallionQuota | undefined, plan: WpsScallionPlan | undefined) {
+  const monthlyLimit = quota?.autoMonthlyCalls ?? plan?.autoMonthlyCalls
+  const dailyLimit = quota?.autoDailyCalls ?? plan?.autoDailyCalls
+  const monthly =
+    quota?.autoMonthlyRemaining !== undefined
+      ? `${quota.autoMonthlyRemaining}/${monthlyLimit ?? '?'} 月`
+      : monthlyLimit !== undefined
+        ? `${monthlyLimit} 次/月`
+        : ''
+  const daily =
+    quota?.autoDailyRemaining !== undefined
+      ? `${quota.autoDailyRemaining}/${dailyLimit ?? '?'} 日`
+      : dailyLimit !== undefined
+        ? `${dailyLimit} 次/日`
+        : ''
+  return monthly || daily ? `Auto ${[monthly, daily].filter(Boolean).join(' · ')}` : ''
 }
 
 function PlanDraftCard({

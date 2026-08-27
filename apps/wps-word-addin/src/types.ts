@@ -93,6 +93,10 @@ export type WpsScallionModel = {
   contextWindowLabel?: string
   planAvailable: boolean
   requiredPlan?: string
+  manualAvailable?: boolean
+  autoAvailable?: boolean
+  autoOnly?: boolean
+  autoRequiredPlan?: string
   availabilityReason?: string
   available: boolean
 }
@@ -104,6 +108,15 @@ export type WpsScallionQuota = {
   planKey?: string
   planName?: string
   planExpiresAt?: string | null
+  autoMonthlyCalls?: number
+  autoDailyCalls?: number
+  autoMonthlyUsed?: number
+  autoDailyUsed?: number
+  autoMonthlyRemaining?: number
+  autoDailyRemaining?: number
+  manualModels?: string[]
+  autoModels?: string[]
+  externalApi?: boolean | string
   updatedAt: number
 }
 
@@ -111,6 +124,11 @@ export type WpsScallionPlan = {
   key?: string
   name?: string
   expiresAt?: string | null
+  manualModels?: string[]
+  autoModels?: string[]
+  autoMonthlyCalls?: number
+  autoDailyCalls?: number
+  externalApi?: boolean | string
 }
 
 export type WpsScallionSyncStatus = 'syncing' | 'ready' | 'stale' | 'error'

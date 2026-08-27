@@ -20,6 +20,7 @@ const effortLabels: Record<FlowThinkingEffort, string> = {
 export function getSecretaryGoalCyclePolicy(effort: FlowThinkingEffort) {
   return {
     executionEffort: effort,
+    allowsSubAgents: effort !== 'low',
     maxRounds: effort === 'ultra_hive' ? 8 : effort === 'high' ? 6 : 4,
     maxDurationMs: effort === 'ultra_hive' ? 16 * 60 * 1000 : 9 * 60 * 1000,
   }
@@ -155,7 +156,7 @@ function inferGoalTitle(request: string) {
 
 function effortInstruction(effort: FlowThinkingEffort) {
   if (effort === 'low') {
-    return '快速推进，减少工作室 Agent 和验证轮次，优先给出可用结果。'
+    return '快速推进，由秘书长单体处理；不调用工作室 Agent 或 Hive，必要的单次工具仍可使用。'
   }
 
   if (effort === 'high') {

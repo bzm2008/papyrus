@@ -1,5 +1,10 @@
 import { invoke } from '@tauri-apps/api/core'
-import { useAppStore, type LlmProviderConfig, type ScallionPlan } from '../stores/useAppStore'
+import {
+  useAppStore,
+  type LlmProviderConfig,
+  type ModelRoutingMode,
+  type ScallionPlan,
+} from '../stores/useAppStore'
 
 const SCALLION_MODELS_TIMEOUT_MS = 15_000
 
@@ -23,7 +28,13 @@ type ChatCompletionResponse = {
     type?: string
     code?: string
     plan?: string
+    auto_quota?: unknown
   }
+  // Some gateway errors are returned at the top level by older proxies.
+  message?: string
+  type?: string
+  code?: string
+  plan?: string
 }
 
 type StreamOptions = {
@@ -37,6 +48,8 @@ export type LlmSamplingOptions = {
   maxTokens?: number
   frequencyPenalty?: number
   presencePenalty?: number
+  /** Scallion-only routing hint. Omitted values follow the current app mode. */
+  routingMode?: ModelRoutingMode
 }
 
 export type ScallionModel = {
@@ -62,6 +75,14 @@ export type ScallionModel = {
   required_plan?: string
   availabilityReason?: string
   availability_reason?: string
+  manualAvailable?: boolean
+  manual_available?: boolean
+  autoAvailable?: boolean
+  auto_available?: boolean
+  autoOnly?: boolean
+  auto_only?: boolean
+  autoRequiredPlan?: string
+  auto_required_plan?: string
   contextWindowTokens?: number
   context_window_tokens?: number
   contextWindow?: number
@@ -83,6 +104,16 @@ type ScallionPlanPayload = {
   expiresAt?: unknown
   available_models?: unknown
   availableModels?: unknown
+  manual_models?: unknown
+  manualModels?: unknown
+  auto_models?: unknown
+  autoModels?: unknown
+  auto_monthly_calls?: unknown
+  autoMonthlyCalls?: unknown
+  auto_daily_calls?: unknown
+  autoDailyCalls?: unknown
+  external_api?: unknown
+  externalApi?: unknown
 }
 
 export type ScallionProxyModel = {
@@ -95,6 +126,10 @@ export type ScallionProxyModel = {
   callPrice?: number
   planAvailable?: boolean
   requiredPlan?: string
+  manualAvailable?: boolean
+  autoAvailable?: boolean
+  autoOnly?: boolean
+  autoRequiredPlan?: string
   availabilityReason?: string
   available?: boolean
   contextWindowTokens?: number
@@ -109,6 +144,7 @@ export type ScallionModelCatalog = {
 export type LlmErrorCode =
   | 'unauthorized'
   | 'quota_exhausted'
+  | 'auto_quota_exhausted'
   | 'plan_model_forbidden'
   | 'forbidden'
   | 'rate_limited'
@@ -124,6 +160,7 @@ export class LlmRequestError extends Error {
   readonly status?: number
   readonly plan?: string
   readonly recoverable: boolean
+  readonly autoQuota?: unknown
 
   constructor(
     message: string,
@@ -131,6 +168,7 @@ export class LlmRequestError extends Error {
       code: LlmErrorCode
       status?: number
       plan?: string
+      autoQuota?: unknown
       recoverable?: boolean
     },
   ) {
@@ -139,6 +177,7 @@ export class LlmRequestError extends Error {
     this.code = options.code
     this.status = options.status
     this.plan = options.plan
+    this.autoQuota = options.autoQuota
     this.recoverable = options.recoverable ?? false
   }
 }
@@ -154,6 +193,7 @@ type NativeLlmPayload = {
     maxTokens: number
     frequencyPenalty?: number
     presencePenalty?: number
+    routingMode?: ModelRoutingMode
   }
 }
 
@@ -175,13 +215,13 @@ async function callOpenAICompatibleOnce(
   sampling?: LlmSamplingOptions,
   allowModelRecovery = true,
 ) {
-  const modelName = resolveProviderModelName(provider)
+  const modelName = resolveProviderModelName(provider, sampling?.routingMode)
 
   if (!modelName) {
     throw new Error('Model Name 不能为空')
   }
 
-  assertScallionModelListed(provider, modelName)
+  assertScallionModelListed(provider, modelName, sampling?.routingMode)
 
   const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
@@ -200,6 +240,9 @@ async function callOpenAICompatibleOnce(
     max_tokens: sampling?.maxTokens ?? 8192,
     frequency_penalty: sampling?.frequencyPenalty,
     presence_penalty: sampling?.presencePenalty,
+    ...(provider.type === 'scallion_proxy'
+      ? { routing_mode: resolveScallionRoutingMode(sampling?.routingMode) }
+      : {}),
     stream: false,
   }
   let response: Response
@@ -229,6 +272,7 @@ async function callOpenAICompatibleOnce(
       maxTokens: requestBody.max_tokens,
       frequencyPenalty: requestBody.frequency_penalty,
       presencePenalty: requestBody.presence_penalty,
+      routingMode: sampling?.routingMode,
     })
     scheduleScallionQuotaRefresh(provider)
     return fallback
@@ -242,16 +286,23 @@ async function callOpenAICompatibleOnce(
     if (provider.type === 'scallion_proxy') {
       if (error.code === 'unauthorized') {
         useAppStore.getState().expireScallionSession()
-      } else if (error.code === 'quota_exhausted') {
+      } else if (error.code === 'quota_exhausted' || error.code === 'auto_quota_exhausted') {
         scheduleScallionQuotaRefresh(provider)
       }
     }
 
     if (allowModelRecovery && provider.type === 'scallion_proxy' && error.code === 'plan_model_forbidden') {
-      const recoveredProvider = await recoverScallionModel(provider)
+      const requestedRoutingMode = resolveScallionRoutingMode(sampling?.routingMode)
+      const recoveredProvider = await recoverScallionModel(provider, requestedRoutingMode)
 
       if (recoveredProvider) {
-        return callOpenAICompatibleOnce(recoveredProvider, messages, signal, sampling, false)
+        return callOpenAICompatibleOnce(
+          recoveredProvider,
+          messages,
+          signal,
+          sampling ? { ...sampling, routingMode: requestedRoutingMode } : { routingMode: requestedRoutingMode },
+          false,
+        )
       }
     }
 
@@ -314,13 +365,13 @@ async function callOpenAICompatibleStreamOnce(
   allowModelRecovery = true,
   emptyStreamFallback = { attempted: false },
 ) {
-  const modelName = resolveProviderModelName(provider)
+  const modelName = resolveProviderModelName(provider, sampling?.routingMode)
 
   if (!modelName) {
     throw new Error('Model Name 不能为空')
   }
 
-  assertScallionModelListed(provider, modelName)
+  assertScallionModelListed(provider, modelName, sampling?.routingMode)
 
   const endpoint = resolveChatEndpoint(provider.baseUrl, provider.type)
   const headers: Record<string, string> = {
@@ -346,6 +397,9 @@ async function callOpenAICompatibleStreamOnce(
         max_tokens: sampling?.maxTokens ?? 8192,
         frequency_penalty: sampling?.frequencyPenalty,
         presence_penalty: sampling?.presencePenalty,
+        ...(provider.type === 'scallion_proxy'
+          ? { routing_mode: resolveScallionRoutingMode(sampling?.routingMode) }
+          : {}),
         stream: true,
       }),
     })
@@ -367,6 +421,7 @@ async function callOpenAICompatibleStreamOnce(
       maxTokens: sampling?.maxTokens ?? 8192,
       frequencyPenalty: sampling?.frequencyPenalty,
       presencePenalty: sampling?.presencePenalty,
+      routingMode: sampling?.routingMode,
     })
     onToken(fallback)
     scheduleScallionQuotaRefresh(provider)
@@ -380,19 +435,20 @@ async function callOpenAICompatibleStreamOnce(
     if (provider.type === 'scallion_proxy') {
       if (error.code === 'unauthorized') {
         useAppStore.getState().expireScallionSession()
-      } else if (error.code === 'quota_exhausted') {
+      } else if (error.code === 'quota_exhausted' || error.code === 'auto_quota_exhausted') {
         scheduleScallionQuotaRefresh(provider)
       }
     }
 
     if (allowModelRecovery && provider.type === 'scallion_proxy' && error.code === 'plan_model_forbidden') {
-      const recoveredProvider = await recoverScallionModel(provider)
+      const requestedRoutingMode = resolveScallionRoutingMode(sampling?.routingMode)
+      const recoveredProvider = await recoverScallionModel(provider, requestedRoutingMode)
 
       if (recoveredProvider) {
         return callOpenAICompatibleStreamOnce(
           recoveredProvider,
           messages,
-          { signal, onToken, sampling },
+          { signal, onToken, sampling: sampling ? { ...sampling, routingMode: requestedRoutingMode } : { routingMode: requestedRoutingMode } },
           false,
           emptyStreamFallback,
         )
@@ -589,49 +645,77 @@ export async function fetchScallionProxyModelCatalog(
       : undefined,
   )
 
-  return {
-    plan,
-    models: models
-    .map((model) => {
-      const id = model.id?.trim() || model.modelName?.trim() || model.model_name?.trim() || ''
-      const name = model.name?.trim() || model.displayName?.trim() || model.label?.trim() || id
-      const contextWindowTokens = toPositiveNumber(
-        model.context_window_tokens ?? model.contextWindowTokens ?? model.context_window ?? model.contextWindow,
-      )
+  const manualModels = plan?.manualModels
+  const autoModels = plan?.autoModels
+  const byId = new Map<string, ScallionProxyModel>()
 
-      return {
-        id,
-        label: name,
-        modelName: id,
-        name,
-        provider: model.provider,
-        billingMode: model.billingMode ?? model.billing_mode,
-        callPrice: toPositiveNumber(model.callPrice ?? model.call_price),
-        planAvailable:
-          model.planAvailable ??
-          model.plan_available ??
-          model.availableForPlan ??
-          model.available_for_plan ??
-          model.allowed ??
-          true,
-        requiredPlan: model.requiredPlan ?? model.required_plan,
-        availabilityReason: model.availabilityReason ?? model.availability_reason,
-        available: model.available ?? model.enabled ?? true,
-        contextWindowTokens,
-        contextWindowLabel: model.contextWindowLabel ?? model.context_window_label,
-      }
-    })
-    .filter((model) => Boolean(model.id)),
+  for (const model of models) {
+    const id = model.id?.trim() || model.modelName?.trim() || model.model_name?.trim() || ''
+    if (!id) continue
+
+    const explicitManual = model.manualAvailable ?? model.manual_available
+    const explicitAuto = model.autoAvailable ?? model.auto_available
+    const manualAvailable =
+      explicitManual ?? (manualModels ? manualModels.includes(id) : undefined)
+    const autoAvailable = explicitAuto ?? (autoModels ? autoModels.includes(id) : undefined)
+    const autoOnly =
+      model.autoOnly ?? model.auto_only ?? (manualAvailable === false && autoAvailable !== false)
+    const hasModeFields =
+      explicitManual !== undefined || explicitAuto !== undefined || model.autoOnly !== undefined || model.auto_only !== undefined
+    const legacyPlanAvailable =
+      model.planAvailable ??
+      model.plan_available ??
+      model.availableForPlan ??
+      model.available_for_plan ??
+      model.allowed
+    const planAvailable =
+      legacyPlanAvailable !== undefined
+        ? legacyPlanAvailable
+        : hasModeFields || manualModels !== undefined || autoModels !== undefined
+          ? manualAvailable !== false || autoAvailable !== false
+          : true
+    const name = model.name?.trim() || model.displayName?.trim() || model.label?.trim() || id
+    const normalized: ScallionProxyModel = {
+      id,
+      label: name,
+      modelName: id,
+      name,
+      provider: model.provider,
+      billingMode: model.billingMode ?? model.billing_mode,
+      callPrice: toPositiveNumber(model.callPrice ?? model.call_price),
+      planAvailable,
+      requiredPlan: model.requiredPlan ?? model.required_plan,
+    manualAvailable,
+    autoAvailable,
+      autoOnly,
+      autoRequiredPlan: model.autoRequiredPlan ?? model.auto_required_plan,
+      availabilityReason: model.availabilityReason ?? model.availability_reason,
+      available:
+        model.available ??
+        model.enabled ??
+        (hasModeFields || manualModels !== undefined || autoModels !== undefined ? true : legacyPlanAvailable !== false),
+      contextWindowTokens: toPositiveNumber(
+        model.context_window_tokens ?? model.contextWindowTokens ?? model.context_window ?? model.contextWindow,
+      ),
+      contextWindowLabel: model.contextWindowLabel ?? model.context_window_label,
+    }
+    const existing = byId.get(id)
+    byId.set(id, existing ? mergeScallionModel(existing, normalized) : normalized)
   }
+
+  return { plan, models: Array.from(byId.values()) }
 }
 
 export function canCallProvider(provider: LlmProviderConfig) {
-  const modelName = resolveProviderModelName(provider)
+  const routingMode = resolveScallionRoutingMode()
+  const modelName = resolveProviderModelName(provider, routingMode)
 
   if (provider.type === 'scallion_proxy') {
     const stateModels = useAppStore.getState().scallionModels
     const listedModelIsUsable = stateModels.some(
-      (model) => model.id === modelName && model.available && model.planAvailable !== false,
+      (model) =>
+        (model.id === modelName || model.modelName === modelName) &&
+        isScallionModelCallableWithPlan(model, routingMode),
     )
 
     return Boolean(provider.baseUrl.trim() && modelName && resolveProviderApiKey(provider) && listedModelIsUsable)
@@ -648,21 +732,48 @@ export function canCallProvider(provider: LlmProviderConfig) {
   return Boolean(provider.baseUrl.trim() && modelName && resolveProviderApiKey(provider))
 }
 
-function resolveProviderModelName(provider: LlmProviderConfig) {
-  return provider.modelName.trim()
+function resolveProviderModelName(provider: LlmProviderConfig, routingMode?: ModelRoutingMode) {
+  const configured = provider.modelName.trim()
+  if (provider.type !== 'scallion_proxy') {
+    return configured
+  }
+
+  const mode = resolveScallionRoutingMode(routingMode)
+  const listed = useAppStore.getState().scallionModels
+  const configuredModel = listed.find((model) => model.id === configured || model.modelName === configured)
+  if (configuredModel && isScallionModelCallableWithPlan(configuredModel, mode)) {
+    return configuredModel.id || configuredModel.modelName
+  }
+
+  if (mode === 'auto') {
+    const fallback = listed.find(
+      (model) =>
+        isScallionModelCallableWithPlan(model, mode),
+    )
+    return fallback?.id || fallback?.modelName || configured
+  }
+
+  return configured
 }
 
-function assertScallionModelListed(provider: LlmProviderConfig, modelName: string) {
+function assertScallionModelListed(
+  provider: LlmProviderConfig,
+  modelName: string,
+  explicitRoutingMode?: ModelRoutingMode,
+) {
   if (provider.type !== 'scallion_proxy') {
     return
   }
 
+  const routingMode = resolveScallionRoutingMode(explicitRoutingMode)
   const listed = useAppStore.getState().scallionModels.some(
-    (model) => model.id === modelName && model.available && model.planAvailable !== false,
+    (model) =>
+      (model.id === modelName || model.modelName === modelName) &&
+      isScallionModelCallableWithPlan(model, routingMode),
   )
 
   if (!listed) {
-    throw new LlmRequestError('当前模型不在套餐模型目录中，请刷新模型列表后重试。', {
+      throw new LlmRequestError('当前模型不在套餐模型目录中，请刷新模型列表后重试。', {
       code: 'protocol_error',
       recoverable: true,
     })
@@ -686,9 +797,17 @@ function resolveProviderApiKey(provider: LlmProviderConfig) {
 async function callViaTauri(
   provider: LlmProviderConfig,
   messages: ChatMessage[],
-  options: { temperature: number; maxTokens: number; frequencyPenalty?: number; presencePenalty?: number },
+  options: {
+    temperature: number
+    maxTokens: number
+    frequencyPenalty?: number
+    presencePenalty?: number
+    routingMode?: ModelRoutingMode
+  },
 ) {
-  const modelName = resolveProviderModelName(provider)
+  const routingMode =
+    provider.type === 'scallion_proxy' ? resolveScallionRoutingMode(options.routingMode) : undefined
+  const modelName = resolveProviderModelName(provider, routingMode)
   const payload: NativeLlmPayload = {
     request: {
       baseUrl: provider.baseUrl,
@@ -700,6 +819,7 @@ async function callViaTauri(
       maxTokens: options.maxTokens,
       frequencyPenalty: options.frequencyPenalty,
       presencePenalty: options.presencePenalty,
+      routingMode,
     },
   }
 
@@ -749,13 +869,14 @@ function parseStreamLine(line: string) {
 
 function createHttpError(status: number, payload: ChatCompletionResponse) {
   const payloadError = payload.error
-  const message = payloadError?.message || `LLM 请求失败：HTTP ${status}`
-  const type = payloadError?.type || payloadError?.code
+  const message = payloadError?.message || payload.message || `LLM 请求失败：HTTP ${status}`
+  const type = payloadError?.type || payloadError?.code || payload.type || payload.code
   let code: LlmErrorCode = 'http_error'
 
   if (status === 401) code = 'unauthorized'
+  else if (type === 'auto_quota_exhausted') code = 'auto_quota_exhausted'
   else if (status === 402) code = 'quota_exhausted'
-  else if (status === 403 && type === 'plan_model_forbidden') code = 'plan_model_forbidden'
+  else if (type === 'plan_model_forbidden') code = 'plan_model_forbidden'
   else if (status === 403) code = 'forbidden'
   else if (status === 429) code = 'rate_limited'
   else if (status >= 500) code = 'server_error'
@@ -763,23 +884,41 @@ function createHttpError(status: number, payload: ChatCompletionResponse) {
   return new LlmRequestError(message, {
     code,
     status,
-    plan: payloadError?.plan,
-    recoverable: code === 'plan_model_forbidden' || code === 'server_error' || code === 'rate_limited',
+    plan: payloadError?.plan || payload.plan,
+    autoQuota: payloadError?.auto_quota,
+    recoverable:
+      code === 'plan_model_forbidden' ||
+      code === 'auto_quota_exhausted' ||
+      code === 'server_error' ||
+      code === 'rate_limited',
   })
 }
 
-async function recoverScallionModel(provider: LlmProviderConfig) {
+async function recoverScallionModel(provider: LlmProviderConfig, requestedRoutingMode?: ModelRoutingMode) {
   try {
     const { refreshScallionModels, refreshScallionQuota } = await import('./scallionAccountService')
-    await Promise.allSettled([refreshScallionModels(), refreshScallionQuota()])
+    const [modelsResult] = await Promise.allSettled([refreshScallionModels(), refreshScallionQuota()])
+    if (modelsResult.status !== 'fulfilled') {
+      return undefined
+    }
     const state = useAppStore.getState()
-    const next = state.scallionModels.find(
-      (model) => model.available && model.planAvailable !== false && model.id,
+    const routingMode = resolveScallionRoutingMode(requestedRoutingMode)
+    const refreshedModels = modelsResult.value
+    const next = refreshedModels.find(
+      (model) =>
+        model.id &&
+        isScallionModelSelectableForMode(model, routingMode),
     )
 
     if (!next) {
       return undefined
     }
+
+    state.updateProviderModelMetadata('qwen36', {
+      modelName: next.id,
+      label: next.label || provider.label,
+      contextWindowTokens: next.contextWindowTokens,
+    })
 
     return {
       ...state.providerConfigs.qwen36,
@@ -820,6 +959,20 @@ function normalizeScallionPlanPayload(payload?: ScallionPlanPayload): ScallionPl
     : Array.isArray(payload.availableModels)
       ? payload.availableModels
       : []
+  const hasManualModels = Array.isArray(payload.manual_models) || Array.isArray(payload.manualModels)
+  const hasAutoModels = Array.isArray(payload.auto_models) || Array.isArray(payload.autoModels)
+  const manualModels = hasManualModels
+    ? normalizeStringList(payload.manual_models ?? payload.manualModels)
+    : undefined
+  const autoModels = hasAutoModels
+    ? normalizeStringList(payload.auto_models ?? payload.autoModels)
+    : undefined
+  const availableModelList = availableModels
+    .filter((model): model is string => typeof model === 'string' && model.trim().length > 0)
+    .map((model) => model.trim())
+  const combinedAvailableModels = Array.from(
+    new Set([...availableModelList, ...(manualModels ?? []), ...(autoModels ?? [])]),
+  )
 
   return {
     key: key || name.toLowerCase(),
@@ -830,16 +983,126 @@ function normalizeScallionPlanPayload(payload?: ScallionPlanPayload): ScallionPl
         : typeof payload.expiresAt === 'string' || payload.expiresAt === null
           ? payload.expiresAt
           : null,
-    availableModels: availableModels
-      .filter((model): model is string => typeof model === 'string' && model.trim().length > 0)
-      .map((model) => model.trim()),
+    availableModels: combinedAvailableModels,
+    manualModels,
+    autoModels,
+    autoMonthlyCalls: toNonNegativeNumber(payload.auto_monthly_calls ?? payload.autoMonthlyCalls),
+    autoDailyCalls: toNonNegativeNumber(payload.auto_daily_calls ?? payload.autoDailyCalls),
+    externalApi: normalizeExternalApi(payload.external_api ?? payload.externalApi),
     updatedAt: Date.now(),
   }
+}
+
+function normalizeStringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : []
+}
+
+function normalizeExternalApi(value: unknown): boolean | string | undefined {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  return undefined
+}
+
+function resolveScallionRoutingMode(explicit?: ModelRoutingMode): ModelRoutingMode {
+  const state = useAppStore.getState()
+  if (explicit === 'auto') return 'auto'
+  if (explicit === 'manual') {
+    if (state.scallionPlan?.manualModels?.length === 0 && (state.scallionPlan.autoModels?.length ?? 0) > 0) {
+      return 'auto'
+    }
+    return 'manual'
+  }
+  if (state.modelRoutingMode === 'auto') {
+    return 'auto'
+  }
+
+  // Free currently exposes no manual models. Keep older persisted clients
+  // working by treating an omitted routing hint as Auto when the live
+  // entitlement or selected model proves that manual routing is unavailable.
+  if (
+    state.scallionPlan?.manualModels?.length === 0 &&
+    (state.scallionPlan.autoModels?.length ?? 0) > 0
+  ) {
+    return 'auto'
+  }
+
+  const configuredModel = state.scallionModels.find(
+    (model) =>
+      model.id === state.providerConfigs.qwen36.modelName ||
+      model.modelName === state.providerConfigs.qwen36.modelName,
+  )
+  if (
+    configuredModel &&
+    !isScallionModelCallable(configuredModel, 'manual') &&
+    isScallionModelCallable(configuredModel, 'auto')
+  ) {
+    return 'auto'
+  }
+
+  return 'manual'
+}
+
+function isScallionModelCallable(
+  model: Pick<ScallionProxyModel, 'manualAvailable' | 'autoAvailable' | 'autoOnly'>,
+  routingMode: ModelRoutingMode,
+) {
+  if (routingMode === 'auto') {
+    return model.autoAvailable !== false
+  }
+  return model.manualAvailable !== false && model.autoOnly !== true
+}
+
+function isScallionModelCallableWithPlan(
+  model: Pick<ScallionProxyModel, 'available' | 'planAvailable' | 'manualAvailable' | 'autoAvailable' | 'autoOnly'>,
+  routingMode: ModelRoutingMode,
+) {
+  const hasExplicitModeAccess =
+    model.manualAvailable !== undefined || model.autoAvailable !== undefined || model.autoOnly === true
+  return model.available !== false && (hasExplicitModeAccess || model.planAvailable !== false) && isScallionModelCallable(model, routingMode)
+}
+
+function isScallionModelSelectableForMode(
+  model: Pick<ScallionProxyModel, 'planAvailable' | 'manualAvailable' | 'autoAvailable' | 'autoOnly'>,
+  routingMode: ModelRoutingMode,
+) {
+  const hasExplicitModeAccess =
+    model.manualAvailable !== undefined || model.autoAvailable !== undefined || model.autoOnly === true
+  return (hasExplicitModeAccess || model.planAvailable !== false) && isScallionModelCallable(model, routingMode)
+}
+
+function mergeScallionModel(
+  previous: ScallionProxyModel,
+  next: ScallionProxyModel,
+): ScallionProxyModel {
+  const merged = { ...previous }
+  for (const [key, value] of Object.entries(next) as Array<[
+    keyof ScallionProxyModel,
+    ScallionProxyModel[keyof ScallionProxyModel],
+  ]>) {
+    if (value !== undefined && value !== '') {
+      ;(merged as Record<string, unknown>)[key] = value
+    }
+  }
+  // A duplicate entry must not turn a callable model into a restricted one
+  // merely because one upstream branch omitted a field.
+  merged.manualAvailable = previous.manualAvailable ?? next.manualAvailable
+  merged.autoAvailable = previous.autoAvailable ?? next.autoAvailable
+  merged.autoOnly = previous.autoOnly ?? next.autoOnly
+  merged.planAvailable = previous.planAvailable ?? next.planAvailable
+  merged.available = previous.available !== false && next.available !== false
+  return merged
 }
 
 function toPositiveNumber(value: unknown) {
   const number = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(number) && number > 0 ? Math.round(number) : undefined
+}
+
+function toNonNegativeNumber(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) && number >= 0 ? Math.round(number) : undefined
 }
 
 async function withLlmRetry<T>(

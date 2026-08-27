@@ -36,6 +36,24 @@ describe('Scallion model access presentation', () => {
     expect(getScallionModelAccess({ available: true, planAvailable: true }).usable).toBe(true)
   })
 
+  it('uses the routing mode-specific permission fields', () => {
+    const model = {
+      available: true,
+      planAvailable: true,
+      manualAvailable: false,
+      autoAvailable: true,
+      autoOnly: true,
+      autoRequiredPlan: 'briefly',
+    }
+
+    expect(getScallionModelAccess(model, 'manual')).toEqual(
+      expect.objectContaining({ status: 'plan_unavailable', usable: false, label: '手动不可用' }),
+    )
+    expect(getScallionModelAccess(model, 'auto')).toEqual(
+      expect.objectContaining({ status: 'available', usable: true }),
+    )
+  })
+
   it('treats the legacy none entitlement as the Free plan', () => {
     expect(formatScallionPlanName('none')).toBe('Free')
   })

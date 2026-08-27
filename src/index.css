@@ -200,6 +200,156 @@ textarea {
   box-shadow: 0 8px 20px rgba(43, 34, 19, 0.055);
 }
 
+.mascot-window {
+  background: transparent;
+}
+
+.mascot-card {
+  position: relative;
+  border: 1px solid rgba(232, 221, 199, 0.92);
+  border-radius: 18px;
+  background: rgba(255, 254, 250, 0.96);
+  box-shadow: 0 18px 48px rgba(43, 34, 19, 0.2), 0 1px 0 rgba(255, 255, 255, 0.86) inset;
+  backdrop-filter: blur(18px);
+}
+
+/* All state frames share one identity-locked sprite. State changes are
+   communicated by the surrounding indicator and motion, never by redrawing
+   the face or uniform independently. */
+.mascot-art {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 136px;
+  height: 136px;
+}
+
+.mascot-state-indicator {
+  position: absolute;
+  right: 8px;
+  bottom: 9px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #fffefa;
+  border-radius: 999px;
+  background: #8f9781;
+  box-shadow: 0 1px 5px rgba(43, 34, 19, 0.18);
+}
+
+.mascot-state-glyph {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid rgba(215, 170, 79, 0.42);
+  border-radius: 999px;
+  background: rgba(255, 254, 250, 0.94);
+  color: #6f7f68;
+  box-shadow: 0 3px 10px rgba(43, 34, 19, 0.12);
+}
+
+.mascot-mood-thinking .mascot-state-indicator,
+.mascot-mood-working .mascot-state-indicator,
+.mascot-mood-collaborating .mascot-state-indicator,
+.mascot-mood-reconnecting .mascot-state-indicator {
+  background: #d7aa4f;
+  animation: mascot-indicator-pulse 1.4s ease-in-out infinite;
+}
+
+.mascot-mood-awaiting_approval .mascot-state-indicator,
+.mascot-mood-blocked .mascot-state-indicator {
+  background: #cf8b50;
+}
+
+.mascot-mood-failed .mascot-state-indicator,
+.mascot-mood-error .mascot-state-indicator {
+  background: #b65b51;
+}
+
+.mascot-mood-completed .mascot-state-indicator {
+  background: #31a96b;
+  box-shadow: 0 0 0 3px rgba(49, 169, 107, 0.14);
+}
+
+.mascot-mood-completed .mascot-state-glyph {
+  border-color: rgba(49, 169, 107, 0.35);
+  color: #31a96b;
+}
+
+.mascot-mood-failed .mascot-state-glyph,
+.mascot-mood-error .mascot-state-glyph {
+  border-color: rgba(182, 91, 81, 0.35);
+  color: #b65b51;
+}
+
+.mascot-mood-thinking .mascot-state-glyph,
+.mascot-mood-working .mascot-state-glyph,
+.mascot-mood-collaborating .mascot-state-glyph,
+.mascot-mood-reconnecting .mascot-state-glyph {
+  animation: mascot-glyph-spin 2.4s linear infinite;
+}
+
+@keyframes mascot-indicator-pulse {
+  0%,
+  100% {
+    opacity: 0.62;
+    transform: scale(0.86);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes mascot-glyph-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.mascot-drag-region {
+  cursor: grab;
+  user-select: none;
+}
+
+.mascot-drag-region:active {
+  cursor: grabbing;
+}
+
+.mascot-action-button {
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(232, 221, 199, 0.92);
+  background: rgba(255, 254, 250, 0.82);
+  color: #6f7168;
+}
+
+.mascot-action-button:hover {
+  color: #20201d;
+  background: #fffdf7;
+}
+
+.mascot-primary-button {
+  background: #20201d;
+  color: #fffefa;
+}
+
+.mascot-primary-button:hover {
+  background: #3f5845;
+}
+
+.mascot-summon-button {
+  transition: transform 180ms var(--papyrus-ease), box-shadow 180ms var(--papyrus-ease);
+}
+
+.mascot-summon-button:hover {
+  transform: translateY(-1px) scale(1.04);
+  box-shadow: 0 7px 18px rgba(43, 34, 19, 0.15);
+}
+
 .papyrus-scrollbar {
   scrollbar-color: rgba(111, 127, 104, 0.42) transparent;
   scrollbar-width: thin;
@@ -388,5 +538,13 @@ textarea {
 
   .vibe-dock::after {
     animation: none;
+  }
+
+  .mascot-state-indicator {
+    animation: none !important;
+  }
+
+  .mascot-state-glyph {
+    animation: none !important;
   }
 }

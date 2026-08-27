@@ -6,8 +6,10 @@ import { useProjectGuidance } from '../hooks/useProjectGuidance'
 import { useRemoteRelay } from '../hooks/useRemoteRelay'
 import { refreshHardwareCapabilityProfile } from '../services/hardwareCapabilityService'
 import { installDesktopLifecycleHandlers } from '../services/desktopLifecycleService'
+import { restoreMascotWindowPreference } from '../services/mascotWindowService'
 import { refreshScallionQuota, refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { initializeSecretaryLedgerRuntime } from '../services/secretaryLedgerRuntime'
+import { verifyUpdateDataAfterStartup } from '../services/updateDataProtection'
 import { useAppStore } from '../stores/useAppStore'
 import { BrandMark } from './BrandMark'
 import { EditorPane } from './EditorPane'
@@ -25,6 +27,10 @@ import { shouldShowLegacyLeftSidebar } from './secretaryWorkspaceLayout'
 export function AppShell() {
   const isFirstLaunch = useAppStore((state) => state.isFirstLaunch)
   const isEnvReady = useAppStore((state) => state.isEnvReady)
+
+  useEffect(() => {
+    void verifyUpdateDataAfterStartup()
+  }, [])
 
   return (
     <AnimatePresence mode="wait" initial={false}>
@@ -121,6 +127,10 @@ function MainWorkbench() {
   }, [])
 
   useEffect(() => installDesktopLifecycleHandlers(), [])
+
+  useEffect(() => {
+    void restoreMascotWindowPreference()
+  }, [])
 
   const isFlowMode = mode === 'flow'
   const showLeft = shouldShowLegacyLeftSidebar(mode, columnMode)

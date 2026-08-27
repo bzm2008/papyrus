@@ -4,6 +4,7 @@ import {
   type FlowAgentId,
   type HiveBlackboardEntryKind,
   type HiveSwarmPhase,
+  type FlowThinkingEffort,
 } from '../stores/useAppStore'
 
 type HiveRuntimeSession = {
@@ -26,8 +27,11 @@ type GuardedAgentCallOptions = {
 
 const openCircuitAgents = new Map<FlowAgentId, { openedAt: number; failureCount: number; reason: string }>()
 
-export function startHiveRuntime(plan: AgentRunPlan): HiveRuntimeSession | undefined {
-  if (!plan.hiveTopology?.enabled) {
+export function startHiveRuntime(
+  plan: AgentRunPlan,
+  thinkingEffort?: FlowThinkingEffort,
+): HiveRuntimeSession | undefined {
+  if (thinkingEffort === 'low' || plan.thinkingEffort === 'low' || !plan.hiveTopology?.enabled) {
     return undefined
   }
 

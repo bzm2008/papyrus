@@ -23,6 +23,7 @@ let modelsRefreshInFlight: { token: string; promise: Promise<ScallionModelMetada
 
 type AccountPayload = {
   user?: ScallionUser
+  auto?: AutoQuotaPayload
   quota?: number | (Partial<ScallionQuota> & {
     points_balance?: number
     points?: number
@@ -33,6 +34,15 @@ type AccountPayload = {
     upgrade_url?: string
     top_up_url?: string
     member_price_label?: string
+    manual_models?: unknown
+    auto_models?: unknown
+    auto_monthly_calls?: unknown
+    auto_daily_calls?: unknown
+    auto_monthly_used?: unknown
+    auto_daily_used?: unknown
+    auto_monthly_remaining?: unknown
+    auto_daily_remaining?: unknown
+    external_api?: boolean | string
   })
   points_balance?: number
   balance?: number
@@ -45,13 +55,56 @@ type AccountPayload = {
   upgrade_url?: string
   top_up_url?: string
   member_price_label?: string
+  manual_models?: unknown
+  manualModels?: unknown
+  auto_models?: unknown
+  autoModels?: unknown
+  auto_monthly_calls?: unknown
+  autoMonthlyCalls?: unknown
+  auto_daily_calls?: unknown
+  autoDailyCalls?: unknown
+  auto_monthly_used?: unknown
+  autoMonthlyUsed?: unknown
+  auto_daily_used?: unknown
+  autoDailyUsed?: unknown
+  auto_monthly_remaining?: unknown
+  autoMonthlyRemaining?: unknown
+  auto_daily_remaining?: unknown
+  autoDailyRemaining?: unknown
+  external_api?: boolean | string
+  externalApi?: boolean | string
   member_type?: string
   is_member?: boolean
   plan?: {
     key?: string
     name?: string
     expires_at?: string | null
+    manual_models?: unknown
+    manualModels?: unknown
+    auto_models?: unknown
+    autoModels?: unknown
+    auto_monthly_calls?: unknown
+    autoMonthlyCalls?: unknown
+    auto_daily_calls?: unknown
+    autoDailyCalls?: unknown
+    external_api?: boolean | string
+    externalApi?: boolean | string
   }
+}
+
+type AutoQuotaPayload = {
+  monthly_limit?: unknown
+  daily_limit?: unknown
+  monthly_used?: unknown
+  daily_used?: unknown
+  monthly_remaining?: unknown
+  daily_remaining?: unknown
+  monthlyLimit?: unknown
+  dailyLimit?: unknown
+  monthlyUsed?: unknown
+  dailyUsed?: unknown
+  monthlyRemaining?: unknown
+  dailyRemaining?: unknown
 }
 
 export async function refreshScallionRuntimeMetadata() {
@@ -140,6 +193,9 @@ async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<Scalli
     if (current.scallionSync.quota.status !== 'ready') {
       current.setScallionPlan(catalog.plan)
     }
+    if (catalog.plan.manualModels?.length === 0 && (catalog.plan.autoModels?.length ?? 0) > 0) {
+      current.setModelRoutingMode('auto')
+    }
   }
   const models = catalog.models
   const now = Date.now()
@@ -154,9 +210,13 @@ async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<Scalli
     contextWindowLabel: model.contextWindowLabel,
     contextWindowTokens: model.contextWindowTokens ?? provider.contextWindowTokens,
     planAvailable: model.planAvailable !== false,
+    manualAvailable: model.manualAvailable,
+    autoAvailable: model.autoAvailable,
+    autoOnly: model.autoOnly === true,
+    autoRequiredPlan: model.autoRequiredPlan,
     requiredPlan: model.requiredPlan,
     availabilityReason: model.availabilityReason,
-    available: model.available !== false && model.planAvailable !== false,
+    available: model.available !== false,
     updatedAt: now,
   }))
 
@@ -256,6 +316,9 @@ async function refreshScallionQuotaOnce(token: string, userAtRequest?: ScallionU
 
     const quota = normalizeQuota(payload, payload.user ?? userAtRequest)
     useAppStore.getState().setScallionQuota(quota)
+    if (quota.manualModels?.length === 0 && (quota.autoModels?.length ?? 0) > 0) {
+      useAppStore.getState().setModelRoutingMode('auto')
+    }
     useAppStore.getState().setScallionSyncState('quota', {
       status: 'ready',
       error: undefined,
@@ -390,6 +453,74 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
     payload.totalPoints,
     payload.total_points,
   )
+  const manualModels = normalizeStringList(
+    payload.manual_models ??
+      payload.manualModels ??
+      quotaObject?.manual_models ??
+      quotaObject?.manualModels ??
+      payload.plan?.manual_models ??
+      payload.plan?.manualModels,
+  )
+  const autoModels = normalizeStringList(
+    payload.auto_models ??
+      payload.autoModels ??
+      quotaObject?.auto_models ??
+      quotaObject?.autoModels ??
+      payload.plan?.auto_models ??
+      payload.plan?.autoModels,
+  )
+  const autoMonthlyCalls = firstOptionalNumber(
+    payload.auto_monthly_calls,
+    payload.autoMonthlyCalls,
+    quotaObject?.auto_monthly_calls,
+    quotaObject?.autoMonthlyCalls,
+    payload.auto?.monthly_limit,
+    payload.auto?.monthlyLimit,
+    payload.plan?.auto_monthly_calls,
+    payload.plan?.autoMonthlyCalls,
+  )
+  const autoDailyCalls = firstOptionalNumber(
+    payload.auto_daily_calls,
+    payload.autoDailyCalls,
+    quotaObject?.auto_daily_calls,
+    quotaObject?.autoDailyCalls,
+    payload.auto?.daily_limit,
+    payload.auto?.dailyLimit,
+    payload.plan?.auto_daily_calls,
+    payload.plan?.autoDailyCalls,
+  )
+  const autoMonthlyUsed = firstOptionalNumber(
+    payload.auto_monthly_used,
+    payload.autoMonthlyUsed,
+    quotaObject?.auto_monthly_used,
+    quotaObject?.autoMonthlyUsed,
+    payload.auto?.monthly_used,
+    payload.auto?.monthlyUsed,
+  )
+  const autoDailyUsed = firstOptionalNumber(
+    payload.auto_daily_used,
+    payload.autoDailyUsed,
+    quotaObject?.auto_daily_used,
+    quotaObject?.autoDailyUsed,
+    payload.auto?.daily_used,
+    payload.auto?.dailyUsed,
+  )
+  const autoMonthlyRemaining = firstOptionalNumber(
+    payload.auto_monthly_remaining,
+    payload.autoMonthlyRemaining,
+    quotaObject?.auto_monthly_remaining,
+    quotaObject?.autoMonthlyRemaining,
+    payload.auto?.monthly_remaining,
+    payload.auto?.monthlyRemaining,
+  )
+  const autoDailyRemaining = firstOptionalNumber(
+    payload.auto_daily_remaining,
+    payload.autoDailyRemaining,
+    quotaObject?.auto_daily_remaining,
+    quotaObject?.autoDailyRemaining,
+    payload.auto?.daily_remaining,
+    payload.auto?.dailyRemaining,
+  )
 
   return {
     remaining: pointsBalance,
@@ -397,6 +528,22 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
     balance,
     quota: quotaValue,
     unifiedPoints: payload.unified_points ?? quotaObject?.unifiedPoints,
+    manualModels,
+    autoModels,
+    autoMonthlyCalls,
+    autoDailyCalls,
+    autoMonthlyUsed,
+    autoDailyUsed,
+    autoMonthlyRemaining,
+    autoDailyRemaining,
+    externalApi: firstExternalApi(
+      payload.external_api,
+      payload.externalApi,
+      quotaObject?.external_api,
+      quotaObject?.externalApi,
+      payload.plan?.external_api,
+      payload.plan?.externalApi,
+    ),
     total,
     planKey: normalizePlanKey(payload.plan?.key) ?? fallbackPlanKey,
     planName: payload.plan?.name || scallionPlanName(fallbackPlanKey),
@@ -445,6 +592,33 @@ function firstNumber(...values: unknown[]) {
   }
 
   return 0
+}
+
+function firstOptionalNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) continue
+    const number = typeof value === 'number' ? value : Number(value)
+    if (Number.isFinite(number)) return Math.max(0, number)
+  }
+  return undefined
+}
+
+function normalizeStringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : []
+}
+
+function firstExternalApi(...values: unknown[]): boolean | string | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') {
+      return value
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim()
+    }
+  }
+  return undefined
 }
 
 function firstFiniteNumber(...values: unknown[]) {
