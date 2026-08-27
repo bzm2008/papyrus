@@ -16,8 +16,10 @@ test-results
 artifacts
 artifacts/browser-bridge/
 src-tauri/target
+src-tauri/target-release-signed
 *.zip
 .codex-tools
+.superpowers
 .worktrees
 *.local
 .env
