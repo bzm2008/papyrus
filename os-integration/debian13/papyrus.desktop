@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Papyrus
+GenericName=Writing and work assistant
+Comment=Local-first writing and work assistant
+Exec=/usr/bin/papyrus %U
+TryExec=/usr/bin/papyrus
+Icon=papyrus
+Terminal=false
+StartupNotify=true
+StartupWMClass=uno.scallion.papyrus
+Categories=Office;Utility;
+MimeType=text/plain;application/rtf;application/pdf;
+Keywords=writing;research;assistant;

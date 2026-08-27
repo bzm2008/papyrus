@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { canCallProvider } from '../services/llmClient'
 import { getEffectiveContextLimit, isProviderValidated } from '../services/modelCatalog'
-import { formatScallionPlanName, getScallionModelAccess } from '../services/scallionModelCatalog'
+import { formatScallionPlanName, getScallionModelAccessForMode, getScallionRoutingAccess } from '../services/scallionModelCatalog'
 import { refreshScallionRuntimeMetadata } from '../services/scallionAccountService'
 import { providerOrder, useAppStore, type ProviderId, type ScallionModelMetadata } from '../stores/useAppStore'
 
@@ -36,21 +36,20 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
     () =>
       scallionModels.find(
         (model) =>
-          model.available &&
-          model.planAvailable !== false &&
+          getScallionRoutingAccess(model, modelRoutingMode) &&
           model.modelName === providerConfigs.qwen36.modelName,
-      ) ?? scallionModels.find((model) => model.available && model.planAvailable !== false),
-    [providerConfigs.qwen36.modelName, scallionModels],
+      ) ?? scallionModels.find((model) => getScallionRoutingAccess(model, modelRoutingMode)),
+    [providerConfigs.qwen36.modelName, scallionModels, modelRoutingMode],
   )
   const activeLabel =
     modelRoutingMode === 'auto'
-      ? 'Auto 推荐'
+      ? 'Auto · 主站路由'
       : activeProvider.type === 'scallion_proxy'
         ? currentScallionModel?.label || (scallionToken ? '套餐模型加载中' : '登录后选择模型')
         : activeProvider.label
   const activeSubLabel =
     modelRoutingMode === 'auto'
-      ? '秘书长自动选择模型'
+      ? '主站按任务选择可用模型'
       : activeProvider.type === 'scallion_proxy'
         ? currentScallionModel
           ? `${currentScallionModel.modelName} · ${contextLabel(currentScallionModel.contextWindowTokens)}`
@@ -157,17 +156,24 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
   }
 
   const selectScallionModel = (model: ScallionModelMetadata) => {
+    // Auto is controlled by the Scallion router. Keep the complete catalogue
+    // visible for transparency, but do not let the client turn Auto into a
+    // hidden manual-model picker.
+    if (modelRoutingMode === 'auto') return
+    if (!getScallionRoutingAccess(model, modelRoutingMode)) return
     updateProviderModelMetadata('qwen36', {
       label: model.label,
       modelName: model.modelName,
       contextWindowTokens: model.contextWindowTokens,
     })
-    setModelRoutingMode('manual')
     setActiveProviderId('qwen36')
     close()
   }
 
   const selectAuto = () => {
+    // The gateway owns Auto selection. Keep the user's last manual model in
+    // local state without turning it into a hidden Auto pin.
+    setActiveProviderId('qwen36')
     setModelRoutingMode('auto')
     close()
   }
@@ -259,6 +265,14 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                       </div>
                       <div className="mt-0.5 truncate text-[11px] text-[#8f897a]">
                         {scallionToken ? formatPoints(scallionQuota, scallionSync.quota.status) : '登录后同步套餐和积分'}
+                        {scallionQuota?.autoMonthlyRemaining !== undefined
+                          ? ` · Auto 月余 ${scallionQuota.autoMonthlyRemaining}`
+                          : ''}
+                        {scallionQuota?.autoDailyUnlimited === true
+                          ? ' · 日限额不限'
+                          : scallionQuota?.autoDailyRemaining !== undefined
+                            ? ` · 日余 ${scallionQuota.autoDailyRemaining}`
+                            : ''}
                         {scallionQuota?.planExpiresAt ? ` · 到期 ${formatExpiry(scallionQuota.planExpiresAt)}` : ''}
                         {scallionQuota?.updatedAt ? ` · ${formatSyncTime(scallionQuota.updatedAt)}` : ''}
                         {scallionSync.quota.error ? ` · ${scallionSync.quota.error}` : ''}
@@ -289,11 +303,23 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                     <div className="space-y-1">
                       {scallionModels.map((model) => {
                         const active =
-                          modelRoutingMode === 'manual' &&
                           activeProviderId === 'qwen36' &&
-                          providerConfigs.qwen36.modelName === model.modelName
-                        const access = getScallionModelAccess(model)
-                        const disabled = !access.usable
+                          providerConfigs.qwen36.modelName === model.modelName &&
+                          getScallionRoutingAccess(model, modelRoutingMode)
+                        const access = getScallionModelAccessForMode(model, modelRoutingMode)
+                        const manualAccess = getScallionModelAccessForMode(model, 'manual')
+                        const autoAccess = getScallionModelAccessForMode(model, 'auto')
+                        const disabled = modelRoutingMode === 'auto' || !getScallionRoutingAccess(model, modelRoutingMode)
+                        const autoOnly = !manualAccess.usable && autoAccess.usable
+                        const accessSummary = access.usable
+                          ? modelRoutingMode === 'auto'
+                            ? autoOnly
+                              ? '仅 Auto 可用 · 由主站自动选择'
+                              : 'Auto 可用 · 由主站自动选择'
+                            : '手动可用'
+                          : modelRoutingMode === 'manual' && autoAccess.usable
+                            ? '仅 Auto 可用 · 当前套餐可由 Auto 路由'
+                            : `${access.label} · ${access.detail}`
 
                         return (
                           <button
@@ -312,12 +338,12 @@ export function ModelSelector({ compact = false }: { compact?: boolean }) {
                               <span className={`block truncate text-xs ${active ? 'text-[#d6d0c4]' : 'text-[#8f897a]'}`}>
                                 {model.modelName} · {contextLabel(model.contextWindowTokens)}
                                 {model.tier ? ` · ${model.tier}` : ''}
-                                {disabled ? ` · ${access.label} · ${access.detail}` : ` · ${access.label}`}
+                                {` · ${accessSummary}`}
                               </span>
                             </span>
                             {active ? (
                               <Check size={15} />
-                            ) : access.status !== 'available' ? (
+                            ) : access.status !== 'available' || (modelRoutingMode === 'auto' && !manualAccess.usable && autoAccess.usable) ? (
                               <TriangleAlert size={15} className="text-[#b7791f]" />
                             ) : (
                               <ShieldCheck size={15} />

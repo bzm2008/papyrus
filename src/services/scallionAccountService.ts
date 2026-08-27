@@ -1,19 +1,30 @@
-import { fetchScallionProxyModels } from './llmClient'
+import { fetchScallionProxyModelCatalog } from './llmClient'
 import { buildModelTierAssessments } from './modelGovernanceService'
 import {
   useAppStore,
   type ScallionModelMetadata,
   type ScallionQuota,
+  type ScallionSyncStatus,
   type ScallionUser,
 } from '../stores/useAppStore'
 
-const SCALLION_QUOTA_API = 'https://scallion.uno/api/papyrus/llm/quota'
-const DEFAULT_UPGRADE_URL = 'https://scallion.uno/pricing'
+const SCALLION_QUOTA_API = 'https://api.sca-hub.cn/api/papyrus/llm/quota'
+const DEFAULT_UPGRADE_URL = 'https://sca-hub.cn/pricing'
 const SCALLION_REQUEST_TIMEOUT_MS = 15_000
 
 let quotaRefreshInFlight: { token: string; promise: Promise<ScallionQuota | undefined> } | undefined
 let modelsRefreshInFlight: { token: string; promise: Promise<ScallionModelMetadata[]> } | undefined
 
+export type ScallionQuotaDisplay = {
+  value?: number
+  source: 'realtime' | 'cached' | 'unavailable'
+  status: ScallionSyncStatus
+}
+
+export type ScallionSendBlockReason = {
+  code: 'auto_quota_exhausted' | 'quota_exhausted'
+  message: string
+}
 type AccountPayload = {
   user?: ScallionUser
   quota?: number | (Partial<ScallionQuota> & {
@@ -26,6 +37,32 @@ type AccountPayload = {
     upgrade_url?: string
     top_up_url?: string
     member_price_label?: string
+    manual_models?: unknown
+    manualModels?: unknown
+    auto_models?: unknown
+    autoModels?: unknown
+    auto?: {
+      monthly_limit?: number
+      daily_limit?: number | null
+      daily_unlimited?: boolean
+      dailyUnlimited?: boolean
+      monthly_used?: number
+      daily_used?: number
+      monthly_remaining?: number
+      daily_remaining?: number | null
+    }
+    plan?: {
+      key?: string
+      name?: string
+      expires_at?: string | null
+      manual_models?: string[]
+      auto_models?: string[]
+      auto_monthly_calls?: number
+      auto_daily_calls?: number | null
+      auto_daily_unlimited?: boolean
+      autoDailyUnlimited?: boolean
+      external_api?: boolean | string
+    }
   })
   points_balance?: number
   balance?: number
@@ -40,10 +77,47 @@ type AccountPayload = {
   member_price_label?: string
   member_type?: string
   is_member?: boolean
+  manual_models?: unknown
+  manualModels?: unknown
+  auto_models?: unknown
+  autoModels?: unknown
+  auto_monthly_calls?: unknown
+  autoMonthlyCalls?: unknown
+  auto_daily_calls?: unknown
+  autoDailyCalls?: unknown
+  auto_daily_unlimited?: unknown
+  autoDailyUnlimited?: unknown
+  auto_monthly_used?: unknown
+  autoMonthlyUsed?: unknown
+  auto_daily_used?: unknown
+  autoDailyUsed?: unknown
+  auto_monthly_remaining?: unknown
+  autoMonthlyRemaining?: unknown
+  auto_daily_remaining?: unknown
+  autoDailyRemaining?: unknown
+  external_api?: boolean | string
+  externalApi?: boolean | string
   plan?: {
     key?: string
     name?: string
     expires_at?: string | null
+    manual_models?: string[]
+    auto_models?: string[]
+    auto_monthly_calls?: number
+    auto_daily_calls?: number | null
+    auto_daily_unlimited?: boolean
+    autoDailyUnlimited?: boolean
+    external_api?: boolean | string
+  }
+  auto?: {
+    monthly_limit?: number
+    daily_limit?: number | null
+    daily_unlimited?: boolean
+    dailyUnlimited?: boolean
+    monthly_used?: number
+    daily_used?: number
+    monthly_remaining?: number
+    daily_remaining?: number | null
   }
 }
 
@@ -51,17 +125,18 @@ export async function refreshScallionRuntimeMetadata() {
   await Promise.allSettled([refreshScallionModels(), refreshScallionQuota()])
 }
 
-export function refreshScallionModels() {
+export function refreshScallionModels(options: { force?: boolean } = {}) {
   const state = useAppStore.getState()
 
   if (!state.scallionToken) {
     state.setScallionModelMetadata([])
+    state.setScallionPlan(undefined)
     state.setScallionSyncState('models', { status: 'idle', error: undefined, attemptedAt: Date.now() })
     return Promise.resolve([])
   }
 
   const tokenAtRequest = state.scallionToken
-  if (modelsRefreshInFlight?.token === tokenAtRequest) {
+  if (!options.force && modelsRefreshInFlight?.token === tokenAtRequest) {
     return modelsRefreshInFlight.promise
   }
 
@@ -109,10 +184,10 @@ export function refreshScallionModels() {
 async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<ScallionModelMetadata[]> {
   const state = useAppStore.getState()
   const provider = state.providerConfigs.qwen36
-  let models: Awaited<ReturnType<typeof fetchScallionProxyModels>>
+  let catalog: Awaited<ReturnType<typeof fetchScallionProxyModelCatalog>>
 
   try {
-    models = await fetchScallionProxyModels(provider)
+    catalog = await fetchScallionProxyModelCatalog(provider)
   } catch (error) {
     if (isUnauthorizedError(error) && useAppStore.getState().scallionToken === tokenAtRequest) {
       useAppStore.getState().expireScallionSession()
@@ -123,6 +198,14 @@ async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<Scalli
     return []
   }
   const now = Date.now()
+  const current = useAppStore.getState()
+  // The catalog parser is intentionally pure. Commit its plan only after the
+  // JWT freshness check so an old account response cannot alter a new session.
+  current.setScallionPlan(catalog.plan)
+  if (catalog.plan?.key === 'free' && catalog.plan.manualModels?.length === 0 && (catalog.plan.autoModels?.length ?? 0) > 0) {
+    current.setModelRoutingMode('auto')
+  }
+  const models = catalog.models
   const metadata: ScallionModelMetadata[] = models.map((model, index) => ({
     id: model.id || model.modelName || `scallion-${index}`,
     label: model.label || model.id || model.modelName || `内置模型 ${index + 1}`,
@@ -134,9 +217,15 @@ async function refreshScallionModelsOnce(tokenAtRequest: string): Promise<Scalli
     contextWindowLabel: model.contextWindowLabel,
     contextWindowTokens: model.contextWindowTokens ?? provider.contextWindowTokens,
     planAvailable: model.planAvailable !== false,
+    manualAvailable: model.manualAvailable ?? model.planAvailable !== false,
+    autoAvailable: model.autoAvailable ?? model.planAvailable !== false,
+    autoOnly: model.autoOnly === true,
     requiredPlan: model.requiredPlan,
+    autoRequiredPlan: model.autoRequiredPlan,
     availabilityReason: model.availabilityReason,
-    available: model.available !== false && model.planAvailable !== false,
+    // `plan_available` describes manual selection for the new gateway. An
+    // Auto-only model must remain visible and routable through Auto.
+    available: model.available !== false,
     updatedAt: now,
   }))
 
@@ -168,6 +257,7 @@ export function refreshScallionQuota() {
 
   if (!token) {
     const fallback = quotaFromUser(state.scallionUser)
+    state.setScallionPlan(undefined)
     state.setScallionQuota(fallback)
     state.setScallionSyncState('quota', {
       status: fallback ? 'ready' : 'idle',
@@ -219,6 +309,12 @@ async function refreshScallionQuotaOnce(token: string, userAtRequest?: ScallionU
       throw error
     }
 
+    if (!hasQuotaBalance(payload, payload.user ?? userAtRequest)) {
+      const error = new Error('Scallion 额度响应缺少 points_balance，请稍后重试')
+      ;(error as Error & { code?: string }).code = 'protocol_error'
+      throw error
+    }
+
     if (useAppStore.getState().scallionToken !== token) {
       return undefined
     }
@@ -229,6 +325,10 @@ async function refreshScallionQuotaOnce(token: string, userAtRequest?: ScallionU
 
     const quota = normalizeQuota(payload, payload.user ?? userAtRequest)
     useAppStore.getState().setScallionQuota(quota)
+    // Free has no manual model entitlement in the gateway contract.
+    if (quota.planKey === 'free') {
+      useAppStore.getState().setModelRoutingMode('auto')
+    }
     useAppStore.getState().setScallionSyncState('quota', {
       status: 'ready',
       error: undefined,
@@ -290,6 +390,79 @@ export function quotaFromUser(user?: ScallionUser): ScallionQuota | undefined {
   }
 }
 
+/** Only a successful authenticated quota sync is labelled realtime. */
+export function getScallionQuotaDisplay(input: {
+  token?: string
+  quota?: ScallionQuota
+  user?: ScallionUser
+  syncStatus?: ScallionSyncStatus
+}): ScallionQuotaDisplay {
+  const status = input.syncStatus ?? 'idle'
+  const livePoints = finiteNumber(input.quota?.pointsBalance)
+  const fallbackPoints = [input.quota?.remaining, input.user?.points, input.user?.balance]
+    .map(finiteNumber)
+    .find((value): value is number => value !== undefined)
+
+  if (input.token?.trim() && status === 'ready' && livePoints !== undefined) {
+    return { value: livePoints, source: 'realtime', status }
+  }
+
+  const cachedValue = livePoints ?? fallbackPoints
+  return {
+    value: cachedValue,
+    source: cachedValue === undefined ? 'unavailable' : 'cached',
+    status,
+  }
+}
+
+/**
+ * A local block is allowed only for a fresh authenticated quota response.
+ * Stale data must never turn a temporary sync failure into a false denial.
+ */
+export function getScallionSendBlockReason(input: {
+  token?: string
+  quota?: ScallionQuota
+  syncStatus?: ScallionSyncStatus
+  routingMode?: 'auto' | 'manual'
+  isScallionProvider?: boolean
+}): ScallionSendBlockReason | undefined {
+  if (!input.isScallionProvider || !input.token?.trim() || input.syncStatus !== 'ready' || !input.quota) {
+    return undefined
+  }
+
+  const quota = input.quota
+  const forcedFreeAuto = quota.planKey === 'free' && quota.manualModels?.length === 0 && (quota.autoModels?.length ?? 0) > 0
+  if (input.routingMode === 'auto' || forcedFreeAuto) {
+    if (quota.autoMonthlyRemaining === 0) {
+      const used = quota.autoMonthlyUsed ?? quota.autoMonthlyCalls ?? 0
+      const limit = quota.autoMonthlyCalls ?? used
+      return {
+        code: 'auto_quota_exhausted',
+        message: `本月 Auto 额度已用完，已用 ${used} / ${limit} 次，请等待下月刷新或升级套餐。本条消息未发送。`,
+      }
+    }
+
+    // `daily_unlimited` is authoritative. Older or incomplete cache entries
+    // without an explicit positive daily limit are intentionally not blocked.
+    if (quota.autoDailyUnlimited !== true && quota.autoDailyCalls !== null && quota.autoDailyCalls !== undefined && quota.autoDailyRemaining === 0) {
+      return {
+        code: 'auto_quota_exhausted',
+        message: '今日 Auto 额度已用完，明日刷新；本条消息未发送。',
+      }
+    }
+    return undefined
+  }
+
+  const points = quota.pointsBalance ?? quota.remaining
+  if (typeof points === 'number' && Number.isFinite(points) && points <= 0) {
+    return {
+      code: 'quota_exhausted',
+      message: '积分余额不足，本条消息未发送。请充值或进入主站升级套餐。',
+    }
+  }
+  return undefined
+}
+
 export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): ScallionQuota {
   const accountUser = user ?? payload.user
   const quotaObject = payload.quota && typeof payload.quota === 'object' ? payload.quota : undefined
@@ -326,6 +499,48 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
     payload.total_points,
   )
 
+  const auto = payload.auto ?? quotaObject?.auto
+  const plan = payload.plan ?? quotaObject?.plan
+  const quotaAuto = quotaObject?.auto
+  const quotaPayload = quotaObject as (Partial<ScallionQuota> & {
+    manual_models?: unknown
+    auto_models?: unknown
+    manualModels?: unknown
+    autoModels?: unknown
+  }) | undefined
+  const manualModels = normalizeStringList(
+    payload.manual_models ?? payload.manualModels ?? quotaPayload?.manual_models ?? quotaPayload?.manualModels ?? plan?.manual_models,
+  )
+  const autoModels = normalizeStringList(
+    payload.auto_models ?? payload.autoModels ?? quotaPayload?.auto_models ?? quotaPayload?.autoModels ?? plan?.auto_models,
+  )
+  const normalizedPlanKey = normalizePlanKey(plan?.key) ?? fallbackPlanKey
+  const autoDailyUnlimited = firstBoolean(
+    payload.auto_daily_unlimited,
+    payload.autoDailyUnlimited,
+    auto?.daily_unlimited,
+    auto?.dailyUnlimited,
+    quotaAuto?.daily_unlimited,
+    quotaAuto?.dailyUnlimited,
+    plan?.auto_daily_unlimited,
+    plan?.autoDailyUnlimited,
+  ) ?? (
+    normalizedPlanKey === 'free' && [
+      payload.auto_daily_calls,
+      payload.autoDailyCalls,
+      auto?.daily_limit,
+      plan?.auto_daily_calls,
+    ].some((value) => value === null)
+      ? true
+      : undefined
+  )
+  const autoDailyCalls = autoDailyUnlimited === true
+    ? null
+    : firstOptionalLimit(payload.auto_daily_calls, payload.autoDailyCalls, plan?.auto_daily_calls, auto?.daily_limit, quotaAuto?.daily_limit)
+  const autoDailyRemaining = autoDailyUnlimited === true
+    ? null
+    : firstOptionalLimit(payload.auto_daily_remaining, payload.autoDailyRemaining, auto?.daily_remaining, quotaAuto?.daily_remaining)
+
   return {
     remaining: pointsBalance,
     pointsBalance,
@@ -333,17 +548,72 @@ export function normalizeQuota(payload: AccountPayload, user?: ScallionUser): Sc
     quota: quotaValue,
     unifiedPoints: payload.unified_points ?? quotaObject?.unifiedPoints,
     total,
-    planKey: normalizePlanKey(payload.plan?.key) ?? fallbackPlanKey,
-    planName: payload.plan?.name || scallionPlanName(fallbackPlanKey),
-    planExpiresAt: payload.plan?.expires_at ?? accountUser?.member_expires_at,
+    planKey: normalizedPlanKey,
+    planName: plan?.name || scallionPlanName(fallbackPlanKey),
+    planExpiresAt: plan?.expires_at ?? accountUser?.member_expires_at,
     unit: quotaObject?.unit || '积分',
     isMember: quotaObject?.isMember ?? payload.is_member ?? accountUser?.is_member === true,
+    manualModels,
+    autoModels,
+    autoMonthlyCalls: firstOptionalNumber(payload.auto_monthly_calls, payload.autoMonthlyCalls, plan?.auto_monthly_calls, auto?.monthly_limit, quotaAuto?.monthly_limit),
+    autoDailyCalls,
+    autoDailyUnlimited,
+    autoMonthlyUsed: firstOptionalNumber(payload.auto_monthly_used, payload.autoMonthlyUsed, auto?.monthly_used, quotaAuto?.monthly_used),
+    autoDailyUsed: firstOptionalNumber(payload.auto_daily_used, payload.autoDailyUsed, auto?.daily_used, quotaAuto?.daily_used),
+    autoMonthlyRemaining: firstOptionalNumber(payload.auto_monthly_remaining, payload.autoMonthlyRemaining, auto?.monthly_remaining, quotaAuto?.monthly_remaining),
+    autoDailyRemaining,
+    externalApi: firstExternalApi(payload.external_api, payload.externalApi, plan?.external_api),
     memberPriceLabel:
       quotaObject?.memberPriceLabel || quotaObject?.member_price_label || payload.member_price_label || '9.9 元/月',
     upgradeUrl: quotaObject?.upgradeUrl || quotaObject?.upgrade_url || payload.upgrade_url || DEFAULT_UPGRADE_URL,
     topUpUrl: quotaObject?.topUpUrl || quotaObject?.top_up_url || payload.top_up_url || DEFAULT_UPGRADE_URL,
     updatedAt: Date.now(),
   }
+}
+
+function normalizeStringList(value: unknown) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
+    : []
+}
+
+function firstExternalApi(...values: unknown[]): boolean | string | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+function firstOptionalNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue
+    const number = typeof value === 'number' ? value : Number(value)
+    if (Number.isFinite(number)) return Math.max(0, number)
+  }
+  return undefined
+}
+
+function firstOptionalLimit(...values: unknown[]): number | null | undefined {
+  for (const value of values) {
+    if (value === null) return null
+    if (value === undefined || value === '') continue
+    const number = typeof value === 'number' ? value : Number(value)
+    if (Number.isFinite(number)) return Math.max(0, number)
+  }
+  return undefined
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+  for (const value of values) {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (normalized === 'true') return true
+      if (normalized === 'false') return false
+    }
+  }
+  return undefined
 }
 
 function scallionPlanName(memberType: string) {
@@ -380,6 +650,30 @@ function firstNumber(...values: unknown[]) {
   }
 
   return 0
+}
+
+function finiteNumber(value: unknown) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) return undefined
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? Math.max(0, number) : undefined
+}
+
+function hasQuotaBalance(payload: AccountPayload, user?: ScallionUser) {
+  const quotaObject = payload.quota && typeof payload.quota === 'object' ? payload.quota : undefined
+  return [
+    payload.points_balance,
+    quotaObject?.points_balance,
+    quotaObject?.pointsBalance,
+    payload.balance,
+    payload.points,
+    payload.remainingPoints,
+    payload.remaining_points,
+    typeof payload.quota === 'number' ? payload.quota : undefined,
+    quotaObject?.quota,
+    quotaObject?.remaining,
+    user?.points,
+    user?.balance,
+  ].some((value) => finiteNumber(value) !== undefined)
 }
 
 function isUnauthorizedError(error: unknown) {

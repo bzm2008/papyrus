@@ -3,10 +3,12 @@ pub mod browser_bridge;
 mod desktop;
 mod doctor;
 mod file_ops;
+mod native_actions;
 mod path_policy;
 pub(crate) mod platform;
 mod preview;
 mod registry;
+mod terminal;
 mod types;
 mod workspace;
 
@@ -15,11 +17,13 @@ pub use browser_bridge::*;
 pub use desktop::*;
 pub use doctor::*;
 pub use file_ops::*;
+pub(crate) use native_actions::*;
 pub use path_policy::*;
 #[allow(unused_imports)]
 pub(crate) use platform::*;
 pub use preview::*;
 pub use registry::*;
+pub use terminal::*;
 pub use types::*;
 pub use workspace::*;
 
@@ -34,6 +38,11 @@ use std::{
 };
 use tauri::Manager;
 use uuid::Uuid;
+
+/// Pending previews and grants are process-local capabilities. These hard limits bound memory
+/// during long-running sessions without evicting an approval the user can still legitimately use.
+pub(crate) const MAX_STORED_PREVIEWS: usize = 256;
+pub(crate) const MAX_STORED_APPROVALS: usize = 256;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +81,33 @@ pub struct WorkAssistantState {
     pub(crate) cancelled_execution_audits: Mutex<HashSet<String>>,
     pub(crate) audit_path: PathBuf,
     pub(crate) audit_guard: Mutex<()>,
+}
+
+pub(crate) fn reserve_preview_slot(
+    previews: &mut HashMap<String, StoredPreview>,
+    now: u64,
+) -> Result<(), WorkAssistantError> {
+    previews.retain(|_, preview| preview.expires > now);
+    if previews.len() >= MAX_STORED_PREVIEWS {
+        return Err(WorkAssistantError::blocked(
+            "too many active action previews; complete, deny, or wait for an existing preview",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn reserve_approval_slot(
+    approvals: &mut HashMap<String, StoredApproval>,
+    now: u64,
+) -> Result<(), WorkAssistantError> {
+    // Never evict a still-valid approval: the user may already have reviewed its preview.
+    approvals.retain(|_, approval| approval.expires > now);
+    if approvals.len() >= MAX_STORED_APPROVALS {
+        return Err(WorkAssistantError::blocked(
+            "too many active approvals; complete, deny, or wait for an existing approval",
+        ));
+    }
+    Ok(())
 }
 
 pub fn init_state(app: &tauri::AppHandle) -> Result<WorkAssistantState, WorkAssistantError> {

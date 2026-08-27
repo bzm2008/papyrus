@@ -22,9 +22,21 @@ const runtimeFiles = [
   'service_worker.js',
   'content_script.js',
 ]
-for (const file of runtimeFiles) {
-  await fs.copyFile(path.join(source, file), path.join(output, file))
+async function copyRuntimeFiles(targetDir, manifestFile = 'manifest.json') {
+  await fs.mkdir(targetDir, { recursive: true })
+  for (const file of runtimeFiles) {
+    const sourceFile = file === 'manifest.json' ? manifestFile : file
+    await fs.copyFile(path.join(source, sourceFile), path.join(targetDir, file))
+  }
 }
-const manifest = JSON.parse(await fs.readFile(path.join(output, 'manifest.json'), 'utf8'))
-if (manifest.manifest_version !== 3 || !manifest.background?.service_worker) throw new Error('invalid Browser Bridge MV3 manifest')
-console.log(`PASS built Browser Bridge -> ${path.relative(root, output)}`)
+
+await copyRuntimeFiles(output)
+await copyRuntimeFiles(path.join(output, 'firefox-esr'), 'manifest.firefox-esr.json')
+
+const chromiumManifest = JSON.parse(await fs.readFile(path.join(output, 'manifest.json'), 'utf8'))
+if (chromiumManifest.manifest_version !== 3 || !chromiumManifest.background?.service_worker) throw new Error('invalid Browser Bridge MV3 manifest')
+const firefoxManifest = JSON.parse(await fs.readFile(path.join(output, 'firefox-esr', 'manifest.json'), 'utf8'))
+if (firefoxManifest.manifest_version !== 3 || firefoxManifest.browser_specific_settings?.gecko?.id !== 'browser-bridge@papyrus.scallion') {
+  throw new Error('invalid Firefox ESR Browser Bridge manifest')
+}
+console.log(`PASS built Browser Bridge -> ${path.relative(root, output)} and ${path.relative(root, path.join(output, 'firefox-esr'))}`)

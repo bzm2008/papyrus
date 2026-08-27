@@ -50,6 +50,17 @@ export function selectModelForRole(
     }
   }
 
+  if (store.providerConfigs.qwen36.type === 'scallion_proxy' && canCallProvider(store.providerConfigs.qwen36)) {
+    return {
+      provider: store.providerConfigs.qwen36,
+      providerId: 'qwen36',
+      mode: 'auto',
+      role,
+      reason: 'Auto 由主站按任务、套餐和实时可用性选择模型',
+      fallbackUsed: false,
+    }
+  }
+
   const usable = providerOrder
     .map((providerId) => store.providerConfigs[providerId])
     .filter((provider): provider is LlmProviderConfig => Boolean(provider))
@@ -81,7 +92,7 @@ export function describeModelRouting(decision: ModelRoutingDecision) {
     return `手动模型：${decision.provider.label}`
   }
 
-  return `Auto ${roleLabel(decision.role)}：${decision.provider.label}${decision.fallbackUsed ? '（兜底）' : ''}`
+  return `Auto ${roleLabel(decision.role)}：主站路由 · ${decision.provider.label}${decision.fallbackUsed ? '（兜底）' : ''}`
 }
 
 function scoreProvider(

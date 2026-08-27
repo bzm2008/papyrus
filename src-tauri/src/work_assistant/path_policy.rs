@@ -445,6 +445,7 @@ pub fn validate_authorized_root(
 }
 
 fn canonical_root(root: &AuthorizedRoot) -> Result<PathBuf, WorkAssistantError> {
+    reject_authorized_root_links(&root.path)?;
     let path = fs::canonicalize(&root.path).map_err(|error| {
         WorkAssistantError::blocked(format!("could not resolve authorized root: {error}"))
     })?;
@@ -459,6 +460,25 @@ fn canonical_root(root: &AuthorizedRoot) -> Result<PathBuf, WorkAssistantError> 
         ));
     }
     Ok(path)
+}
+
+fn reject_authorized_root_links(path: &Path) -> Result<(), WorkAssistantError> {
+    let mut ancestors = path.ancestors().collect::<Vec<_>>();
+    ancestors.reverse();
+    for ancestor in ancestors {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(ancestor).map_err(|error| {
+            WorkAssistantError::blocked(format!("could not inspect authorized root: {error}"))
+        })?;
+        if is_link_or_reparse_point(&metadata) {
+            return Err(WorkAssistantError::blocked(
+                "authorized root may not contain links or reparse points",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, WorkAssistantError> {
@@ -768,6 +788,106 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code, "path_outside_workspace");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_authorized_root_replaced_by_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_dir();
+        let root_path = directory.join("workspace");
+        let original_root = directory.join("workspace-original");
+        let outside_path = directory.join("outside");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::create_dir_all(&outside_path).unwrap();
+        fs::write(root_path.join("inside.txt"), "inside").unwrap();
+        fs::write(outside_path.join("secret.txt"), "secret").unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&root_path).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        fs::rename(&root_path, &original_root).unwrap();
+        symlink(&outside_path, &root_path).unwrap();
+
+        let error = PathPolicy::new(&[root])
+            .resolve_existing("root", Path::new("secret.txt"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_an_authorized_root_with_a_parent_replaced_by_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_dir();
+        let parent_path = directory.join("container");
+        let root_path = parent_path.join("workspace");
+        let original_parent = directory.join("container-original");
+        let outside_path = directory.join("outside");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::create_dir_all(outside_path.join("workspace")).unwrap();
+        fs::write(root_path.join("inside.txt"), "inside").unwrap();
+        fs::write(outside_path.join("workspace/secret.txt"), "secret").unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&root_path).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        fs::rename(&parent_path, &original_parent).unwrap();
+        symlink(&outside_path, &parent_path).unwrap();
+
+        let error = PathPolicy::new(&[root])
+            .resolve_existing("root", Path::new("secret.txt"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "blocked");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_an_authorized_root_replaced_by_a_windows_symlink() {
+        use std::os::windows::fs::symlink_dir;
+
+        let directory = test_dir();
+        let root_path = directory.join("workspace");
+        let original_root = directory.join("workspace-original");
+        let outside_path = directory.join("outside");
+        fs::create_dir_all(&root_path).unwrap();
+        fs::create_dir_all(&outside_path).unwrap();
+        fs::write(root_path.join("inside.txt"), "inside").unwrap();
+        fs::write(outside_path.join("secret.txt"), "secret").unwrap();
+        let root = AuthorizedRoot {
+            id: "root".into(),
+            label: "workspace".into(),
+            path: fs::canonicalize(&root_path).unwrap(),
+            kind: AuthorizedRootKind::Workspace,
+            created_at: 1,
+        };
+
+        fs::rename(&root_path, &original_root).unwrap();
+        if symlink_dir(&outside_path, &root_path).is_err() {
+            fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+
+        let error = PathPolicy::new(&[root])
+            .resolve_existing("root", Path::new("secret.txt"))
+            .unwrap_err();
+
+        assert_eq!(error.code, "blocked");
         fs::remove_dir_all(directory).unwrap();
     }
 

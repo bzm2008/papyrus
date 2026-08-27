@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { normalizeQuota, quotaFromUser, refreshScallionModels, refreshScallionQuota } from './scallionAccountService'
+import {
+  getScallionQuotaDisplay,
+  getScallionSendBlockReason,
+  normalizeQuota,
+  quotaFromUser,
+  refreshScallionModels,
+  refreshScallionQuota,
+} from './scallionAccountService'
 import { useAppStore } from '../stores/useAppStore'
 
 afterEach(() => {
@@ -74,6 +81,113 @@ describe('normalizeQuota', () => {
     )
   })
 
+  it('preserves plan manual/Auto catalog and live Auto quota fields', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 504,
+        plan: {
+          key: 'free',
+          name: 'Free',
+          manual_models: [],
+          auto_models: ['agnes-2.0-flash'],
+          auto_monthly_calls: 300,
+          auto_daily_calls: 10,
+          external_api: false,
+        },
+        auto: {
+          monthly_used: 4,
+          daily_used: 2,
+          monthly_remaining: 296,
+          daily_remaining: 8,
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoDailyCalls: 10,
+        autoMonthlyUsed: 4,
+        autoDailyUsed: 2,
+        autoMonthlyRemaining: 296,
+        autoDailyRemaining: 8,
+        externalApi: false,
+      }),
+    )
+  })
+
+  it('accepts Auto quota nested under the quota object for gateway variants', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 12,
+        quota: {
+          points_balance: 12,
+          auto: { monthly_remaining: 4, daily_remaining: 1 },
+          plan: { key: 'free', name: 'Free' },
+        } as never,
+      }),
+    ).toEqual(expect.objectContaining({ autoMonthlyRemaining: 4, autoDailyRemaining: 1 }))
+  })
+
+  it('accepts top-level Auto entitlement fields and external API labels', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 10,
+        manual_models: [],
+        auto_models: ['agnes-2.0-flash'],
+        auto_monthly_calls: 300,
+        auto_daily_calls: 10,
+        auto_monthly_remaining: 299,
+        auto_daily_remaining: 9,
+        external_api: 'deeper',
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoDailyCalls: 10,
+        autoMonthlyRemaining: 299,
+        autoDailyRemaining: 9,
+        externalApi: 'deeper',
+      }),
+    )
+  })
+
+  it('preserves Free Auto daily-unlimited quota fields from the new gateway contract', () => {
+    expect(
+      normalizeQuota({
+        points_balance: 504,
+        plan: {
+          key: 'free',
+          name: 'Free',
+          manual_models: [],
+          auto_models: ['agnes-2.0-flash'],
+          auto_monthly_calls: 300,
+          auto_daily_calls: null,
+        },
+        auto: {
+          monthly_limit: 300,
+          daily_limit: null,
+          daily_unlimited: true,
+          monthly_used: 12,
+          daily_used: 99,
+          monthly_remaining: 288,
+          daily_remaining: null,
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        planKey: 'free',
+        autoMonthlyCalls: 300,
+        autoDailyCalls: null,
+        autoDailyUsed: 99,
+        autoDailyRemaining: null,
+        autoDailyUnlimited: true,
+      }),
+    )
+  })
+
   it('marks the session expired when the quota endpoint returns 401', async () => {
     useAppStore.setState({ scallionToken: 'expired-jwt' })
     vi.stubGlobal(
@@ -140,7 +254,7 @@ describe('normalizeQuota', () => {
     await refreshScallionQuota()
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://scallion.uno/api/papyrus/llm/quota',
+      'https://api.sca-hub.cn/api/papyrus/llm/quota',
       expect.objectContaining({
         headers: { Authorization: 'Bearer jwt-token' },
         signal: expect.any(AbortSignal),
@@ -159,8 +273,8 @@ describe('normalizeQuota', () => {
         unit: '积分',
         isMember: false,
         memberPriceLabel: '9.9 元/月',
-        upgradeUrl: 'https://scallion.uno/pricing',
-        topUpUrl: 'https://scallion.uno/pricing',
+        upgradeUrl: 'https://sca-hub.cn/pricing',
+        topUpUrl: 'https://sca-hub.cn/pricing',
         updatedAt: 100,
       },
     })
@@ -215,7 +329,156 @@ describe('normalizeQuota', () => {
   })
 })
 
+describe('getScallionQuotaDisplay', () => {
+  it('labels only a ready authenticated points balance as realtime', () => {
+    expect(getScallionQuotaDisplay({
+      token: 'jwt',
+      quota: {
+        remaining: 10,
+        pointsBalance: 10,
+        unit: '积分',
+        isMember: false,
+        memberPriceLabel: '',
+        upgradeUrl: '',
+        topUpUrl: '',
+        updatedAt: 1,
+      },
+      syncStatus: 'ready',
+    })).toEqual({ value: 10, source: 'realtime', status: 'ready' })
+  })
+
+  it('labels a stale account value as cached', () => {
+    expect(getScallionQuotaDisplay({
+      token: 'jwt',
+      quota: {
+        remaining: 9,
+        pointsBalance: 9,
+        unit: '积分',
+        isMember: false,
+        memberPriceLabel: '',
+        upgradeUrl: '',
+        topUpUrl: '',
+        updatedAt: 1,
+      },
+      syncStatus: 'stale',
+    })).toEqual({ value: 9, source: 'cached', status: 'stale' })
+  })
+})
+
+describe('getScallionSendBlockReason', () => {
+  const baseQuota = {
+    remaining: 20,
+    pointsBalance: 20,
+    planKey: 'free',
+    unit: '积分',
+    isMember: false,
+    memberPriceLabel: '',
+    upgradeUrl: '',
+    topUpUrl: '',
+    updatedAt: 1,
+  }
+
+  it('blocks only a fresh Auto monthly exhaustion and explains that nothing was sent', () => {
+    expect(getScallionSendBlockReason({
+      token: 'jwt',
+      syncStatus: 'ready',
+      routingMode: 'auto',
+      isScallionProvider: true,
+      quota: { ...baseQuota, autoMonthlyCalls: 300, autoMonthlyUsed: 300, autoMonthlyRemaining: 0, autoDailyUnlimited: true, autoDailyRemaining: null },
+    })).toEqual(expect.objectContaining({
+      code: 'auto_quota_exhausted',
+      message: expect.stringContaining('本条消息未发送'),
+    }))
+  })
+
+  it('does not treat Free daily usage as a send block when daily_unlimited is true', () => {
+    expect(getScallionSendBlockReason({
+      token: 'jwt',
+      syncStatus: 'ready',
+      routingMode: 'auto',
+      isScallionProvider: true,
+      quota: { ...baseQuota, autoMonthlyCalls: 300, autoMonthlyRemaining: 1, autoDailyCalls: null, autoDailyRemaining: null, autoDailyUnlimited: true },
+    })).toBeUndefined()
+  })
+
+  it('treats a fresh Free entitlement as Auto even if an old UI cache still says manual', () => {
+    expect(getScallionSendBlockReason({
+      token: 'jwt',
+      syncStatus: 'ready',
+      routingMode: 'manual',
+      isScallionProvider: true,
+      quota: {
+        ...baseQuota,
+        remaining: 0,
+        pointsBalance: 0,
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoMonthlyRemaining: 0,
+        autoDailyUnlimited: true,
+      },
+    })).toEqual(expect.objectContaining({
+      code: 'auto_quota_exhausted',
+      message: expect.stringContaining('本月 Auto 额度'),
+    }))
+  })
+
+  it('keeps paid daily Auto limits and ignores a stale cached zero', () => {
+    const quota = { ...baseQuota, planKey: 'briefly', autoMonthlyCalls: 1000, autoMonthlyRemaining: 90, autoDailyCalls: 30, autoDailyRemaining: 0 }
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'ready', routingMode: 'auto', isScallionProvider: true, quota }))
+      .toEqual(expect.objectContaining({ message: expect.stringContaining('今日 Auto 额度') }))
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'stale', routingMode: 'auto', isScallionProvider: true, quota })).toBeUndefined()
+  })
+
+  it('blocks a fresh manual request with no points but not Auto', () => {
+    const quota = { ...baseQuota, remaining: 0, pointsBalance: 0 }
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'ready', routingMode: 'manual', isScallionProvider: true, quota }))
+      .toEqual(expect.objectContaining({ code: 'quota_exhausted', message: expect.stringContaining('积分余额不足') }))
+    expect(getScallionSendBlockReason({ token: 'jwt', syncStatus: 'ready', routingMode: 'auto', isScallionProvider: true, quota })).toBeUndefined()
+  })
+})
+
 describe('refreshScallionModels', () => {
+  it('does not commit a stale catalog after the Scallion account changes', async () => {
+    let resolveResponse!: (response: Response) => void
+    const responsePromise = new Promise<Response>((resolve) => {
+      resolveResponse = resolve
+    })
+    useAppStore.setState({
+      scallionToken: 'old-jwt',
+      scallionPlan: {
+        key: 'briefly',
+        name: 'Briefly',
+        availableModels: ['old-model'],
+        updatedAt: Date.now(),
+      },
+    })
+    vi.stubGlobal('fetch', vi.fn(() => responsePromise))
+
+    const refresh = refreshScallionModels()
+    useAppStore.setState({
+      scallionToken: 'new-jwt',
+      scallionPlan: {
+        key: 'deeper',
+        name: 'Deeper',
+        availableModels: ['new-model'],
+        updatedAt: Date.now(),
+      },
+    })
+    resolveResponse({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [{ id: 'old-model', name: '旧账号模型' }],
+        plan: { key: 'briefly', name: 'Briefly' },
+      }),
+    } as Response)
+
+    await expect(refresh).resolves.toEqual([])
+    expect(useAppStore.getState().scallionPlan?.key).toBe('deeper')
+    expect(useAppStore.getState().scallionModels).toEqual([])
+  })
+
   it('keeps the full catalog and marks plan-restricted models as non-callable', async () => {
     useAppStore.setState({ scallionToken: 'jwt-token' })
     vi.stubGlobal(

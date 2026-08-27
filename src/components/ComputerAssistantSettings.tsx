@@ -55,9 +55,9 @@ export function ComputerAssistantSettings() {
   }
 
   const addApplication = async () => {
-    const selected = await open({ directory: false, multiple: false })
-    if (typeof selected !== 'string' || !applicationLabel.trim()) return
-    await registerApplicationFromPicker(applicationLabel.trim(), selected)
+    if (!applicationLabel.trim()) return
+    const application = await registerApplicationFromPicker(applicationLabel.trim())
+    if (!application) return
     setApplicationLabel('')
     await refresh()
   }

@@ -14,9 +14,11 @@ describe('WORK_ASSISTANT_TOOLS', () => {
       'file_open',
       'downloads_scan',
       'desktop_status',
+      'desktop_list_apps',
       'desktop_open_url',
       'desktop_open_app',
       'desktop_reveal_file',
+      'terminal_run',
     ])
   })
 
@@ -142,5 +144,24 @@ describe('WORK_ASSISTANT_TOOLS', () => {
         properties: { rootId: { type: 'string', minLength: 1 } },
       },
     })
+  })
+
+  it('declares a bounded, non-shell terminal schema', () => {
+    const terminal = WORK_ASSISTANT_TOOLS.find((tool) => tool.name === 'terminal_run')
+    expect(terminal).toMatchObject({
+      toolset: 'desktop',
+      defaultRisk: 'high',
+      previewRequired: true,
+      inputSchema: {
+        required: ['operation', 'rootId'],
+        properties: {
+          operation: { enum: expect.arrayContaining(['git_status', 'git_diff_stat', 'git_branch', 'git_log', 'git_version', 'system_info', 'whoami']) },
+        },
+      },
+    })
+  })
+
+  it('does not expose browser downloads to the model-facing registry', () => {
+    expect(WORK_ASSISTANT_TOOLS.some((tool) => tool.name === 'browser_download')).toBe(false)
   })
 })

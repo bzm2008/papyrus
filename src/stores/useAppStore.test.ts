@@ -62,8 +62,8 @@ describe('Scallion model metadata', () => {
         unit: '积分',
         isMember: false,
         memberPriceLabel: '9.9 元/月',
-        upgradeUrl: 'https://scallion.uno/pricing',
-        topUpUrl: 'https://scallion.uno/pricing',
+        upgradeUrl: 'https://sca-hub.cn/pricing',
+        topUpUrl: 'https://sca-hub.cn/pricing',
         updatedAt: Date.now(),
       },
     })

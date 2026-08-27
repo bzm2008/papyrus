@@ -1,0 +1,229 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const runtime = vi.hoisted(() => ({
+  loadSecretaryTaskCenterSnapshot: vi.fn(),
+  createSecretaryTaskCenterMemory: vi.fn(),
+  deleteSecretaryTaskCenterMemory: vi.fn(),
+  queueSecretaryLedgerTask: vi.fn(),
+  prepareSecretaryLedgerRecoveryTask: vi.fn(),
+  rollbackSecretaryTaskCenterMemory: vi.fn(),
+  updateSecretaryTaskCenterMemory: vi.fn(),
+  updateSecretaryTaskCenterStatus: vi.fn(),
+}))
+const ledger = vi.hoisted(() => ({ searchSecretaryLedger: vi.fn() }))
+
+vi.mock('../services/secretaryLedgerRuntime', () => runtime)
+vi.mock('../services/secretaryLedgerClient', () => ledger)
+
+import { SecretaryTaskCenter } from './SecretaryTaskCenter'
+import { useAppStore } from '../stores/useAppStore'
+
+const task = {
+  id: 'task-1', projectId: 'story-a', title: '整理访谈摘要', request: '整理访谈摘要并起草邮件。', status: 'paused' as const,
+  priority: 3, scheduleAt: null, nextStep: '从访谈资料中提取三项结论。', publicPlan: null, summary: '已整理一半。', createdAt: 1, updatedAt: 2,
+}
+
+beforeEach(() => {
+  vi.resetAllMocks()
+  runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+    state: { available: true, migrated: true },
+    project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+    projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
+    memories: [{ id: 'memory-1', scope: 'project', projectId: 'story-a', kind: 'fact', content: '对外表述避免夸张承诺。', source: 'user_confirmed', confidence: 1, status: 'verified', revision: 2, createdAt: 1, updatedAt: 2 }],
+    tasks: [task],
+    recovery: [{
+      task,
+      checkpoint: { summary: '已整理一半。', nextStep: '从访谈资料中提取三项结论。', createdAt: 2 },
+      health: { state: 'ready', code: 'ready', message: '检查点仍有效。' },
+    }],
+  })
+})
+
+const originalProjectNavigation = {
+  activeChatId: useAppStore.getState().activeChatId,
+  activeStoryProjectId: useAppStore.getState().activeStoryProjectId,
+  chatSessions: useAppStore.getState().chatSessions,
+  newChatSession: useAppStore.getState().newChatSession,
+  switchChatSession: useAppStore.getState().switchChatSession,
+  setActiveStoryProject: useAppStore.getState().setActiveStoryProject,
+}
+
+afterEach(() => {
+  useAppStore.setState(originalProjectNavigation)
+})
+
+describe('SecretaryTaskCenter', () => {
+  it('keeps project context visible and resumes the selected persisted task', async () => {
+    const onStartTask = vi.fn()
+    render(<SecretaryTaskCenter onStartTask={onStartTask} onOpenMaterials={vi.fn()} />)
+
+    expect(await screen.findByText('招商材料')).toBeInTheDocument()
+    expect(screen.getByText('对外表述避免夸张承诺。')).toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('开始或继续任务'))
+    expect(onStartTask).toHaveBeenCalledWith(task, expect.objectContaining({ checkpoint: expect.any(Object) }))
+  })
+
+  it('requires an explicit recovery review before an expired approval can continue', async () => {
+    const interruptedTask = { ...task, status: 'awaiting_approval' as const }
+    const reconciledTask = { ...interruptedTask, status: 'paused' as const }
+    const onStartTask = vi.fn()
+    runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+      state: { available: true, migrated: true },
+      project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+      projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
+      memories: [],
+      tasks: [interruptedTask],
+      recovery: [{
+        task: interruptedTask,
+        checkpoint: { summary: '等待确认。', nextStep: '等待确认。', createdAt: 2, phase: 'awaiting_approval', projectId: 'story-a' },
+        health: { state: 'requires_review', code: 'approval_expired', message: '上次确认已失效。' },
+      }],
+    })
+    runtime.prepareSecretaryLedgerRecoveryTask.mockResolvedValue({ ok: true, value: reconciledTask })
+
+    render(<SecretaryTaskCenter onStartTask={onStartTask} onOpenMaterials={vi.fn()} />)
+
+    expect(await screen.findByText('需要复核')).toBeInTheDocument()
+    expect(screen.queryByTitle('开始或继续任务')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('暂停任务')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('取消任务')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('复核并重新规划'))
+
+    await waitFor(() => expect(runtime.prepareSecretaryLedgerRecoveryTask).toHaveBeenCalledWith(interruptedTask.id))
+    expect(onStartTask).toHaveBeenCalledWith(reconciledTask, expect.objectContaining({ prepared: true }))
+  })
+
+  it('replaces a paused legacy approval checkpoint before continuing after review', async () => {
+    const pausedApprovalTask = { ...task, status: 'paused' as const }
+    const reconciledTask = {
+      ...pausedApprovalTask,
+      summary: '恢复复核已确认，旧授权已失效。',
+      nextStep: '先重新观察当前项目状态并重建公开计划。',
+    }
+    const onStartTask = vi.fn()
+    runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+      state: { available: true, migrated: true },
+      project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+      projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
+      memories: [],
+      tasks: [pausedApprovalTask],
+      recovery: [{
+        task: pausedApprovalTask,
+        checkpoint: { summary: '等待确认。', nextStep: '等待确认。', createdAt: 2, phase: 'awaiting_approval', projectId: 'story-a' },
+        health: { state: 'requires_review', code: 'approval_expired', message: '上次确认已失效。' },
+      }],
+    })
+    runtime.prepareSecretaryLedgerRecoveryTask.mockResolvedValue({ ok: true, value: reconciledTask })
+
+    render(<SecretaryTaskCenter onStartTask={onStartTask} onOpenMaterials={vi.fn()} />)
+
+    await screen.findByText('需要复核')
+    fireEvent.click(screen.getByTitle('复核并重新规划'))
+
+    await waitFor(() => expect(runtime.prepareSecretaryLedgerRecoveryTask).toHaveBeenCalledWith(pausedApprovalTask.id))
+    expect(onStartTask).toHaveBeenCalledWith(reconciledTask, expect.objectContaining({ prepared: true }))
+  })
+
+  it('does not expose global pause or cancel controls for an old running task', async () => {
+    const interruptedTask = { ...task, status: 'running' as const }
+    const onPauseActiveTask = vi.fn()
+    const onCancelActiveTask = vi.fn()
+    runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+      state: { available: true, migrated: true },
+      project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+      projects: [{ id: 'story-a', title: '招商材料', kind: 'writing' }],
+      memories: [],
+      tasks: [interruptedTask],
+      recovery: [{
+        task: interruptedTask,
+        checkpoint: { summary: '连接中断。', nextStep: '重新核对。', createdAt: 2 },
+        health: { state: 'requires_review', code: 'interrupted_run', message: '上次任务未正常结束。' },
+      }],
+    })
+
+    render(
+      <SecretaryTaskCenter
+        onStartTask={vi.fn()}
+        onOpenMaterials={vi.fn()}
+        activeTaskId="different-live-task"
+        onPauseActiveTask={onPauseActiveTask}
+        onCancelActiveTask={onCancelActiveTask}
+      />,
+    )
+
+    expect(await screen.findByText('需要复核')).toBeInTheDocument()
+    expect(screen.queryByTitle('暂停任务')).not.toBeInTheDocument()
+    expect(screen.queryByTitle('取消任务')).not.toBeInTheDocument()
+    expect(onPauseActiveTask).not.toHaveBeenCalled()
+    expect(onCancelActiveTask).not.toHaveBeenCalled()
+  })
+
+  it('creates an explicit queued task instead of launching it automatically', async () => {
+    runtime.queueSecretaryLedgerTask.mockResolvedValue({ ok: true, value: task })
+    render(<SecretaryTaskCenter onStartTask={vi.fn()} onOpenMaterials={vi.fn()} />)
+    await screen.findByText('招商材料')
+
+    fireEvent.click(screen.getByTitle('新增待办任务'))
+    fireEvent.change(screen.getByLabelText('待办任务'), { target: { value: '下周整理会议纪要' } })
+    fireEvent.click(screen.getByText('加入队列'))
+
+    await waitFor(() => expect(runtime.queueSecretaryLedgerTask).toHaveBeenCalledWith(expect.objectContaining({
+      request: '下周整理会议纪要', scheduleAt: null,
+    })))
+  })
+
+  it('surfaces conversation quick actions without creating a task', async () => {
+    const newChatSession = vi.fn()
+    const switchChatSession = vi.fn()
+    useAppStore.setState({
+      activeChatId: 'chat-a',
+      chatSessions: [
+        { id: 'chat-a', title: '今天的工作安排', messages: [], articleId: 'article-a', articleIds: ['article-a'], activeArticleId: 'article-a', createdAt: 1, updatedAt: 2 },
+        { id: 'chat-b', title: '上周会议纪要', messages: [], articleId: 'article-a', articleIds: ['article-a'], activeArticleId: 'article-a', createdAt: 1, updatedAt: 1 },
+      ],
+      newChatSession,
+      switchChatSession,
+    })
+    render(<SecretaryTaskCenter onStartTask={vi.fn()} onOpenMaterials={vi.fn()} />)
+    await screen.findByText('招商材料')
+
+    fireEvent.click(screen.getByRole('button', { name: '新建对话' }))
+    expect(newChatSession).toHaveBeenCalledOnce()
+
+    fireEvent.click(screen.getByRole('button', { name: '查看历史对话' }))
+    fireEvent.click(await screen.findByTitle('打开对话：上周会议纪要'))
+    expect(switchChatSession).toHaveBeenCalledWith('chat-b')
+  })
+
+  it('switches the actual chat and story project from the ledger project selector', async () => {
+    const switchChatSession = vi.fn()
+    const setActiveStoryProject = vi.fn()
+    useAppStore.setState({
+      activeChatId: 'chat-a',
+      activeStoryProjectId: 'story-a',
+      switchChatSession,
+      setActiveStoryProject,
+    })
+    runtime.loadSecretaryTaskCenterSnapshot.mockResolvedValue({
+      state: { available: true, migrated: true },
+      project: { id: 'story-a', title: '招商材料', kind: 'writing' },
+      projects: [
+        { id: 'story-a', title: '招商材料', kind: 'writing', storyProjectId: 'story-a', chatId: 'chat-a' },
+        { id: 'story-b', title: '客户访谈', kind: 'writing', storyProjectId: 'story-b', chatId: 'chat-b' },
+      ],
+      memories: [],
+      tasks: [],
+      recovery: [],
+    })
+
+    render(<SecretaryTaskCenter onStartTask={vi.fn()} onOpenMaterials={vi.fn()} />)
+
+    await screen.findByText('招商材料')
+    fireEvent.click(screen.getByTitle('切换项目'))
+    fireEvent.click(screen.getByRole('menuitem', { name: /客户访谈/ }))
+
+    expect(switchChatSession).toHaveBeenCalledWith('chat-b')
+    expect(setActiveStoryProject).toHaveBeenCalledWith('story-b')
+  })
+})

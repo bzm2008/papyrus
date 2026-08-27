@@ -7,7 +7,10 @@ import {
   browserDownload,
   browserSubmit,
   browserSnapshot,
+  deriveBrowserBridgeState,
+  ensureBrowserBridgeReady,
   executeApprovedBrowserAction,
+  getBrowserBridgeConnectionPresentation,
   getBrowserBridgeStatus,
   openBrowserBridgeTab,
   resetBrowserBridgeInvokerForTests,
@@ -19,6 +22,74 @@ import {
 afterEach(() => resetBrowserBridgeInvokerForTests())
 
 describe('browser bridge client contract', () => {
+  it('marks an expired browser lease as stale and offers an explicit reconnect action', () => {
+    const status = {
+      running: true,
+      paired: true,
+      sessionId: 'session-1',
+      origin: 'https://example.com',
+      tabId: 8,
+      expiresAt: 100,
+    }
+
+    expect(deriveBrowserBridgeState(status, 100)).toBe('stale')
+    expect(getBrowserBridgeConnectionPresentation(status, 100)).toMatchObject({
+      state: 'stale',
+      title: '浏览器授权已过期',
+      action: 'pair',
+      actionLabel: '重新连接',
+    })
+  })
+
+  it('does not trust a previously cached connected state after the lease expires', () => {
+    const status = {
+      running: true,
+      paired: true,
+      connectionState: 'connected' as const,
+      expiresAt: 100,
+    }
+
+    expect(getBrowserBridgeConnectionPresentation(status, 100)).toMatchObject({
+      state: 'stale',
+      action: 'pair',
+    })
+  })
+
+  it('presents a connected lease without exposing its pairing material', () => {
+    const presentation = getBrowserBridgeConnectionPresentation({
+      running: true,
+      paired: true,
+      sessionId: 'session-1',
+      origin: 'https://example.com',
+      tabId: 8,
+      expiresAt: 160,
+    }, 100)
+
+    expect(presentation).toMatchObject({
+      state: 'connected',
+      title: '正在协助当前标签页',
+      action: 'disconnect',
+      actionLabel: '停止并断开',
+    })
+    expect(presentation.detail).toContain('example.com')
+    expect(presentation.detail).toContain('60 秒')
+    expect(JSON.stringify(presentation)).not.toContain('token')
+    expect(JSON.stringify(presentation)).not.toContain('nonce')
+  })
+
+  it('starts the local bridge automatically when the desktop app is ready', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'browser_bridge_status') return { running: false, paired: false }
+      if (command === 'browser_bridge_start_pairing') return { sessionId: 's1', token: 't1', nonce: 'n1', wsUrl: 'ws://127.0.0.1:1/bridge', expiresAt: 10 }
+      return {}
+    })
+    setBrowserBridgeInvokerForTests(invoke)
+
+    await expect(ensureBrowserBridgeReady()).resolves.toMatchObject({ sessionId: 's1' })
+    expect(invoke).toHaveBeenNthCalledWith(1, 'browser_bridge_status', undefined)
+    expect(invoke).toHaveBeenNthCalledWith(2, 'browser_bridge_start_pairing', undefined)
+  })
+
   it('uses typed pairing/status commands and keeps secrets out of status calls', async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === 'browser_bridge_start_pairing') return { sessionId: 's1', token: 't1', nonce: 'n1', wsUrl: 'ws://127.0.0.1:1/bridge', expiresAt: 10 }

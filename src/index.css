@@ -56,6 +56,14 @@ button {
   cursor: default;
 }
 
+button:enabled {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
 button,
 a,
 input,
@@ -150,6 +158,13 @@ textarea {
   color: var(--papyrus-ink);
 }
 
+.papyrus-control:active:not(:disabled),
+.papyrus-primary-button:active:not(:disabled),
+.papyrus-icon-button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+  box-shadow: 0 2px 6px rgba(43, 34, 19, 0.08);
+}
+
 .papyrus-control.is-active {
   border-color: rgba(23, 23, 20, 0.94);
   background: var(--papyrus-ink);
@@ -163,6 +178,10 @@ textarea {
 
 .papyrus-primary-button:hover {
   background: var(--papyrus-sage-dark);
+}
+
+.papyrus-primary-button:disabled {
+  cursor: not-allowed;
 }
 
 .papyrus-command-bar {
@@ -198,6 +217,10 @@ textarea {
   background: #fffdf7;
   color: var(--papyrus-ink);
   box-shadow: 0 8px 20px rgba(43, 34, 19, 0.055);
+}
+
+.papyrus-icon-button:disabled {
+  cursor: not-allowed;
 }
 
 .papyrus-scrollbar {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   defaultProviderConfigs,
   isProviderValidated,
+  mergeProviderConfigs,
   providerValidationSignature,
 } from './modelCatalog'
 
@@ -21,5 +22,23 @@ describe('Scallion provider validation', () => {
     }
 
     expect(isProviderValidated(validatedProvider)).toBe(true)
+  })
+
+  it('drops stale persisted built-in Scallion base URLs while preserving custom endpoints', () => {
+    const merged = mergeProviderConfigs({
+      qwen36: {
+        ...defaultProviderConfigs.qwen36,
+        baseUrl: 'https://scallion.uno/api/papyrus/llm/models',
+      },
+      custom: {
+        ...defaultProviderConfigs.custom,
+        baseUrl: 'https://custom.example/v1',
+        modelName: 'my-model',
+      },
+    })
+
+    expect(merged.qwen36.baseUrl).toBe('https://api.sca-hub.cn/api/papyrus/llm')
+    expect(merged.custom.baseUrl).toBe('https://custom.example/v1')
+    expect(merged.custom.modelName).toBe('my-model')
   })
 })

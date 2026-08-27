@@ -18,6 +18,13 @@ export type AuthorizedRoot = {
 }
 
 export type ApprovalGrant = { token: string; previewId: string; expires: number }
+export type NativeActionExecutionResult = {
+  ok?: boolean
+  summary?: string
+  data?: Record<string, unknown>
+  errorCode?: string
+  recoverable?: boolean
+}
 export type NativeBatchExecutionResult = {
   completed: Array<Record<string, unknown>>
   skipped: Array<Record<string, unknown>>
@@ -29,11 +36,21 @@ export type NativeBatchExecutionResult = {
 export type RegisteredApplication = {
   id: string
   label: string
-  executablePath: string
   platform: string
   createdAt: number
 }
+export type AvailableApplication = {
+  id: string
+  label: string
+  platform: string
+  kind: 'registered' | 'browser'
+}
 export type AuditEntry = { id: string; event: string; detail: string; at: number }
+export type TerminalRunRequest = {
+  operation: 'git_status' | 'git_diff_stat' | 'git_branch' | 'git_log' | 'git_version' | 'system_info' | 'whoami'
+  rootId: string
+  cwd?: string
+}
 
 let invokeFn: InvokeFn = (command, args) => invoke(command, args)
 
@@ -84,6 +101,24 @@ export const approveWorkAssistantAction = (
 export const executeWorkAssistantAction = (previewId: string, approvalToken: string) =>
   invokeTyped<NativeBatchExecutionResult>('work_assistant_execute', { previewId, approvalToken })
 
+/**
+ * Native actions with an external side effect (currently application launch
+ * and the structured terminal diagnostics) use a separate opaque preview.
+ * The execute call accepts only its preview id and one-time token, never the
+ * model-provided arguments again.
+ */
+export const previewNativeAssistantAction = (request: NativePreviewRequest) =>
+  previewWorkAssistantAction(request)
+
+export const approveNativeAssistantAction = (
+  previewId: string,
+  runId: string,
+  choice: AssistantApprovalChoice,
+) => approveWorkAssistantAction(previewId, runId, choice)
+
+export const executeNativeAssistantAction = (previewId: string, approvalToken: string) =>
+  invokeTyped<NativeActionExecutionResult>('work_assistant_execute_native_action', { previewId, approvalToken })
+
 export const cancelWorkAssistantRun = (runId: string) =>
   invokeTyped<void>('work_assistant_cancel_run', { run: runId })
 
@@ -102,17 +137,20 @@ export const revealWorkAssistantFile = (rootId: string, path: string) =>
 export const listRegisteredApplications = () =>
   invokeTyped<RegisteredApplication[]>('work_assistant_list_applications')
 
-export const validateApplicationSelection = (path: string) =>
-  invokeTyped<string>('work_assistant_validate_application_selection', { path })
+export const listAvailableApplications = () =>
+  invokeTyped<AvailableApplication[]>('work_assistant_list_available_applications')
 
-export const registerApplicationFromPicker = (label: string, path: string) =>
-  invokeTyped<RegisteredApplication>('work_assistant_register_application_from_picker', { label, path })
+export const registerApplicationFromPicker = (label: string) =>
+  invokeTyped<RegisteredApplication | null>('work_assistant_register_application_from_picker', { label })
 
 export const removeRegisteredApplication = (applicationId: string) =>
   invokeTyped<void>('work_assistant_remove_application', { applicationId })
 
 export const launchRegisteredApplication = (applicationId: string) =>
   invokeTyped<void>('work_assistant_launch_application', { applicationId })
+
+export const runTerminalCommand = (request: TerminalRunRequest) =>
+  invokeTyped<Record<string, unknown>>('work_assistant_terminal_run', request as unknown as Record<string, unknown>)
 
 export const listWorkAssistantAudit = (offset = 0, limit = 50) =>
   invokeTyped<AuditEntry[]>('work_assistant_list_audit', { offset, limit })

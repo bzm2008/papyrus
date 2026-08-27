@@ -99,6 +99,20 @@ const batchSchema = (): AssistantSchemaNode => ({
   required: ['rootId', 'conflictPolicy', 'operations'],
 })
 
+const terminalSchema = (): AssistantSchemaNode => ({
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    operation: {
+      type: 'string',
+      enum: ['git_status', 'git_diff_stat', 'git_branch', 'git_log', 'git_version', 'system_info', 'whoami'],
+    },
+    rootId: { type: 'string', minLength: 1 },
+    cwd: { type: 'string', maxLength: 400 },
+  },
+  required: ['operation', 'rootId'],
+})
+
 export const WORK_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'workspace_list', toolset: 'workspace', executor: 'native', description: 'List available workspace roots.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: emptyObjectSchema() },
   { name: 'workspace_scan', toolset: 'workspace', executor: 'native', description: 'Scan a workspace root for files and folders.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: workspaceRootSchema() },
@@ -109,9 +123,11 @@ export const WORK_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'file_open', toolset: 'workspace', executor: 'native', description: 'Open a workspace file in the system default application.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: fileSchema() },
   { name: 'downloads_scan', toolset: 'workspace', executor: 'native', description: 'Scan an authorized Downloads root.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: workspaceRootSchema() },
   { name: 'desktop_status', toolset: 'desktop', executor: 'native', description: 'Read desktop integration status.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: emptyObjectSchema() },
+  { name: 'desktop_list_apps', toolset: 'desktop', executor: 'native', description: 'List safe opaque IDs for registered applications and detected common browsers. Paths are never returned.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: emptyObjectSchema() },
   { name: 'desktop_open_url', toolset: 'desktop', executor: 'native', description: 'Open a URL using the system default browser.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: { type: 'object', additionalProperties: false, properties: { url: { type: 'string', minLength: 1 } }, required: ['url'] } },
   { name: 'desktop_open_app', toolset: 'desktop', executor: 'native', description: 'Launch an installed desktop application.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: { type: 'object', additionalProperties: false, properties: { appId: { type: 'string', minLength: 1 } }, required: ['appId'] } },
   { name: 'desktop_reveal_file', toolset: 'desktop', executor: 'native', description: 'Reveal a workspace file in the system file manager.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: fileSchema() },
+  { name: 'terminal_run', toolset: 'desktop', executor: 'native', description: 'Run one allowlisted terminal program with structured arguments inside an authorized workspace. No shell parsing or arbitrary scripts.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: terminalSchema() },
 ]
 
 const browserElementSchema = () => ({
@@ -132,7 +148,6 @@ export const BROWSER_ASSISTANT_TOOLS: readonly AssistantToolManifest[] = [
   { name: 'browser_snapshot', toolset: 'browser', executor: 'browser_bridge', description: 'Read an accessibility-limited snapshot of the paired tab.', defaultRisk: 'read', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: false, reversible: true, inputSchema: { type: 'object', additionalProperties: false, properties: { pageRevision: { type: 'string', minLength: 1 } }, required: [] } },
   { name: 'browser_fill_draft', toolset: 'browser', executor: 'browser_bridge', description: 'Fill a normal, non-sensitive field as a user-visible draft.', defaultRisk: 'reversible', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: { ...browserElementSchema(), properties: { ...browserElementSchema().properties, value: { type: 'string', maxLength: 2000 } }, required: ['elementToken', 'pageRevision', 'value'] } },
   { name: 'browser_click', toolset: 'browser', executor: 'browser_bridge', description: 'Click a normal semantic element in the paired tab.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: browserElementSchema() },
-  { name: 'browser_download', toolset: 'browser', executor: 'browser_bridge', description: 'Trigger a confirmed ordinary download in the paired tab.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: true, inputSchema: { ...browserElementSchema(), properties: { ...browserElementSchema().properties, directoryRootId: { type: 'string', minLength: 1 } } } },
   { name: 'browser_submit', toolset: 'browser', executor: 'browser_bridge', description: 'Submit a normal form after a one-time confirmation.', defaultRisk: 'high', supportedPlatforms: ALL_DESKTOP_PLATFORMS, previewRequired: true, reversible: false, inputSchema: browserElementSchema() },
 ]
 

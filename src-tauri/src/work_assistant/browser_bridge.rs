@@ -15,8 +15,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
+    io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    sync::{mpsc, Arc, Condvar, Mutex},
+    sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -28,6 +29,7 @@ use tungstenite::{accept_hdr_with_config, Message};
 use uuid::Uuid;
 
 const PAIRING_LIFETIME_SECONDS: u64 = 5 * 60;
+const DISCOVERY_PORT: u16 = 43121;
 const MAX_WEB_BYTES: usize = 4 * 1024 * 1024;
 const MAX_WEB_TEXT: usize = 60_000;
 const MAX_REDIRECTS: usize = 5;
@@ -41,6 +43,15 @@ const MAX_BROWSER_PREVIEWS: usize = 256;
 const MAX_BROWSER_APPROVALS: usize = 256;
 const RESTRICTED_SNAPSHOT_TEXT: &str =
     "当前页面包含敏感内容，已隐藏页面正文；仅保留安全状态和受限原因。";
+
+// Derived from `apps/browser-bridge/manifest.json`'s public `key` using the
+// Chromium extension-id algorithm (SHA-256, first 16 bytes, a-p encoding).
+// This is the only verified Papyrus Chromium development distribution ID.
+// Do not add guessed Chrome Web Store or Edge Add-ons IDs here: an official
+// production ID must be independently verified before it is allowlisted.
+const BROWSER_BRIDGE_CHROMIUM_DEVELOPMENT_EXTENSION_ID: &str = "nlcfngahfagkgdcidkigcdgddijcnnoe";
+const OFFICIAL_CHROMIUM_BROWSER_BRIDGE_EXTENSION_IDS: &[&str] =
+    &[BROWSER_BRIDGE_CHROMIUM_DEVELOPMENT_EXTENSION_ID];
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -275,6 +286,14 @@ struct BrowserBridgeInner {
     browser_approvals: Mutex<HashMap<String, StoredBrowserApproval>>,
 }
 
+// The browser extension cannot invoke Tauri directly. A single process-local
+// discovery listener lets it obtain a short-lived pairing from the running
+// Papyrus instance without asking users to copy secrets into a popup. The
+// websocket still validates the extension origin, one-time token, tab, and
+// page origin before exposing any browser data.
+static DISCOVERY_TARGET: OnceLock<Arc<Mutex<Weak<BrowserBridgeInner>>>> = OnceLock::new();
+static DISCOVERY_STARTED: OnceLock<()> = OnceLock::new();
+
 pub struct BrowserBridgeState {
     inner: Arc<BrowserBridgeInner>,
 }
@@ -321,26 +340,18 @@ pub fn browser_bridge_start_pairing(
 
 #[tauri::command]
 pub fn browser_bridge_pair(
-    state: State<'_, BrowserBridgeState>,
-    token: String,
-    nonce: Option<String>,
-    extension_id: String,
-    tab_id: i64,
-    origin: String,
+    _state: State<'_, BrowserBridgeState>,
+    _token: String,
+    _nonce: Option<String>,
+    _extension_id: String,
+    _tab_id: i64,
+    _origin: String,
 ) -> Result<BrowserBridgeStatus, String> {
-    let handshake_origin = format!("chrome-extension://{}", extension_id.trim());
-    pair_bridge(
-        &state.inner,
-        PairRequest {
-            token,
-            nonce: nonce.unwrap_or_default(),
-            extension_id,
-            tab_id,
-            origin,
-        },
-        &handshake_origin,
-    )
-    .map_err(|error| error.message)
+    // This legacy Tauri command cannot inspect a real WebSocket Origin header;
+    // accepting an extension id supplied by the webview would let a caller
+    // forge that identity. Pairing is therefore allowed only through the
+    // loopback WebSocket handshake in `bridge_connection`.
+    Err("Browser Bridge must pair through the verified extension connection".into())
 }
 
 #[tauri::command]
@@ -582,6 +593,7 @@ pub async fn work_assistant_web_extract(
 fn start_pairing(
     inner: &Arc<BrowserBridgeInner>,
 ) -> Result<BrowserBridgePairing, WorkAssistantError> {
+    ensure_discovery_listener(inner);
     let listener = ensure_listener(inner)?;
     let now = unix_seconds();
     let session_id = Uuid::new_v4().to_string();
@@ -1057,6 +1069,12 @@ fn execute_approved_browser_action_with_audit(
     {
         return Err("浏览器一次性审批令牌无效或已过期".into());
     }
+    if let Err(error) = ensure_browser_run_active(audit_state, &approval.run_id) {
+        if let Ok(mut previews) = inner.browser_previews.lock() {
+            previews.remove(preview_id);
+        }
+        return Err(error);
+    }
     let stored = inner
         .browser_previews
         .lock()
@@ -1131,6 +1149,7 @@ fn execute_approved_browser_action_with_audit(
         }
         validate_browser_element_target(&action, element).map_err(|error| error.message)?;
     }
+    ensure_browser_run_active(audit_state, &approval.run_id)?;
     let result = request_bridge(
         inner,
         &action,
@@ -1141,6 +1160,24 @@ fn execute_approved_browser_action_with_audit(
         append_browser_action_audit(audit_state, &preview, &action, response);
     }
     result
+}
+
+fn ensure_browser_run_active(
+    audit_state: Option<&WorkAssistantState>,
+    run_id: &str,
+) -> Result<(), String> {
+    let Some(state) = audit_state else {
+        return Ok(());
+    };
+    let cancelled = state
+        .cancelled_runs
+        .lock()
+        .map_err(|_| "浏览器取消状态不可用".to_string())?
+        .contains(run_id);
+    if cancelled {
+        return Err("运行已取消，未执行浏览器操作。".into());
+    }
+    Ok(())
 }
 
 fn append_browser_action_audit(
@@ -1383,6 +1420,118 @@ impl InstantDeadline {
     }
 }
 
+fn ensure_discovery_listener(inner: &Arc<BrowserBridgeInner>) {
+    let target = DISCOVERY_TARGET
+        .get_or_init(|| Arc::new(Mutex::new(Weak::new())))
+        .clone();
+    if let Ok(mut current) = target.lock() {
+        *current = Arc::downgrade(inner);
+    }
+
+    DISCOVERY_STARTED.get_or_init(|| {
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", DISCOVERY_PORT)) else {
+            // Another Papyrus instance or a local service may own the optional
+            // discovery port. The secure manual pairing path remains available.
+            return;
+        };
+        let Ok(()) = listener.set_nonblocking(true) else {
+            return;
+        };
+        let registry = target.clone();
+        thread::spawn(move || discovery_listener_loop(listener, registry));
+    });
+}
+
+fn discovery_listener_loop(listener: TcpListener, target: Arc<Mutex<Weak<BrowserBridgeInner>>>) {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let registry = target.clone();
+                thread::spawn(move || discovery_connection(stream, registry));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(30));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn discovery_connection(mut stream: TcpStream, target: Arc<Mutex<Weak<BrowserBridgeInner>>>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut buffer = [0_u8; 8 * 1024];
+    let Ok(read) = stream.read(&mut buffer) else {
+        return;
+    };
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let mut lines = request.lines();
+    let Some(request_line) = lines.next() else {
+        return;
+    };
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts.next().unwrap_or_default();
+    let path = request_parts.next().unwrap_or_default();
+    let origin = lines
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("origin")
+                .then(|| value.trim())
+        })
+        .unwrap_or_default();
+
+    if method != "GET" || path.split('?').next() != Some("/pairing") {
+        write_discovery_response(&mut stream, 404, "Not Found", None, None);
+        return;
+    }
+    // The discovery listener is the only place that releases pairing material.
+    // A syntactically valid extension Origin is not an identity check: arbitrary
+    // local extensions have their own origins too. Only an explicitly allowlisted
+    // Chromium distribution may receive a one-time pairing response.
+    if extension_origin_id(origin).is_none() {
+        write_discovery_response(&mut stream, 403, "Forbidden", None, None);
+        return;
+    }
+
+    let inner = target.lock().ok().and_then(|current| current.upgrade());
+    let Some(inner) = inner else {
+        write_discovery_response(&mut stream, 503, "Papyrus is not ready", None, None);
+        return;
+    };
+    match start_pairing(&inner) {
+        Ok(pairing) => match serde_json::to_string(&pairing) {
+            Ok(body) => write_discovery_response(
+                &mut stream,
+                200,
+                "OK",
+                Some(body.as_bytes()),
+                Some(origin),
+            ),
+            Err(_) => write_discovery_response(&mut stream, 500, "Pairing unavailable", None, None),
+        },
+        Err(_) => write_discovery_response(&mut stream, 503, "Pairing unavailable", None, None),
+    }
+}
+
+fn write_discovery_response(
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: Option<&[u8]>,
+    allow_origin: Option<&str>,
+) {
+    let body = body.unwrap_or_default();
+    let cors = allow_origin
+        .map(|origin| format!("Access-Control-Allow-Origin: {origin}\r\n"))
+        .unwrap_or_default();
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{cors}Connection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+}
+
 fn ensure_listener(inner: &Arc<BrowserBridgeInner>) -> Result<u16, WorkAssistantError> {
     let mut listener = inner
         .listener
@@ -1459,17 +1608,12 @@ fn bridge_connection(stream: TcpStream, inner: Arc<BrowserBridgeInner>) {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .trim();
-        if origin.is_empty()
-            || !origin.split_once("://").is_some_and(|(scheme, _)| {
-                matches!(
-                    scheme.to_ascii_lowercase().as_str(),
-                    "chrome-extension" | "edge-extension" | "brave-extension"
-                )
-            })
-        {
+        if extension_origin_id(origin).is_none() {
             return Err(WebSocketResponse::builder()
                 .status(StatusCode::FORBIDDEN)
-                .body(Some("Browser Bridge requires an extension origin".into()))
+                .body(Some(
+                    "Browser Bridge requires an official extension origin".into(),
+                ))
                 .unwrap());
         }
         if let Ok(mut slot) = callback_slot.lock() {
@@ -1730,21 +1874,39 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn extension_origin_matches(origin: &str, extension_id: &str) -> bool {
+    extension_origin_id(origin).is_some_and(|id| id == extension_id)
+}
+
+/// Returns an extension ID only after both syntactic validation and the
+/// release allowlist check. The loopback discovery endpoint and WebSocket
+/// handshake share this function so an untrusted extension cannot obtain a
+/// token through one path and connect through another.
+///
+/// Firefox ESR uses a per-profile `moz-extension://` UUID rather than the
+/// stable Gecko add-on ID. It intentionally cannot use automatic loopback
+/// discovery until a Native Messaging identity check is installed. Accepting
+/// every `moz-extension` origin would turn that UUID into an unauthenticated
+/// bearer identity.
+fn extension_origin_id(origin: &str) -> Option<&str> {
     let trimmed = origin.trim_end_matches('/');
-    let Some((scheme, id)) = trimmed.split_once("://") else {
-        return false;
-    };
+    let (scheme, id) = trimmed.split_once("://")?;
     if !matches!(
         scheme.to_ascii_lowercase().as_str(),
         "chrome-extension" | "edge-extension" | "brave-extension"
     ) {
-        return false;
+        return None;
     }
-    id == extension_id
-        && id.len() == 32
-        && id
+    if id.len() != 32
+        || !id
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    OFFICIAL_CHROMIUM_BROWSER_BRIDGE_EXTENSION_IDS
+        .iter()
+        .copied()
+        .find(|official_id| *official_id == id)
 }
 
 fn validate_bridge_message_size(raw: &str) -> Result<(), WorkAssistantError> {
@@ -2526,7 +2688,7 @@ mod tests {
     fn pairing_token_is_single_use() {
         let state = init_browser_bridge_state();
         let inner = Arc::clone(&state.inner);
-        let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+        let extension_id = BROWSER_BRIDGE_CHROMIUM_DEVELOPMENT_EXTENSION_ID;
         let mut session = test_session("pair-once");
         session.pairing_consumed = false;
         session.extension_id = None;
@@ -2558,6 +2720,43 @@ mod tests {
         )
         .expect_err("a pairing token must not be reusable");
         assert_eq!(error.code, "blocked");
+    }
+
+    #[test]
+    fn pairing_rejects_an_unknown_extension_even_with_valid_credentials() {
+        let state = init_browser_bridge_state();
+        let inner = Arc::clone(&state.inner);
+        let unknown_id = "abcdefghijklmnopabcdefghijklmnop";
+        let mut session = test_session("unknown-extension");
+        session.pairing_consumed = false;
+        session.extension_id = None;
+        session.tab_id = None;
+        session.origin = None;
+        session.pairing.token = "pair-token".into();
+        session.pairing.nonce = "pair-nonce".into();
+        if let Ok(mut current) = inner.session.lock() {
+            *current = Some(session);
+        }
+
+        let error = pair_bridge(
+            &inner,
+            PairRequest {
+                token: "pair-token".into(),
+                nonce: "pair-nonce".into(),
+                extension_id: unknown_id.into(),
+                tab_id: 7,
+                origin: "https://1.1.1.1".into(),
+            },
+            &format!("chrome-extension://{unknown_id}"),
+        )
+        .expect_err("unknown extension IDs must never consume a pairing token");
+        assert_eq!(error.code, "blocked");
+        assert!(inner
+            .session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|current| !current.pairing_consumed));
     }
 
     #[test]
@@ -2871,17 +3070,28 @@ mod tests {
     }
 
     #[test]
-    fn websocket_origin_must_match_the_paired_extension_id() {
+    fn only_the_official_chromium_extension_can_use_browser_bridge_discovery() {
+        let official_id = BROWSER_BRIDGE_CHROMIUM_DEVELOPMENT_EXTENSION_ID;
         assert!(extension_origin_matches(
+            &format!("chrome-extension://{official_id}"),
+            official_id,
+        ));
+        assert_eq!(
+            extension_origin_id("chrome-extension://abcdefghijklmnopabcdefghijklmnop"),
+            None,
+            "an arbitrary local extension must not receive a pairing token",
+        );
+        assert!(!extension_origin_matches(
             "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
             "abcdefghijklmnopabcdefghijklmnop",
         ));
+    }
+
+    #[test]
+    fn firefox_extension_origins_cannot_use_automatic_pairing_without_native_messaging() {
+        assert!(extension_origin_id("moz-extension://abcdefghijklmnopabcdefghijklmnop",).is_none());
         assert!(!extension_origin_matches(
-            "chrome-extension://differentdifferentdifferentdifferent",
-            "abcdefghijklmnopabcdefghijklmnop",
-        ));
-        assert!(!extension_origin_matches(
-            "https://example.com",
+            "moz-extension://abcdefghijklmnopabcdefghijklmnop",
             "abcdefghijklmnopabcdefghijklmnop",
         ));
     }
@@ -2971,6 +3181,110 @@ mod tests {
         )
         .expect_err("old navigation must not execute in the new session");
         assert!(error.contains("配对已失效"));
+    }
+
+    #[test]
+    fn cancelled_run_cannot_dispatch_an_already_approved_browser_action() {
+        let state = init_browser_bridge_state();
+        let inner = Arc::clone(&state.inner);
+        let (sender, receiver) = mpsc::channel::<String>();
+        if let Ok(mut session) = inner.session.lock() {
+            let mut current = test_session("session-cancelled");
+            current.outbound = Some(sender);
+            *session = Some(current);
+        }
+
+        let preview = create_browser_action_preview(
+            &inner,
+            "navigate".into(),
+            "run-cancelled".into(),
+            "tool-cancelled".into(),
+            BrowserActionRequest {
+                element_token: None,
+                value: None,
+                page_revision: String::new(),
+                snapshot_id: None,
+                url: Some("https://example.com/next".into()),
+                directory_root_id: None,
+                target_href: None,
+                href_fingerprint: None,
+            },
+        )
+        .expect("preview should be generated");
+        let grant = approve_browser_action(&inner, &preview.id, "run-cancelled", "once")
+            .expect("approval should be generated");
+
+        let audit_directory =
+            std::env::temp_dir().join(format!("papyrus-browser-cancel-{}", Uuid::new_v4()));
+        let audit_state = WorkAssistantState {
+            roots: std::sync::RwLock::new(Vec::new()),
+            previews: Mutex::new(HashMap::new()),
+            approvals: Mutex::new(HashMap::new()),
+            cancelled_runs: Mutex::new(HashSet::from(["run-cancelled".to_owned()])),
+            cancelled_execution_audits: Mutex::new(HashSet::new()),
+            audit_path: audit_directory.join("audit.jsonl"),
+            audit_guard: Mutex::new(()),
+        };
+        let responder = {
+            let inner = Arc::clone(&inner);
+            thread::spawn(move || {
+                let Ok(raw) = receiver.recv_timeout(Duration::from_millis(250)) else {
+                    return false;
+                };
+                let request_id = serde_json::from_str::<Value>(&raw).ok().and_then(|value| {
+                    value
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
+                let Some(request_id) = request_id else {
+                    return true;
+                };
+                if let Ok(mut session) = inner.session.lock() {
+                    if let Some(current) = session.as_mut() {
+                        current.responses.insert(
+                            request_id,
+                            json!({ "ok": true, "summary": "must not be dispatched" }),
+                        );
+                    }
+                }
+                inner.wake.notify_all();
+                true
+            })
+        };
+
+        let result = execute_approved_browser_action_with_audit(
+            &inner,
+            Some(&audit_state),
+            &grant.preview_id,
+            &grant.token,
+            &grant.action_hash,
+        );
+        let dispatched = responder.join().expect("responder should finish");
+
+        assert!(
+            result.is_err(),
+            "a cancelled run must not execute a browser action"
+        );
+        assert!(
+            result.unwrap_err().contains("运行已取消"),
+            "the error should explain that no browser action was executed"
+        );
+        assert!(
+            !dispatched,
+            "the extension must not receive an action request after cancellation"
+        );
+        assert!(!inner
+            .browser_previews
+            .lock()
+            .unwrap()
+            .contains_key(&preview.id));
+        assert!(!inner
+            .browser_approvals
+            .lock()
+            .unwrap()
+            .contains_key(&grant.token));
+        let _ = std::fs::remove_dir_all(audit_directory);
     }
 
     #[test]

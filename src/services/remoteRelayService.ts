@@ -41,7 +41,7 @@ export type RemoteRelayResultPayload = {
   error?: string
 }
 
-const defaultEndpoint = 'https://scallion.uno/api/papyrus/remote'
+const defaultEndpoint = 'https://api.sca-hub.cn/api/papyrus/remote'
 const knownPlatforms: RemoteRelayPlatform[] = ['clawbot', 'feishu', 'wecom', 'qq', 'wechat', 'custom']
 
 export function normalizeRelayEndpoint(endpoint?: string) {

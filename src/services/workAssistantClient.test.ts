@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import * as workAssistantClient from './workAssistantClient'
 import {
+  registerApplicationFromPicker,
   removeWorkAssistantRoot,
   resetWorkAssistantInvokerForTests,
   scanWorkAssistantDownloads,
+  runTerminalCommand,
   setWorkAssistantInvokerForTests,
 } from './workAssistantClient'
 
@@ -26,5 +29,33 @@ describe('workAssistantClient', () => {
     await scanWorkAssistantDownloads('downloads')
 
     expect(invoke).toHaveBeenCalledWith('work_assistant_downloads_scan', { rootId: 'downloads' })
+  })
+
+  it('sends terminal diagnostics as fixed operations without a shell string', async () => {
+    const invoke = vi.fn(async () => ({ program: 'git', exitCode: 0, stdout: '', stderr: '', truncated: false, durationMs: 2 }))
+    setWorkAssistantInvokerForTests(invoke)
+
+    await runTerminalCommand({ operation: 'git_status', rootId: 'project', cwd: 'src' })
+
+    expect(invoke).toHaveBeenCalledWith('work_assistant_terminal_run', {
+      operation: 'git_status',
+      rootId: 'project',
+      cwd: 'src',
+    })
+  })
+
+  it('asks the native registration command to own application path selection', async () => {
+    const invoke = vi.fn(async () => ({ id: 'app-1', label: 'Editor' }))
+    setWorkAssistantInvokerForTests(invoke)
+
+    await registerApplicationFromPicker('Editor')
+
+    expect(invoke).toHaveBeenCalledWith('work_assistant_register_application_from_picker', {
+      label: 'Editor',
+    })
+  })
+
+  it('does not expose a caller-supplied application validation endpoint', () => {
+    expect('validateApplicationSelection' in workAssistantClient).toBe(false)
   })
 })

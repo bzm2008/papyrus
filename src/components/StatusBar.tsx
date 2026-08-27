@@ -60,11 +60,12 @@ export function StatusBar() {
     `资源 ${(resourceTokens / 1000).toFixed(1)}K`,
     `关联文稿 ${(chatArticleTokens / 1000).toFixed(1)}K`,
   ].join('\n')
+  const visibleColumnControls = mode === 'flow' ? [] : columnControls
 
   return (
     <footer className="papyrus-toolbar flex h-8 shrink-0 items-center justify-between gap-3 border-t px-2.5 text-[11px] text-[#6f7168]">
       <div className="flex shrink-0 items-center gap-1">
-        {columnControls.map((item) => {
+        {visibleColumnControls.map((item) => {
           const Icon = item.icon
           const active = columnMode === item.value
 

@@ -13,16 +13,38 @@ async function fixture() {
   await fs.mkdir(path.join(rootDir, 'dist-browser-bridge'), { recursive: true })
   await fs.mkdir(path.join(rootDir, 'docs', 'testing'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'tauri.conf.json'), JSON.stringify({
+    version: '0.1.2',
+    plugins: { updater: { pubkey: Buffer.from('untrusted comment: minisign public key: 3EC491EFE0261CA\nRWTKYQL+HknsA+aViT3FVwphbXJmOov+xJnIg7LCMSX6Cha9yZ36vduL\n', 'utf8').toString('base64') } },
     app: { security: { csp: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data: blob: https:; font-src 'self' data:; connect-src 'self' http: https:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'" } },
   }))
+  await fs.writeFile(path.join(rootDir, 'src-tauri', 'Cargo.toml'), '[package]\nname = "papyrus"\nversion = "0.1.2"\n')
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'src', 'lib.rs'), REQUIRED_COMMANDS.map((command) => `work_assistant::${command},`).join('\n'))
   await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'manifest.json'), JSON.stringify({
     manifest_version: 3,
+    version: '0.1.2',
     permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
     host_permissions: ['http://127.0.0.1/*'],
   }))
+  await fs.mkdir(path.join(rootDir, 'dist-browser-bridge', 'firefox-esr'), { recursive: true })
+  const firefoxManifest = {
+    manifest_version: 3,
+    version: '0.1.2',
+    permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
+    host_permissions: ['http://127.0.0.1/*'],
+    background: { service_worker: 'service_worker.js' },
+    browser_specific_settings: { gecko: { id: 'browser-bridge@papyrus.scallion' } },
+  }
+  await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'firefox-esr', 'manifest.json'), JSON.stringify(firefoxManifest))
+  await fs.mkdir(path.join(rootDir, 'apps', 'browser-bridge'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'apps', 'browser-bridge', 'manifest.json'), JSON.stringify({ version: '0.1.2' }))
+  await fs.writeFile(path.join(rootDir, 'apps', 'browser-bridge', 'manifest.firefox-esr.json'), JSON.stringify(firefoxManifest))
+  await fs.mkdir(path.join(rootDir, 'src-tauri', 'keys'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'src-tauri', 'keys', 'papyrus-updater-public.key'), 'untrusted comment: minisign public key: 3EC491EFE0261CA\nRWTKYQL+HknsA+aViT3FVwphbXJmOov+xJnIg7LCMSX6Cha9yZ36vduL\n')
+  await fs.mkdir(path.join(rootDir, 'scripts'), { recursive: true })
+  await fs.writeFile(path.join(rootDir, 'scripts', 'package-wps-addin-release.ps1'), '$Version = [string]$packageJson.version\\n')
   await fs.writeFile(path.join(rootDir, 'README.md'), 'Papyrus Work Assistant and Browser Bridge release notes')
   await fs.writeFile(path.join(rootDir, 'package.json'), JSON.stringify({
+    version: '0.1.2',
     scripts: {
       'ci:desktop': 'npm run lint && npm run release:assistant-check',
       'browser:package': 'npm run browser:build && node scripts/package-browser-bridge.mjs',
@@ -74,8 +96,26 @@ async function fixture() {
     # Production signing runs only in a protected release workflow with credentials.
     # Unsigned smoke artifacts are never presented as production releases.
   `
+  const productionReleaseWorkflow = `
+    on:
+      push:
+        tags:
+          - 'v*.*.*'
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: \${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+    matrix: { os: [windows-latest, macos-latest, ubuntu-24.04] }
+    - run: npm ci
+    - run: npm run ci:desktop
+    - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+    - run: npx playwright install --with-deps chromium
+    - run: npx playwright install chromium
+    - run: npm run test:browser:e2e
+    - name: Build signed Tauri bundle
+    - run: gh release create \${{ steps.version.outputs.tag }} --title "Papyrus \${{ steps.version.outputs.version }} production release."
+  `
   await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-ci.yml'), desktopWorkflow)
   await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-packages.yml'), packageWorkflow)
+  await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-release.yml'), productionReleaseWorkflow)
   await fs.mkdir(path.join(rootDir, 'src-tauri', 'ci'), { recursive: true })
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'ci', 'windows.json'), JSON.stringify({ bundle: { targets: ['nsis'], createUpdaterArtifacts: false } }))
   await fs.writeFile(path.join(rootDir, 'src-tauri', 'ci', 'macos.json'), JSON.stringify({ bundle: { targets: ['app', 'dmg'], createUpdaterArtifacts: false } }))
@@ -115,6 +155,47 @@ test('forbidden extension permissions fail closed', async () => {
     const report = await runReleaseChecks({ rootDir, phase: 'local' })
     assert.ok(report.failures.some((failure) => failure.includes('forbidden permission cookies')))
     assert.ok(report.failures.some((failure) => failure.includes('<all_urls>')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('extension output version must match the application package version', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'dist-browser-bridge', 'manifest.json'), JSON.stringify({
+      manifest_version: 3,
+      version: '0.1.1',
+      permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
+      host_permissions: ['http://127.0.0.1/*'],
+    }))
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('version must match package.json.version')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('desktop release version sources must match package.json', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, 'src-tauri', 'Cargo.toml'), '[package]\nname = "papyrus"\nversion = "0.1.1"\n')
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('Cargo.toml package version must match package.json.version')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('updater config must derive its Base64 key from the canonical Minisign text', async () => {
+  const rootDir = await fixture()
+  try {
+    const configPath = path.join(rootDir, 'src-tauri', 'tauri.conf.json')
+    const config = JSON.parse(await fs.readFile(configPath, 'utf8'))
+    config.plugins.updater.pubkey = Buffer.from('wrong key\n', 'utf8').toString('base64')
+    await fs.writeFile(configPath, JSON.stringify(config))
+    const report = await runReleaseChecks({ rootDir, phase: 'local' })
+    assert.ok(report.failures.some((failure) => failure.includes('updater public key Base64 does not match canonical Minisign key')))
   } finally {
     await cleanup(rootDir)
   }
@@ -163,6 +244,28 @@ test('release phase fails when a workflow has runners but misses required releas
     const report = await runReleaseChecks({ rootDir, phase: 'release' })
     assert.ok(report.failures.some((failure) => failure.includes('desktop-packages.yml must be manually dispatchable')))
     assert.ok(report.failures.some((failure) => failure.includes('desktop-packages.yml must upload smoke artifacts')))
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('release phase fails when production signing skips its test gates', async () => {
+  const rootDir = await fixture()
+  try {
+    await fs.writeFile(path.join(rootDir, '.github', 'workflows', 'desktop-release.yml'), `
+      on:
+        push:
+          tags:
+            - 'v*.*.*'
+      env:
+        TAURI_SIGNING_PRIVATE_KEY: \${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      - run: npm ci
+      - name: Build signed Tauri bundle
+    `)
+    const report = await runReleaseChecks({ rootDir, phase: 'release' })
+    assert.ok(report.failures.some((failure) => failure.includes('desktop-release.yml must run the aggregate desktop checks before signing')))
+    assert.ok(report.failures.some((failure) => failure.includes('desktop-release.yml must run real Chromium browser tests before signing')))
+    assert.ok(report.failures.some((failure) => failure.includes('desktop-release.yml must not hard-code a stale release title')))
   } finally {
     await cleanup(rootDir)
   }

@@ -250,6 +250,38 @@ pub struct WorkAssistantError {
 }
 
 impl WorkAssistantError {
+    pub fn terminal_program_not_allowed(message: impl Into<String>) -> Self {
+        Self {
+            code: "terminal_program_not_allowed".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    pub fn terminal_cwd_invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: "terminal_cwd_invalid".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    pub fn terminal_timeout(message: impl Into<String>) -> Self {
+        Self {
+            code: "terminal_timeout".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
+    pub fn terminal_failed(message: impl Into<String>) -> Self {
+        Self {
+            code: "terminal_failed".into(),
+            message: message.into(),
+            recoverable: true,
+        }
+    }
+
     pub fn path_outside_workspace(message: impl Into<String>) -> Self {
         Self {
             code: "path_outside_workspace".into(),

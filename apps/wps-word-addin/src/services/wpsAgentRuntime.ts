@@ -5,6 +5,8 @@ export type WpsAgentErrorKind =
   | 'timeout'
   | 'authentication'
   | 'plan_forbidden'
+  | 'auto_quota_exhausted'
+  | 'quota_exhausted'
   | 'network'
   | 'server'
   | 'protocol'
@@ -16,12 +18,13 @@ export class WpsAgentError extends Error {
   readonly code?: string
   readonly status?: number
   readonly retryable: boolean
+  readonly autoQuota?: unknown
 
   constructor(
     kind: WpsAgentErrorKind,
     message: string,
     recoverable = kind === 'network' || kind === 'server' || kind === 'stream_unavailable',
-    details: { code?: string; status?: number; retryable?: boolean } = {},
+    details: { code?: string; status?: number; retryable?: boolean; autoQuota?: unknown } = {},
   ) {
     super(message)
     this.name = 'WpsAgentError'
@@ -30,6 +33,7 @@ export class WpsAgentError extends Error {
     this.code = details.code ?? defaultErrorCode(kind)
     this.status = details.status
     this.retryable = details.retryable ?? recoverable
+    this.autoQuota = details.autoQuota
   }
 }
 
@@ -76,6 +80,21 @@ export function classifyWpsAgentError(error: unknown): WpsAgentError {
   if (normalizedDetails.code === 'plan_model_forbidden') {
     return new WpsAgentError('plan_forbidden', '当前套餐不可用该模型，请从模型目录选择套餐内模型。', false, {
       ...normalizedDetails,
+      retryable: false,
+    })
+  }
+
+  if (normalizedDetails.code === 'auto_quota_exhausted') {
+    return new WpsAgentError('auto_quota_exhausted', formatAutoQuotaFailure(normalizedDetails.autoQuota), false, {
+      ...normalizedDetails,
+      retryable: false,
+    })
+  }
+
+  if (normalizedDetails.status === 402 || normalizedDetails.code === 'quota_exhausted') {
+    return new WpsAgentError('quota_exhausted', '积分余额不足，本条消息未发送。请充值或进入主站升级套餐。', false, {
+      ...normalizedDetails,
+      code: normalizedDetails.code ?? 'quota_exhausted',
       retryable: false,
     })
   }
@@ -127,10 +146,10 @@ function parseHttpStatus(message: string) {
 
 function readErrorDetails(error: unknown) {
   if (!error || typeof error !== 'object') {
-    return { code: undefined, status: undefined, retryable: undefined }
+    return { code: undefined, status: undefined, retryable: undefined, autoQuota: undefined }
   }
 
-  const value = error as { code?: unknown; status?: unknown; retryable?: unknown; recoverable?: unknown }
+  const value = error as { code?: unknown; status?: unknown; retryable?: unknown; recoverable?: unknown; autoQuota?: unknown; auto_quota?: unknown }
   const status = typeof value.status === 'number' && Number.isFinite(value.status) ? value.status : undefined
   const code = typeof value.code === 'string' && value.code.trim() ? value.code.trim() : undefined
   const retryable = typeof value.retryable === 'boolean'
@@ -139,7 +158,7 @@ function readErrorDetails(error: unknown) {
       ? value.recoverable
       : undefined
 
-  return { code, status, retryable }
+  return { code, status, retryable, autoQuota: value.autoQuota ?? value.auto_quota }
 }
 
 function defaultErrorCode(kind: WpsAgentErrorKind) {
@@ -148,6 +167,8 @@ function defaultErrorCode(kind: WpsAgentErrorKind) {
     timeout: 'timeout',
     authentication: 'unauthorized',
     plan_forbidden: 'plan_model_forbidden',
+    auto_quota_exhausted: 'auto_quota_exhausted',
+    quota_exhausted: 'quota_exhausted',
     network: 'network_error',
     server: 'server_error',
     protocol: 'protocol_error',
@@ -155,6 +176,28 @@ function defaultErrorCode(kind: WpsAgentErrorKind) {
   }
 
   return codes[kind]
+}
+
+function formatAutoQuotaFailure(autoQuota: unknown) {
+  const quota = autoQuota && typeof autoQuota === 'object' ? autoQuota as Record<string, unknown> : undefined
+  const monthlyRemaining = quotaNumber(quota?.monthly_remaining ?? quota?.monthlyRemaining)
+  const dailyRemaining = quotaNumber(quota?.daily_remaining ?? quota?.dailyRemaining)
+  const monthlyUsed = quotaNumber(quota?.monthly_used ?? quota?.monthlyUsed)
+  const monthlyLimit = quotaNumber(quota?.monthly_limit ?? quota?.monthlyLimit)
+  if (monthlyRemaining === 0) {
+    const used = monthlyUsed ?? monthlyLimit ?? 0
+    const limit = monthlyLimit ?? used
+    return `本月 Auto 额度已用完，已用 ${used} / ${limit} 次，请等待下月刷新或升级套餐。本条消息未发送。`
+  }
+  if (dailyRemaining === 0) {
+    return '今日 Auto 额度已用完，明日刷新；本条消息未发送。'
+  }
+  return 'Auto 额度已用完，本条消息未发送。请等待额度刷新或升级套餐。'
+}
+
+function quotaNumber(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) && number >= 0 ? Math.round(number) : undefined
 }
 
 export async function readSseResponse(

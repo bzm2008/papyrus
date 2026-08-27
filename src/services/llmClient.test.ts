@@ -1,7 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { callOpenAICompatible, callOpenAICompatibleStream, fetchScallionProxyModels } from './llmClient'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { invoke } from '@tauri-apps/api/core'
+import {
+  callOpenAICompatible,
+  callOpenAICompatibleStream,
+  fetchScallionProxyModelCatalog,
+  fetchScallionProxyModels,
+  resolveChatEndpoint,
+} from './llmClient'
 import { defaultProviderConfigs } from './modelCatalog'
 import { useAppStore } from '../stores/useAppStore'
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 
 function jsonResponse(payload: unknown, status = 200) {
   return {
@@ -26,12 +35,287 @@ function setUsableModel(modelName = 'agnes-2.0-flash') {
   })
 }
 
-afterEach(() => {
+afterEach(async () => {
+  // Let the post-call quota refresh and its dynamic import settle before the
+  // next contract test replaces its fetch mock. Linux CI resolves the import
+  // one turn later than the local Windows runner.
+  await vi.dynamicImportSettled()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+  vi.mocked(invoke).mockReset()
+  delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
+  delete (window as Window & { __TAURI__?: unknown }).__TAURI__
   useAppStore.setState({
     scallionToken: undefined,
     scallionModels: [],
+    scallionPlan: undefined,
     scallionQuota: undefined,
+    modelRoutingMode: 'manual',
+  })
+})
+
+describe('desktop sampling parity', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      scallionPlan: {
+        key: 'deeper',
+        name: 'Deeper',
+        availableModels: [],
+        externalApi: true,
+        updatedAt: Date.now(),
+      },
+    })
+  })
+
+  it('preserves every sampling option when a non-streaming request falls back to Tauri', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+    vi.mocked(invoke).mockResolvedValue('native reply')
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        undefined,
+        {
+          temperature: 0.31,
+          maxTokens: 1234,
+          frequencyPenalty: 0.48,
+          presencePenalty: 0.22,
+        },
+      ),
+    ).resolves.toBe('native reply')
+
+    expect(invoke).toHaveBeenCalledWith('llm_chat', {
+      request: expect.objectContaining({
+        temperature: 0.31,
+        maxTokens: 1234,
+        frequencyPenalty: 0.48,
+        presencePenalty: 0.22,
+      }),
+    })
+  })
+
+  it('uses the native bridge first for desktop Scallion calls', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.mocked(invoke).mockResolvedValue('桌面原生回复')
+
+    await expect(
+      callOpenAICompatible(
+        {
+          ...defaultProviderConfigs.qwen36,
+          baseUrl: 'https://scallion.uno/api/papyrus/llm/models',
+        },
+        [{ role: 'user', content: '你好' }],
+        undefined,
+        { temperature: 0.22, maxTokens: 512 },
+      ),
+    ).resolves.toBe('桌面原生回复')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(invoke).toHaveBeenCalledWith('llm_chat', {
+      request: expect.objectContaining({
+        providerType: 'scallion_proxy',
+        baseUrl: 'https://api.sca-hub.cn/api/papyrus/llm',
+        routingMode: 'auto',
+        temperature: 0.22,
+        maxTokens: 512,
+      }),
+    })
+  })
+
+  it('uses the native bridge for desktop Scallion streaming when WebView fetch is not the trusted transport', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    const fetchMock = vi.fn()
+    const onToken = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.mocked(invoke).mockResolvedValue('原生流式降级回复')
+
+    await expect(
+      callOpenAICompatibleStream(defaultProviderConfigs.qwen36, [{ role: 'user', content: '你好' }], {
+        onToken,
+      }),
+    ).resolves.toBe('原生流式降级回复')
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(onToken).toHaveBeenCalledWith('原生流式降级回复')
+  })
+
+  it('canonicalizes built-in Scallion chat endpoints when persisted URLs are stale', () => {
+    expect(resolveChatEndpoint('https://scallion.uno/api/papyrus/llm/models', 'scallion_proxy')).toBe(
+      'https://api.sca-hub.cn/api/papyrus/llm/chat',
+    )
+    expect(resolveChatEndpoint('https://sca-hub.cn/api/papyrus/llm/chat', 'scallion_proxy')).toBe(
+      'https://api.sca-hub.cn/api/papyrus/llm/chat',
+    )
+    expect(resolveChatEndpoint('', 'scallion_proxy')).toBe(
+      'https://api.sca-hub.cn/api/papyrus/llm/chat',
+    )
+  })
+
+  it('keeps sampling options when an empty streaming body falls back to a regular request', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, body: null } as Response)
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: 'fallback reply' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        {
+          onToken: vi.fn(),
+          sampling: {
+            temperature: 0.31,
+            maxTokens: 1234,
+            frequencyPenalty: 0.48,
+            presencePenalty: 0.22,
+          },
+        },
+      ),
+    ).resolves.toBe('fallback reply')
+
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1].body)).toMatchObject({
+      stream: false,
+      temperature: 0.31,
+      max_tokens: 1234,
+      frequency_penalty: 0.48,
+      presence_penalty: 0.22,
+    })
+  })
+
+  it('downgrades a zero-token readable stream only once with the same sampling options', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({ read: async () => ({ done: true }) }),
+        },
+      } as unknown as Response)
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: 'zero token fallback' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        {
+          onToken: vi.fn(),
+          sampling: {
+            temperature: 0.31,
+            maxTokens: 1234,
+            frequencyPenalty: 0.48,
+            presencePenalty: 0.22,
+          },
+        },
+      ),
+    ).resolves.toBe('zero token fallback')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(fetchMock.mock.calls[1]?.[1].body)).toMatchObject({
+      stream: false,
+      temperature: 0.31,
+      max_tokens: 1234,
+      frequency_penalty: 0.48,
+      presence_penalty: 0.22,
+    })
+  })
+
+  it('downgrades a DONE-only SSE stream without trying to parse its marker as JSON', async () => {
+    const encoder = new TextEncoder()
+    let readCount = 0
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (readCount++ === 0) return { value: encoder.encode('data: [DONE]\n\n'), done: false }
+              return { done: true }
+            },
+          }),
+        },
+      } as unknown as Response)
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: 'done marker fallback' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        {
+          onToken: vi.fn(),
+          sampling: { temperature: 0.31, maxTokens: 1234, frequencyPenalty: 0.48, presencePenalty: 0.22 },
+        },
+      ),
+    ).resolves.toBe('done marker fallback')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not send a fallback request after a whitespace token was received', async () => {
+    const encoder = new TextEncoder()
+    let readCount = 0
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (readCount++ === 0) {
+              return { value: encoder.encode('data: {"choices":[{"delta":{"content":" "}}]}\n\n'), done: false }
+            }
+            return { done: true }
+          },
+        }),
+      },
+    } as unknown as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        { onToken: vi.fn(), sampling: { temperature: 0.31, maxTokens: 1234 } },
+      ),
+    ).rejects.toMatchObject({ code: 'protocol_error', recoverable: true })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('makes only one non-streaming attempt after an empty stream fallback fails transiently', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: { getReader: () => ({ read: async () => ({ done: true }) }) },
+      } as unknown as Response)
+      .mockResolvedValue(jsonResponse({ error: { message: 'temporary upstream error' } }, 503))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(
+        { ...defaultProviderConfigs.openai, apiKey: 'test-key' },
+        [{ role: 'user', content: '请写一段文字' }],
+        { onToken: vi.fn(), sampling: { temperature: 0.31, maxTokens: 1234 } },
+      ),
+    ).rejects.toMatchObject({ code: 'server_error' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -60,10 +344,13 @@ describe('Scallion production contract', () => {
       ),
     )
 
-    const models = await fetchScallionProxyModels(defaultProviderConfigs.qwen36)
+    const models = await fetchScallionProxyModels({
+      ...defaultProviderConfigs.qwen36,
+      baseUrl: 'https://scallion.uno/api/papyrus/llm/models',
+    })
 
-    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain(
-      '/models?include_unavailable=1',
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(
+      'https://api.sca-hub.cn/api/papyrus/llm/models',
     )
     expect(models).toEqual([
       expect.objectContaining({
@@ -77,6 +364,30 @@ describe('Scallion production contract', () => {
         contextWindowLabel: '1M',
       }),
     ])
+  })
+
+  it('retries once without routing_mode for an older gateway validation response', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(
+        jsonResponse(
+          { error: { message: 'Validation: Unsupported parameter(s): `routing_mode`', type: 'Bad Request', code: 400 } },
+          400,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ choices: [{ message: { content: '已兼容回复' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatible(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }]),
+    ).resolves.toBe('已兼容回复')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toHaveProperty('routing_mode', 'auto')
+    const legacyBody = JSON.parse(fetchMock.mock.calls[1][1].body)
+    expect(legacyBody).not.toHaveProperty('routing_mode')
+    expect(legacyBody).toHaveProperty('model', 'agnes-2.0-flash')
   })
 
   it('keeps server-declared plan restrictions so the UI can show unavailable models', async () => {
@@ -112,6 +423,156 @@ describe('Scallion production contract', () => {
     )
   })
 
+  it('normalizes manual/Auto permissions, plan quotas and removes duplicate catalog ids', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          data: [
+            {
+              id: 'agnes-2.0-flash',
+              name: 'Agnes 2.0 Flash',
+              manual_available: false,
+              auto_available: true,
+              auto_only: true,
+              context_window_tokens: 1048576,
+            },
+            {
+              id: 'agnes-2.0-flash',
+              context_window_label: '1M',
+            },
+          ],
+          plan: {
+            key: 'free',
+            name: 'Free',
+            manual_models: [],
+            auto_models: ['agnes-2.0-flash'],
+            auto_monthly_calls: 300,
+            auto_daily_calls: null,
+            auto_daily_unlimited: true,
+            external_api: 'deeper',
+          },
+        }),
+      ),
+    )
+
+    const catalog = await fetchScallionProxyModelCatalog(defaultProviderConfigs.qwen36)
+
+    expect(catalog.models).toHaveLength(1)
+    expect(catalog.models[0]).toEqual(
+      expect.objectContaining({
+        id: 'agnes-2.0-flash',
+        manualAvailable: false,
+        autoAvailable: true,
+        autoOnly: true,
+        contextWindowTokens: 1048576,
+        contextWindowLabel: '1M',
+      }),
+    )
+    expect(catalog.plan).toEqual(
+      expect.objectContaining({
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        autoMonthlyCalls: 300,
+        autoDailyCalls: null,
+        autoDailyUnlimited: true,
+        externalApi: 'deeper',
+      }),
+    )
+  })
+
+  it('sends Auto routing for a legacy manual-mode Free client when no manual models exist', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      modelRoutingMode: 'manual',
+      scallionPlan: {
+        key: 'free',
+        name: 'Free',
+        availableModels: ['agnes-2.0-flash'],
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        updatedAt: Date.now(),
+      },
+      scallionModels: [
+        {
+          id: 'agnes-2.0-flash',
+          label: 'Agnes 2.0 Flash',
+          modelName: 'agnes-2.0-flash',
+          manualAvailable: false,
+          autoAvailable: true,
+          autoOnly: true,
+          available: true,
+          planAvailable: true,
+          updatedAt: Date.now(),
+        },
+      ],
+    })
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ choices: [{ message: { content: '完成' } }] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.qwen36, modelName: 'agnes-2.0-flash' },
+        [{ role: 'user', content: '测试' }],
+      ),
+    ).resolves.toBe('完成')
+
+    const requestInit = (fetchMock.mock.calls as unknown as Array<[RequestInfo, RequestInit]>)[0]?.[1]
+    const requestBody = JSON.parse(String(requestInit?.body))
+    expect(requestBody).not.toHaveProperty('model')
+    expect(requestBody).toHaveProperty('routing_mode', 'auto')
+  })
+
+  it('classifies auto quota exhaustion regardless of HTTP status', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse(
+          { error: { message: 'Auto 次数已用尽', type: 'auto_quota_exhausted' } },
+          429,
+        ),
+      ),
+    )
+
+    await expect(
+      callOpenAICompatible(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }]),
+    ).rejects.toMatchObject({ code: 'auto_quota_exhausted', status: 429 })
+  })
+
+  it('does not downgrade an explicit Auto quota rejection into a second chat request', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token', modelRoutingMode: 'auto' })
+    setUsableModel()
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+      void _input
+      void _init
+      return jsonResponse(
+        {
+          error: {
+            message: '当前套餐的 Auto 调用额度已用完',
+            type: 'auto_quota_exhausted',
+            auto_quota: { monthly_limit: 300, monthly_remaining: 0, daily_remaining: null },
+          },
+        },
+        429,
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatibleStream(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }], { onToken: vi.fn() }),
+    ).rejects.toMatchObject({ code: 'auto_quota_exhausted', status: 429 })
+
+    const chatRequests = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/chat') && (init as RequestInit | undefined)?.method === 'POST',
+    )
+    expect(chatRequests).toHaveLength(1)
+  })
+
   it('classifies model catalog network failures as recoverable', async () => {
     useAppStore.setState({ scallionToken: 'jwt-token' })
     vi.stubGlobal(
@@ -127,9 +588,86 @@ describe('Scallion production contract', () => {
     })
   })
 
+  it('uses the canonical Scallion model catalog even if local base URL is blank', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash' }],
+        plan: { key: 'free', name: 'Free' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchScallionProxyModels({ ...defaultProviderConfigs.qwen36, baseUrl: '' })).resolves.toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.sca-hub.cn/api/papyrus/llm/models',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
+  it('preserves the top-level plan metadata alongside the full model directory', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          data: [{ id: 'agnes-2.0-flash', name: 'Agnes 2.0 Flash' }],
+          plan: {
+            key: 'briefly',
+            name: 'Briefly',
+            expires_at: '2026-08-12T00:00:00.000Z',
+            available_models: ['agnes-2.0-flash'],
+          },
+        }),
+      ),
+    )
+
+    const catalog = await fetchScallionProxyModelCatalog(defaultProviderConfigs.qwen36)
+
+    expect(catalog.plan).toEqual(
+      expect.objectContaining({
+        key: 'briefly',
+        name: 'Briefly',
+        expiresAt: '2026-08-12T00:00:00.000Z',
+        availableModels: ['agnes-2.0-flash'],
+      }),
+    )
+    expect(catalog.models).toHaveLength(1)
+  })
+
+  it('classifies a malformed successful model catalog response as a recoverable protocol error', async () => {
+    useAppStore.setState({ scallionToken: 'jwt-token' })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError('invalid json')
+          },
+        }) as unknown as Response,
+      ),
+    )
+
+    await expect(fetchScallionProxyModels(defaultProviderConfigs.qwen36)).rejects.toMatchObject({
+      code: 'protocol_error',
+      recoverable: true,
+    })
+  })
+
   it('refreshes access after a plan-model 403 and retries once with the returned model id', async () => {
     useAppStore.setState({
       scallionToken: 'jwt-token',
+      modelRoutingMode: 'auto',
+      scallionPlan: {
+        key: 'free',
+        name: 'Free',
+        availableModels: [],
+        manualModels: [],
+        autoModels: ['agnes-2.0-flash'],
+        updatedAt: Date.now(),
+      },
       scallionModels: [
         {
           id: 'nemotron-越权',
@@ -164,7 +702,12 @@ describe('Scallion production contract', () => {
               context_window_label: '1M',
             },
           ],
-          plan: { key: 'free', name: 'Free' },
+          plan: {
+            key: 'free',
+            name: 'Free',
+            manual_models: [],
+            auto_models: ['agnes-2.0-flash'],
+          },
         }),
       )
       .mockResolvedValueOnce(
@@ -172,7 +715,13 @@ describe('Scallion production contract', () => {
           points_balance: 504,
           balance: 504,
           quota: 504,
-          plan: { key: 'free', name: 'Free', expires_at: null },
+          plan: {
+            key: 'free',
+            name: 'Free',
+            manual_models: [],
+            auto_models: ['agnes-2.0-flash'],
+            expires_at: null,
+          },
         }),
       )
       .mockResolvedValueOnce(
@@ -192,7 +741,7 @@ describe('Scallion production contract', () => {
 
     expect(result).toBe('已切换到套餐内模型')
     expect(fetchMock).toHaveBeenCalledTimes(4)
-    expect(JSON.parse(fetchMock.mock.calls[3][1].body).model).toBe('agnes-2.0-flash')
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body)).not.toHaveProperty('model')
     expect(useAppStore.getState().providerConfigs.qwen36.modelName).toBe('agnes-2.0-flash')
     expect(useAppStore.getState().scallionModels[0]?.id).toBe('agnes-2.0-flash')
   })
@@ -259,7 +808,13 @@ describe('Scallion production contract', () => {
       .mockResolvedValueOnce(
         jsonResponse({
           points_balance: 503,
-          plan: { key: 'free', name: 'Free', expires_at: null },
+          plan: {
+            key: 'free',
+            name: 'Free',
+            manual_models: [],
+            auto_models: ['agnes-2.0-flash'],
+            expires_at: null,
+          },
         }),
       )
     vi.stubGlobal('fetch', fetchMock)
@@ -283,6 +838,76 @@ describe('Scallion production contract', () => {
       callOpenAICompatible(defaultProviderConfigs.qwen36, [{ role: 'user', content: '测试' }]),
     ).rejects.toMatchObject({ code: 'protocol_error' })
     expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('blocks external providers without a Deeper entitlement before network access', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      scallionPlan: {
+        key: 'free',
+        name: 'Free',
+        availableModels: [],
+        externalApi: false,
+        updatedAt: Date.now(),
+      },
+    })
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.openai, apiKey: 'legacy-key' },
+        [{ role: 'user', content: '测试' }],
+      ),
+    ).rejects.toMatchObject({ code: 'forbidden', status: 403 })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('allows a user-configured custom model on every Scallion plan', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      scallionPlan: {
+        key: 'free',
+        name: 'Free',
+        availableModels: [],
+        externalApi: false,
+        updatedAt: Date.now(),
+      },
+    })
+    const fetchMock = vi.fn(async () => jsonResponse({ choices: [{ message: { content: '自定义模型回复' } }] }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.custom, baseUrl: 'https://custom.example/v1', apiKey: 'custom-key', modelName: 'my-model' },
+        [{ role: 'user', content: '测试' }],
+      ),
+    ).resolves.toBe('自定义模型回复')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows external providers only when the gateway explicitly grants Deeper access', async () => {
+    useAppStore.setState({
+      scallionToken: 'jwt-token',
+      scallionPlan: {
+        key: 'deeper',
+        name: 'Deeper',
+        availableModels: [],
+        externalApi: true,
+        updatedAt: Date.now(),
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ choices: [{ message: { content: '完成' } }] })),
+    )
+
+    await expect(
+      callOpenAICompatible(
+        { ...defaultProviderConfigs.openai, apiKey: 'deeper-key' },
+        [{ role: 'user', content: '测试' }],
+      ),
+    ).resolves.toBe('完成')
   })
 
   it('does not retry a stream after receiving partial content', async () => {

@@ -50,7 +50,13 @@ export function BrowserBridgeSettings() {
     try {
       const next = await startBrowserBridgePairing()
       setPairing(next)
-      setMessage('请在扩展弹窗中粘贴 WebSocket、Token 和 Nonce，并主动连接当前标签页。')
+      try {
+        await navigator.clipboard?.writeText(JSON.stringify({ wsUrl: next.wsUrl, token: next.token, nonce: next.nonce }))
+      } catch {
+        // Clipboard access is optional; the connection remains available in the
+        // compatibility details below.
+      }
+      setMessage('Browser Bridge 已自动待命。打开扩展后点击“连接当前标签页”即可；兼容配对信息已复制。')
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '启动配对失败')
     }
@@ -80,7 +86,7 @@ export function BrowserBridgeSettings() {
       <div className="flex items-center justify-between gap-2">
         <div>
           <div className="font-medium">Browser Bridge</div>
-          <div className="mt-1 text-xs text-[#817a6d]">Chromium MV3 · 仅监听 127.0.0.1 · 当前标签页授权</div>
+          <div className="mt-1 text-xs text-[#817a6d]">Chromium MV3 · 自动待命 · 仅监听 127.0.0.1 · 当前标签页授权</div>
         </div>
         {(() => {
           const state = status.connectionState ?? deriveBrowserBridgeState(status)
@@ -88,7 +94,7 @@ export function BrowserBridgeSettings() {
         })()}
       </div>
       <div className="mt-2 flex flex-wrap gap-2">
-        <button type="button" onClick={() => void pair()} className="rounded-md bg-[#20201d] px-2.5 py-1.5 text-xs text-white">生成配对信息</button>
+        <button type="button" onClick={() => void pair()} className="rounded-md bg-[#20201d] px-2.5 py-1.5 text-xs text-white">准备扩展连接</button>
         <button type="button" onClick={() => void refresh()} className="rounded-md border border-[#d8cfc0] px-2.5 py-1.5 text-xs">刷新</button>
         {status.paired ? <button type="button" onClick={() => void disconnect()} className="rounded-md border border-[#e6c9bf] px-2.5 py-1.5 text-xs text-[#9a4338]">断开</button> : null}
       </div>
@@ -98,7 +104,17 @@ export function BrowserBridgeSettings() {
         {status.origin ? <div className="truncate">来源：{status.origin}</div> : null}
         {status.error ? <div className="text-[#9a4338]">健康状态：{status.error}</div> : null}
       </div>
-      {pairing ? <div className="mt-2 grid gap-1 break-all rounded-md bg-[#fffefa] p-2 text-[11px] text-[#625c50]"><div>WebSocket：{pairing.wsUrl}</div><div>Token：{pairing.token}</div><div>Nonce：{pairing.nonce}</div><button type="button" onClick={() => void copyPairing()} className="mt-1 justify-self-start rounded-md border border-[#d8cfc0] px-2 py-1 text-[11px]">复制配对信息</button></div> : null}
+      {pairing ? (
+        <details className="mt-2 rounded-md bg-[#fffefa] px-2.5 py-2 text-[11px] text-[#625c50]">
+          <summary className="cursor-pointer text-[#817a6d]">兼容模式：查看配对信息</summary>
+          <div className="mt-2 grid gap-1 break-all">
+            <div>WebSocket：{pairing.wsUrl}</div>
+            <div>Token：{pairing.token}</div>
+            <div>Nonce：{pairing.nonce}</div>
+            <button type="button" onClick={() => void copyPairing()} className="mt-1 justify-self-start rounded-md border border-[#d8cfc0] px-2 py-1 text-[11px]">复制配对信息</button>
+          </div>
+        </details>
+      ) : null}
       {message ? <div className="mt-2 text-xs text-[#817a6d]">{message}</div> : null}
     </div>
   )

@@ -39,6 +39,28 @@ describe('WPS agent streaming protocol', () => {
     expect(runtime.shouldFallbackToNonStream?.(false, new DOMException('Aborted', 'AbortError'))).toBe(false)
   })
 
+  it('does not retry a denied Auto or points request as non-streaming', () => {
+    const autoExhausted = Object.assign(new Error('Auto 已用完'), {
+      code: 'auto_quota_exhausted',
+      status: 429,
+      autoQuota: { monthly_limit: 300, monthly_remaining: 0, daily_remaining: null },
+    })
+    const pointsExhausted = Object.assign(new Error('积分不足'), { code: 'quota_exhausted', status: 402 })
+
+    expect(runtime.shouldFallbackToNonStream?.(false, autoExhausted)).toBe(false)
+    expect(runtime.shouldFallbackToNonStream?.(false, pointsExhausted)).toBe(false)
+    expect(classifyWpsAgentError(autoExhausted)).toMatchObject({
+      code: 'auto_quota_exhausted',
+      retryable: false,
+      message: expect.stringContaining('本条消息未发送'),
+    })
+    expect(classifyWpsAgentError(pointsExhausted)).toMatchObject({
+      code: 'quota_exhausted',
+      retryable: false,
+      message: expect.stringContaining('积分余额不足'),
+    })
+  })
+
   it('accepts split data prefixes and gateway JSON responses', () => {
     expect(runtime.parseSseChunks?.([
       'da',
@@ -123,6 +145,90 @@ describe('WPS agent streaming protocol', () => {
       status: 401,
       retryable: false,
     })
+  })
+
+  it('keeps Free Auto callable when every listed model is manual-restricted', async () => {
+    const fetchMock = vi.fn()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [{
+          id: 'agnes-2.0-flash',
+          plan_available: false,
+          manual_available: false,
+          auto_available: true,
+          auto_only: true,
+        }],
+        plan: { key: 'free', manual_models: [], auto_models: ['agnes-2.0-flash'] },
+      }),
+    })
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'Auto 已回复' } }] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('window', {
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+    })
+
+    await expect(
+      unifiedAgent.callScallion(
+        'free-auto-test-token',
+        'agnes-2.0-flash',
+        [{ role: 'user', content: '测试' }],
+        0.2,
+        128,
+      ),
+    ).resolves.toMatchObject({ content: 'Auto 已回复' })
+
+    const chatRequests = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/llm/chat') && (init as RequestInit | undefined)?.method === 'POST',
+    )
+    expect(chatRequests).toHaveLength(1)
+  })
+
+  it('does not issue a non-stream fallback after the gateway rejects Auto quota', async () => {
+    const fetchMock = vi.fn()
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: 'agnes-2.0-flash', plan_available: true }] }),
+    })
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        error: {
+          type: 'auto_quota_exhausted',
+          message: 'Auto 已用完',
+          auto_quota: { monthly_limit: 300, monthly_remaining: 0, daily_remaining: null },
+        },
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('window', {
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+    })
+
+    await expect(
+      unifiedAgent.callScallion(
+        'wps-auto-quota-test-token',
+        'agnes-2.0-flash',
+        [{ role: 'user', content: '测试' }],
+        0.2,
+        128,
+        { stream: true },
+      ),
+    ).rejects.toMatchObject({ code: 'auto_quota_exhausted', retryable: false })
+
+    const chatRequests = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).endsWith('/llm/chat') && (init as RequestInit | undefined)?.method === 'POST',
+    )
+    expect(chatRequests).toHaveLength(1)
   })
 
   it('rejects a truncated SSE response after partial content', async () => {

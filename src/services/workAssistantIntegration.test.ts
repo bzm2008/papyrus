@@ -78,6 +78,36 @@ describe('controlled work assistant integration', () => {
     expect(useWorkAssistantStore.getState().runs['run-2'].status).toBe('cancelled')
   })
 
+  it('runs an allowlisted terminal request only after one approval', async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'work_assistant_preview') return { id: 'terminal-preview', revision: '1', risk: 'high', title: '终端诊断', targetSummary: 'Git 状态', impactSummary: '只读诊断', reversible: false, expiresAt: Date.now() + 60_000 }
+      if (command === 'work_assistant_approve') return { token: 'terminal-token', previewId: 'terminal-preview', expires: Date.now() + 60_000 }
+      if (command === 'work_assistant_execute_native_action') return { ok: true, summary: '只读诊断已完成。', data: { program: 'git_status', exitCode: 0, stdout: 'clean', stderr: '', truncated: false, durationMs: 4 } }
+      return undefined
+    })
+    setWorkAssistantInvokerForTests(invoke)
+    dispatchOrderedWorkAssistantEvent({ type: 'run.started', runId: 'terminal-run', at: 1 })
+    const promise = executeAssistantToolCall({
+      runId: 'terminal-run',
+      toolCall: {
+        id: 'terminal-tool',
+        runId: 'terminal-run',
+        name: 'terminal_run',
+        intent: '检查项目状态',
+        arguments: { operation: 'git_status', rootId: 'project', cwd: '' },
+        status: 'queued',
+        startedAt: 1,
+      },
+    })
+    expect(resolveAssistantApproval(await waitForApproval('terminal-run'), 'once')).toBe(true)
+    await expect(promise).resolves.toMatchObject({ ok: true })
+    expect(invoke).toHaveBeenCalledWith('work_assistant_preview', expect.objectContaining({
+      request: expect.objectContaining({ toolName: 'terminal_run', arguments: { operation: 'git_status', rootId: 'project', cwd: '' } }),
+    }))
+    expect(invoke).toHaveBeenCalledWith('work_assistant_execute_native_action', { previewId: 'terminal-preview', approvalToken: 'terminal-token' })
+    expect(invoke).not.toHaveBeenCalledWith('work_assistant_terminal_run', expect.anything())
+  })
+
   it('keeps a stale preview recoverable instead of replaying approval', async () => {
     dispatchOrderedWorkAssistantEvent({ type: 'run.started', runId: 'run-3', at: 1 })
     setWorkAssistantInvokerForTests(async (command) => {

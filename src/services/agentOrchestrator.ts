@@ -23,6 +23,7 @@ import {
   callOpenAICompatible,
   callOpenAICompatibleStream,
   canCallProvider,
+  LlmRequestError,
   type ChatMessage,
 } from './llmClient'
 import { getAgentSamplingProfile, type AgentSamplingProfile } from './agentSamplingService'
@@ -36,6 +37,8 @@ import {
 } from './secretaryGoalService'
 import {
   classifySecretaryTask,
+  isCapabilityQuestion,
+  isConversationalShortcut,
   type SecretaryTaskClassification,
   type SecretaryTaskComplexity,
 } from './secretaryTaskClassifier'
@@ -43,8 +46,16 @@ import { enabledToolDefinitions } from './workAssistantRegistry'
 import { getWorkAssistantCapabilities } from './workAssistantClient'
 import { runWorkAssistantAgentLoop } from './workAssistantAgentLoop'
 import { executeAssistantToolCall, dispatchOrderedWorkAssistantEvent } from './workAssistantRuntime'
-import { finishSecretaryRun, startSecretaryRun } from './secretaryRunController'
+import { finishSecretaryRun, secretaryRunPauseRequested, startSecretaryRun } from './secretaryRunController'
+import {
+  beginSecretaryLedgerRun,
+  checkpointSecretaryLedgerRun,
+  checkpointSecretaryLedgerToolResult,
+  finishSecretaryLedgerRun,
+  type SecretaryLedgerRun,
+} from './secretaryLedgerRuntime'
 import { useWorkAssistantStore } from '../stores/useWorkAssistantStore'
+import type { WorkAssistantEvent } from './workAssistantProtocol'
 import { findSemanticCacheHit, rememberSemanticResult } from './semanticCacheService'
 import {
   getEnabledStudioAgents,
@@ -70,6 +81,7 @@ import {
   type FlowThinkingEffort,
   type FlowTrace,
   type ImportedResource,
+  type LlmProviderConfig,
   type SecretaryPlanDraft,
   useAppStore,
 } from '../stores/useAppStore'
@@ -112,10 +124,93 @@ export type AgentRunOutcome = {
   runId: string
   result?: AgentRunResult
   error?: string
+  conversationOnly?: boolean
 }
 
-export function shouldContinueSecretaryGoalCycle(outcome: Pick<AgentRunOutcome, 'status'> | undefined) {
-  return outcome?.status === 'completed'
+export function shouldContinueSecretaryGoalCycle(
+  outcome: Pick<AgentRunOutcome, 'status' | 'conversationOnly'> | undefined,
+) {
+  return outcome?.status === 'completed' && outcome.conversationOnly !== true
+}
+
+/**
+ * A recovery run must own the persisted task it was asked to resume.  The
+ * ledger claim is a safety boundary: continuing without it could execute an
+ * old request twice or operate on another scheduler's task.
+ */
+export function assertPersistentLedgerTaskClaimed(
+  taskId: string | undefined,
+  ledgerRun: Pick<SecretaryLedgerRun, 'taskId'> | undefined,
+): asserts ledgerRun is Pick<SecretaryLedgerRun, 'taskId'> {
+  if (taskId && (!ledgerRun || ledgerRun.taskId !== taskId)) {
+    throw new Error(`持久任务 ${taskId} 未能安全认领，已停止恢复。`)
+  }
+}
+
+/**
+ * The visible message must distinguish a request that was never accepted
+ * from a transport result whose charge/execution state is genuinely unknown.
+ */
+export function formatSecretaryRunFailure(error: unknown) {
+  if (error instanceof LlmRequestError) {
+    if (error.code === 'auto_quota_exhausted') {
+      const quota = error.autoQuota && typeof error.autoQuota === 'object'
+        ? error.autoQuota as Record<string, unknown>
+        : undefined
+      const monthlyRemaining = numberFromQuota(quota?.monthly_remaining ?? quota?.monthlyRemaining)
+      const dailyRemaining = numberFromQuota(quota?.daily_remaining ?? quota?.dailyRemaining)
+      const monthlyUsed = numberFromQuota(quota?.monthly_used ?? quota?.monthlyUsed)
+      const monthlyLimit = numberFromQuota(quota?.monthly_limit ?? quota?.monthlyLimit)
+      if (monthlyRemaining === 0) {
+        const used = monthlyUsed ?? monthlyLimit ?? 0
+        const limit = monthlyLimit ?? used
+        return `本月 Auto 额度已用完，已用 ${used} / ${limit} 次，请等待下月刷新或升级套餐。本条消息未发送。`
+      }
+      if (dailyRemaining === 0) {
+        return '今日 Auto 额度已用完，明日刷新；本条消息未发送。'
+      }
+      return 'Auto 额度已用完，本条消息未发送。请等待额度刷新或升级套餐。'
+    }
+    if (error.code === 'quota_exhausted') {
+      return '积分余额不足，本条消息未发送。请充值或进入主站升级套餐。'
+    }
+    if (error.code === 'unauthorized') {
+      return '登录已过期，请重新登录主站。本条消息未发送。'
+    }
+    if (error.code === 'plan_model_forbidden') {
+      return '当前套餐不可用该模型。本条消息未发送；已刷新模型目录和额度，请选择套餐内模型后重试。'
+    }
+    if (error.code === 'model_unavailable') {
+      return '当前模型已下线或暂不可用。本条消息未发送；请刷新模型目录后重试。'
+    }
+    if (error.code === 'request_uncertain') {
+      return 'Scallion 请求结果不确定，未自动重试以避免重复扣费。请确认额度和历史记录后再重试。'
+    }
+  }
+  return `本轮请求未完成：${error instanceof Error ? error.message : '未知错误'}。未执行后续工具操作，可修改后重试。`
+}
+
+function numberFromQuota(value: unknown) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) && number >= 0 ? Math.round(number) : undefined
+}
+
+/** Low effort is deliberately a single-agent path to keep latency and cost predictable. */
+export function canUseSecretarySubAgents(thinkingEffort: FlowThinkingEffort) {
+  return thinkingEffort !== 'low'
+}
+
+/** Lightweight turns skip persistent scheduling, Todo, tools, and sub-agents. */
+export function isLightweightSecretaryTask(prompt: string) {
+  const classification = classifySecretaryTask(prompt)
+  if (classification.complexity !== 'simple' || classification.domain !== 'writing') {
+    return false
+  }
+
+  return !shouldCreateDocumentPatch(prompt)
+    && !hasLongformIntent(prompt)
+    && !hasRealtimeOrExternalIntent(prompt)
+    && !shouldUseProjectContext(prompt, false)
 }
 
 type AgentOutput = {
@@ -134,11 +229,15 @@ type SendFlowMessageOptions = Partial<Omit<AgentHarnessRunInput, 'prompt' | 'mod
   goalId?: string
   guidanceNotes?: string[]
   queuedInputId?: string
+  /** Existing persisted task to claim when resuming from the task center. */
+  ledgerTaskId?: string
 }
 
 const sharedAgentRules = [
-  'Papyrus 是文学创作工作站，目标是帮助用户完成真实写作工作。',
+  'Papyrus 是一位偏文科的本地优先秘书，默认帮助用户完成写作、研究、沟通、整理和办公工作。',
   '你可以使用联网搜索、项目上下文和文稿补丁工具。不要因为训练截止时间而拒绝实时问题；需要实时信息时应主动规划联网搜索。',
+  '秘书模式具备受控的电脑、浏览器和终端助手：可以读取授权工作区、查看桌面状态、打开已识别的常见应用或网址、读取已连接浏览器页面，并在安全预览和用户审批后运行只读 Git/版本/系统诊断。终端不接受 shell 字符串、项目脚本或任意可执行路径，密码、验证码、支付和敏感表单永远不会代为操作。',
+  '不要笼统声称“无法访问电脑或浏览器”；如果用户只是询问能力，说明上述真实能力和审批边界。如果用户提出具体操作，交给受控电脑助手或 Browser Bridge，不要虚构已完成。',
   '事实、推断、设定和建议必须分开。不要编造来源。',
   '只有当任务需要产出正文、续写、改写、插入、替换或用户明确要求写入文稿时，才生成文稿补丁。',
   '对话说明、来源说明、计划过程、工作室 Agent 结论不要写入文稿。',
@@ -198,66 +297,225 @@ export async function sendFlowMessage(
   store.setLlmRunState('running', '秘书长正在判断任务路径')
 
   let runSignal: AbortSignal | undefined
+  let ledgerRun: SecretaryLedgerRun | undefined
+  let ledgerFinalized = false
+  let ledgerWriteChain: Promise<void> = Promise.resolve()
+  const toolNamesById = new Map<string, string>()
+  const enqueueLedgerWrite = (write: () => Promise<void>) => {
+    ledgerWriteChain = ledgerWriteChain.then(write).catch(() => {})
+  }
+  const emitWorkAssistantEvent = (event: WorkAssistantEvent) => {
+    dispatchOrderedWorkAssistantEvent(event)
+    if (!ledgerRun) return
+
+    if (event.type === 'tool.started') {
+      toolNamesById.set(event.toolCall.id, event.toolCall.name)
+      return
+    }
+
+    if (event.type === 'approval.required') {
+      enqueueLedgerWrite(async () => {
+        await checkpointSecretaryLedgerRun(ledgerRun, {
+          phase: 'awaiting_approval',
+          summary: '受控操作已生成安全预览，等待用户确认。',
+          nextStep: '用户确认后继续执行；拒绝则保留为可恢复任务。',
+          status: 'awaiting_approval',
+        })
+      })
+      return
+    }
+
+    if (event.type === 'tool.progress') {
+      enqueueLedgerWrite(async () => {
+        await checkpointSecretaryLedgerRun(ledgerRun, {
+          phase: 'tool_progress',
+          summary: '受控工具正在执行。',
+          nextStep: '等待工具返回安全摘要。',
+          status: 'running',
+        })
+      })
+      return
+    }
+
+    if (event.type === 'tool.completed') {
+      const toolName = toolNamesById.get(event.toolCallId) ?? 'other'
+      enqueueLedgerWrite(async () => {
+        await checkpointSecretaryLedgerToolResult(ledgerRun, {
+          toolName,
+          ok: event.result.ok,
+          errorCode: event.result.errorCode,
+        })
+      })
+    }
+  }
+
+  const finalizeLedger = async (input: {
+    status: 'completed' | 'failed' | 'cancelled' | 'paused'
+    summary: string
+    nextStep?: string
+  }) => {
+    if (!ledgerRun || ledgerFinalized) return
+    ledgerFinalized = true
+    try {
+      await ledgerWriteChain
+      await finishSecretaryLedgerRun(ledgerRun, input)
+    } catch (ledgerError) {
+      // The ledger is a persistence enhancement. A failed write must not turn
+      // an otherwise valid model result into a duplicate/retry request.
+      useAppStore.getState().addFlowTrace({
+        kind: 'memory',
+        title: '秘书账本暂不可用',
+        detail: ledgerError instanceof Error ? ledgerError.message : '未能保存本轮检查点。',
+        status: 'error',
+        agentId: 'writer',
+        endedAt: Date.now(),
+      })
+    }
+  }
+
   try {
     runSignal = startSecretaryRun(run.id)
     throwIfAborted(runSignal)
+
+    // Social turns are intentionally kept outside the secretary planner. A
+    // greeting should not initialize the ledger, tools, Todo list, or Agent
+    // traces because none of those are part of the user's requested work.
+    if (isConversationalShortcut(content) || isLightweightSecretaryTask(content)) {
+      const conversational = isConversationalShortcut(content)
+      const response = conversational
+        ? await runConversationalShortcut(provider, content, runSignal, thinkingEffort)
+        : await runLightweightSecretaryResponse(provider, content, runSignal, thinkingEffort)
+      finishAgentRun(run, {
+        status: 'completed',
+        response,
+        summary: conversational
+          ? '简短寒暄已直接回复，未进入任务编排。'
+          : '轻量秘书任务已直接完成，未创建 Todo、工具或子 Agent。',
+      })
+      store.addFlowMessage({ role: 'assistant', agentId: 'writer', content: response })
+      store.setLlmRunState('idle', '铭荼已回复')
+      return {
+        status: 'completed',
+        runId: run.id,
+        result: { response },
+        conversationOnly: true,
+      }
+    }
+
+    try {
+      ledgerRun = await beginSecretaryLedgerRun({
+        runId: run.id,
+        prompt: executionContent,
+        title: displayContent || content,
+        taskId: harnessInput.ledgerTaskId,
+      })
+    } catch (ledgerError) {
+      // Runtime initialization is fail-closed: legacy/local UI execution can
+      // continue while new persistent scheduling remains disabled.
+      useAppStore.getState().addFlowTrace({
+        kind: 'memory',
+        title: '秘书账本未启用',
+        detail: ledgerError instanceof Error ? ledgerError.message : '当前运行未建立持久检查点。',
+        status: 'error',
+        agentId: 'writer',
+        endedAt: Date.now(),
+      })
+    }
+    // A task-center resume is different from a normal local run: if its
+    // persisted task was not claimed, stop before any model or tool work.
+    assertPersistentLedgerTaskClaimed(harnessInput.ledgerTaskId, ledgerRun)
+    if (ledgerRun) {
+      try {
+        await checkpointSecretaryLedgerRun(ledgerRun, {
+          phase: 'planning',
+          summary: '已收到任务，正在判断写作、研究或电脑协助路径。',
+          nextStep: '完成公开计划后开始执行。',
+        })
+      } catch {
+        // See finalizeLedger: persistence is best effort and never a reason
+        // to retry a model call.
+      }
+    }
     const classification = classifySecretaryTask(executionContent)
     let routedExecutionContent = executionContent
 
+    if (ledgerRun?.memoryContext) {
+      routedExecutionContent = [executionContent, ledgerRun.memoryContext].join('\n\n')
+    }
+
     if (classification.domain !== 'writing') {
       const signal = runSignal
-        const capabilityStatus = await getWorkAssistantCapabilities()
-        const platform = capabilityStatus.find((status) => status.platform)?.platform ?? 'windows'
-        const availability = {
-          workspace: capabilityStatus.some((status) => status.toolset === 'workspace' && status.available),
-          desktop: capabilityStatus.some((status) => status.toolset === 'desktop' && status.available),
-          browser: capabilityStatus.some((status) => status.toolset === 'browser' && status.available),
-          // Project resources are a local Papyrus store. The project executor
-          // still requires the same inline approval, but has no native bridge
-          // health check of its own.
-          project: true,
+      const capabilityStatus = await getWorkAssistantCapabilities()
+      const platform = capabilityStatus.find((status) => status.platform)?.platform ?? 'windows'
+      const availability = {
+        workspace: capabilityStatus.some((status) => status.toolset === 'workspace' && status.available),
+        desktop: capabilityStatus.some((status) => status.toolset === 'desktop' && status.available),
+        browser: capabilityStatus.some((status) => status.toolset === 'browser' && status.available),
+        // Project resources are a local Papyrus store. The project executor
+        // still requires the same inline approval, but has no native bridge
+        // health check of its own.
+        project: true,
+      }
+      const definitions = enabledToolDefinitions({
+        platform,
+        enabledToolsets:
+          classification.domain === 'browser'
+            ? ['browser', 'project']
+            : classification.domain === 'mixed'
+              ? ['workspace', 'desktop', 'browser', 'project']
+              : ['workspace', 'desktop'],
+        availability,
+        availableToolNames: capabilityStatus.filter((status) => status.available).map((status) => status.name),
+      }).filter((tool) => classification.domain !== 'mixed' || tool.defaultRisk === 'read')
+      const capabilityNotes = capabilityStatus
+        .filter((status) => !status.available)
+        .slice(0, 24)
+        .map((status) => `${status.name}: ${status.reason || '当前不可用'}`)
+      const workRouting = selectModelForRole('agent', {
+        complexity: classification.complexity,
+        writeIntent: false,
+        thinkingEffort,
+      })
+      if (!canCallProvider(workRouting.provider)) {
+        throw new Error('当前没有可用模型来规划受控电脑操作。')
+      }
+      const sampling = getAgentSamplingProfile('agent_output', thinkingEffort)
+      const workResult = await runWorkAssistantAgentLoop({
+        runId: run.id,
+        prompt: routedExecutionContent,
+        toolNames: definitions.map((tool) => tool.name),
+        toolSchemas: definitions.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+        capabilityNotes,
+        modelCall: (messages, currentSignal) => callOpenAICompatible(workRouting.provider, messages, currentSignal, sampling),
+        executeTool: (toolCall, currentSignal) => executeAssistantToolCall({ runId: run.id, toolCall, signal: currentSignal }),
+        finalStream: classification.domain === 'work_assistant'
+          ? async (outline, receipts, onToken, currentSignal) => callOpenAICompatibleStream(
+              workRouting.provider,
+              [
+                { role: 'system', content: '你是 Papyrus 电脑助手。只根据已验证的工具结果给出简洁、可核对的最终答复，不编造本地路径或完成状态。' },
+                { role: 'user', content: `用户请求：${executionContent}\n\n工具回执：\n${receipts}\n\n答复提纲：${outline}` },
+              ],
+              { signal: currentSignal, onToken, sampling },
+            )
+          : undefined,
+        emit: emitWorkAssistantEvent,
+        signal,
+        collectionOnly: classification.domain === 'mixed',
+      })
+
+        if (ledgerRun) {
+          await ledgerWriteChain
+          try {
+            await checkpointSecretaryLedgerRun(ledgerRun, {
+              phase: 'tool_collection',
+              summary: `已完成 ${workResult.toolResults.length} 个受控工具步骤，正在整理结果。`,
+              nextStep: classification.domain === 'work_assistant' ? '生成可核对的最终答复。' : '将工具结果交给秘书长整合。',
+              status: 'running',
+            })
+          } catch {
+            // Best effort; see finalizeLedger.
+          }
         }
-        const definitions = enabledToolDefinitions({
-          platform,
-          enabledToolsets:
-            classification.domain === 'browser'
-              ? ['browser', 'project']
-              : classification.domain === 'mixed'
-                ? ['workspace', 'desktop', 'browser', 'project']
-                : ['workspace', 'desktop'],
-          availability,
-          availableToolNames: capabilityStatus.filter((status) => status.available).map((status) => status.name),
-        }).filter((tool) => classification.domain !== 'mixed' || tool.defaultRisk === 'read')
-        const workRouting = selectModelForRole('agent', {
-          complexity: classification.complexity,
-          writeIntent: false,
-          thinkingEffort,
-        })
-        if (!canCallProvider(workRouting.provider)) {
-          throw new Error('当前没有可用模型来规划受控电脑操作。')
-        }
-        const sampling = getAgentSamplingProfile('agent_output', thinkingEffort)
-        const workResult = await runWorkAssistantAgentLoop({
-          runId: run.id,
-          prompt: executionContent,
-          toolNames: definitions.map((tool) => tool.name),
-          toolSchemas: definitions.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
-          modelCall: (messages, currentSignal) => callOpenAICompatible(workRouting.provider, messages, currentSignal, sampling),
-          executeTool: (toolCall, currentSignal) => executeAssistantToolCall({ runId: run.id, toolCall, signal: currentSignal }),
-          finalStream: classification.domain === 'work_assistant'
-            ? async (outline, receipts, onToken, currentSignal) => callOpenAICompatibleStream(
-                workRouting.provider,
-                [
-                  { role: 'system', content: '你是 Papyrus 电脑助手。只根据已验证的工具结果给出简洁、可核对的最终答复，不编造本地路径或完成状态。' },
-                  { role: 'user', content: `用户请求：${executionContent}\n\n工具回执：\n${receipts}\n\n答复提纲：${outline}` },
-                ],
-                { signal: currentSignal, onToken, sampling },
-              )
-            : undefined,
-          emit: dispatchOrderedWorkAssistantEvent,
-          signal,
-          collectionOnly: classification.domain === 'mixed',
-        })
 
         if (classification.domain === 'work_assistant') {
           throwIfAborted(runSignal)
@@ -268,6 +526,11 @@ export async function sendFlowMessage(
             summary: `受控电脑助手完成 ${workResult.toolResults.length} 个工具步骤。`,
           })
           useAppStore.getState().setLlmRunState('idle', '电脑助手已完成本轮操作')
+          await finalizeLedger({
+            status: 'completed',
+            summary: `受控电脑助手完成 ${workResult.toolResults.length} 个工具步骤。`,
+            nextStep: '任务已完成，可在历史中检索本轮结果。',
+          })
           return {
             status: 'completed',
             runId: run.id,
@@ -283,6 +546,19 @@ export async function sendFlowMessage(
     }
 
     const plan = await planAgentRun(routedExecutionContent, thinkingEffort, runSignal)
+    if (ledgerRun) {
+      try {
+        await checkpointSecretaryLedgerRun(ledgerRun, {
+          phase: 'plan_ready',
+          summary: '公开计划已生成，正在执行并等待必要的审批边界。',
+          nextStep: plan.writeIntent ? '生成正文草稿并等待用户确认写回。' : '整合资料并生成最终答复。',
+          publicPlan: formatPlanDetail(plan),
+          status: 'running',
+        })
+      } catch {
+        // Best effort; see finalizeLedger.
+      }
+    }
     const result = await executeAgentRun(routedExecutionContent, plan, thinkingEffort, runSignal)
     throwIfAborted(runSignal)
 
@@ -327,6 +603,11 @@ export async function sendFlowMessage(
         'idle',
         canCallProvider(provider) ? '秘书长已完成本轮编排' : '使用本地保守编排完成',
       )
+    await finalizeLedger({
+      status: 'completed',
+      summary: summarizeFlowRun(routedExecutionContent, plan, result),
+      nextStep: plan.writeIntent ? '正文补丁已准备，等待用户确认写回。' : '任务已完成，可在历史中检索本轮结果。',
+    })
     return {
       status: 'completed',
       runId: run.id,
@@ -334,36 +615,145 @@ export async function sendFlowMessage(
     }
   } catch (error) {
     const controlledRun = useWorkAssistantStore.getState().runs[run.id]
+    const paused = secretaryRunPauseRequested(run.id)
     const cancelled = runSignal?.aborted === true
       || (error instanceof DOMException && error.name === 'AbortError')
       || controlledRun?.status === 'cancelled'
     if (cancelled) {
       finishAgentRun(run, { status: 'cancelled', summary: '用户已取消本次运行。' })
-      useAppStore.getState().setLlmRunState('idle', '本轮运行已取消')
+      useAppStore.getState().setLlmRunState('idle', paused ? '任务已暂停，检查点已保存' : '本轮运行已取消')
+      await finalizeLedger(paused
+        ? {
+            status: 'paused',
+            summary: '任务已暂停，当前阶段已保存为检查点。',
+            nextStep: '从任务中心继续此任务。',
+          }
+        : {
+            status: 'cancelled',
+            summary: '用户已取消本次运行。',
+            nextStep: '可从任务中心重新排队并继续。',
+          })
       return {
         status: 'cancelled',
         runId: run.id,
-        error: '用户已取消本次运行。',
+        error: paused ? '任务已暂停。' : '用户已取消本次运行。',
       }
     }
     if (controlledRun && controlledRun.status !== 'failed' && controlledRun.status !== 'cancelled') {
       dispatchOrderedWorkAssistantEvent({ type: 'run.failed', runId: run.id, code: 'secretary_run_failed', message: error instanceof Error ? error.message : '秘书运行失败。', recoverable: true, at: Date.now() })
     }
     failAgentRun(run, error)
+    const message = formatSecretaryRunFailure(error)
     useAppStore.getState().addFlowMessage({
       role: 'assistant',
       agentId: 'writer',
-      content: `Agent 编排失败：${error instanceof Error ? error.message : '未知错误'}`,
+      content: message,
     })
-    useAppStore.getState().setLlmRunState('error', 'Agent 编排失败')
+    useAppStore.getState().setLlmRunState('error', message)
+    await finalizeLedger({
+      status: 'failed',
+      summary: message,
+      nextStep: '可从任务中心重试，或调整请求后重新发送。',
+    })
     return {
       status: 'failed',
       runId: run.id,
-      error: error instanceof Error ? error.message : '未知错误',
+      error: message,
     }
   } finally {
     finishSecretaryRun(run.id)
   }
+}
+
+async function runConversationalShortcut(
+  provider: LlmProviderConfig,
+  prompt: string,
+  signal: AbortSignal,
+  thinkingEffort: FlowThinkingEffort,
+) {
+  if (!canCallProvider(provider)) {
+    return createConversationalFallback(prompt)
+  }
+
+  const sampling = getAgentSamplingProfile('agent_output', thinkingEffort, {
+    repeatRisk: 0.15,
+    creative: false,
+  })
+
+  return callOpenAICompatible(
+    provider,
+    [
+      {
+        role: 'system',
+        content: composeSystemPrompt(
+          [
+            sharedAgentRules,
+            '你是 Papyrus 的铭荼，一位体贴、可爱的中文秘书。',
+            '这是简短寒暄，不要规划任务，不要调用工具、子 Agent 或写入文稿。',
+            isCapabilityQuestion(prompt)
+              ? '用户在询问电脑、浏览器或终端能力。请明确说明你能在 Papyrus 内执行受控读取、固定终端命令和经审批的操作；浏览器需要已连接 Browser Bridge，写入、提交、下载、终端构建/测试和敏感动作必须先让用户确认。不要说自己完全无法操控电脑或浏览器。'
+              : '',
+            '只用一两句自然、有人情味的话回应，并邀请用户说出想处理的事情。',
+          ].join('\n'),
+        ),
+      },
+      { role: 'user', content: prompt },
+    ],
+    signal,
+    { ...sampling, maxTokens: Math.min(sampling.maxTokens, 256) },
+  )
+}
+
+function createConversationalFallback(prompt: string) {
+  if (/谢谢|多谢/.test(prompt)) {
+    return '不客气呀。需要我帮你处理什么，直接告诉我就好。'
+  }
+
+  if (/在吗|有人吗/.test(prompt)) {
+    return '在的，我是铭荼。你想先处理哪件事？'
+  }
+
+  if (/再见/.test(prompt)) {
+    return '好呀，等你回来。'
+  }
+
+  return '你好呀，我是铭荼。今天想一起处理什么？'
+}
+
+async function runLightweightSecretaryResponse(
+  provider: LlmProviderConfig,
+  prompt: string,
+  signal: AbortSignal,
+  thinkingEffort: FlowThinkingEffort,
+) {
+  if (!canCallProvider(provider)) {
+    return '这件事可以直接处理，但当前没有可用模型。请先登录主站或配置一个模型。'
+  }
+
+  const sampling = getAgentSamplingProfile('agent_output', thinkingEffort, {
+    repeatRisk: 0.2,
+    creative: false,
+  })
+
+  return callOpenAICompatible(
+    provider,
+    [
+      {
+        role: 'system',
+        content: composeSystemPrompt(
+          [
+            sharedAgentRules,
+            '你是 Papyrus 的铭荼，一位体贴、清楚、偏文科秘书风格的助手。',
+            '这是一个轻量任务。直接完成用户请求，只返回自然的最终答复。',
+            '不要创建 Todo，不要调用工具或子 Agent，不要输出计划、内部状态、工具轨迹或正文补丁标记。',
+          ].join('\n'),
+        ),
+      },
+      { role: 'user', content: prompt },
+    ],
+    signal,
+    { ...sampling, maxTokens: Math.min(sampling.maxTokens, 1024) },
+  )
 }
 
 export async function createSecretaryPlanDraft(
@@ -580,6 +970,10 @@ export async function planAgentRun(
     store.disabledBuiltInStudioAgentIds,
   )
 
+  if (isConversationalShortcut(prompt) || isLightweightSecretaryTask(prompt)) {
+    return createConversationOnlyPlan([describeModelRouting(plannerModel)], thinkingEffort)
+  }
+
   if (canCallProvider(provider)) {
     const step = store.addAgentStep({
       type: 'plan',
@@ -616,6 +1010,7 @@ export async function planAgentRun(
               '你只输出严格 JSON，不要 Markdown，不要解释。',
               '字段必须是：needsWebSearch, subAgents, toolCalls, writeIntent, documentPatchOperation, replyMode, conversationGoal。',
               '简单任务必须避免多 Agent 协作；标准任务最多 2 个执行 Agent；复杂任务最多 3 个主力 + 2 个审查/顾问。',
+              thinkingEffort === 'low' ? '当前 low 思考模式：subAgents 必须为空，只执行秘书长单体路径。' : '',
               '所有子 Agent 后续会按结构化协议输出，不要安排寒暄、复述背景或重复审查。',
               'subAgents 必须从下方启用的工作室 Agent id 中选择，不能调用已禁用或不存在的 Agent。',
               '先判断任务类别，再选择最多 3 个主力 Agent；如有必要再选择最多 2 个审查/顾问 Agent。复杂 /goal 可分阶段增加，但单阶段仍要克制。',
@@ -1659,6 +2054,10 @@ function sanitizePlan(
   modelRoutingSummary: string[] = [],
   thinkingEffort = useAppStore.getState().flowThinkingEffort,
 ): AgentRunPlan {
+  if (isConversationalShortcut(prompt) || isLightweightSecretaryTask(prompt)) {
+    return createConversationOnlyPlan(modelRoutingSummary, thinkingEffort)
+  }
+
   const fallback = createFallbackPlan(prompt, classification, modelRoutingSummary, thinkingEffort)
   const routing = routeForPrompt(prompt)
   const routedAgents = [
@@ -1666,8 +2065,12 @@ function sanitizePlan(
     ...routing.reviewerAgents,
     ...routing.advisorAgents,
   ]
-  const hiveEnabled = shouldUseHiveSwarm(thinkingEffort, classification)
-  const maxAgentCount = maxAgentsForClassification(classification, hiveEnabled, thinkingEffort)
+  // Low effort is an explicit single-agent mode. The model may still return
+  // a stale or over-eager subAgents list, so enforce the boundary after
+  // normalizing both fallback and model-generated plans.
+  const lowEffort = !canUseSecretarySubAgents(thinkingEffort)
+  const hiveEnabled = !lowEffort && shouldUseHiveSwarm(thinkingEffort, classification)
+  const maxAgentCount = lowEffort ? 0 : maxAgentsForClassification(classification, hiveEnabled, thinkingEffort)
   const longformAgents = selectLongformAgents(prompt, thinkingEffort)
   let subAgents = uniqueAgents(
     [...longformAgents, ...(input.subAgents ?? []), ...routedAgents, ...fallback.subAgents],
@@ -1720,9 +2123,13 @@ function sanitizePlan(
 
   if (
     classification.taskType === 'longform-fiction' &&
-    subAgents.length < Math.min(maxAgentCount, thinkingEffort === 'low' ? 3 : 5)
+    subAgents.length < Math.min(maxAgentCount, 5)
   ) {
     subAgents = uniqueAgents([...subAgents, ...longformAgents], maxAgentCount)
+  }
+
+  if (lowEffort) {
+    subAgents = []
   }
 
   const plan: AgentRunPlan = {
@@ -1784,6 +2191,27 @@ function normalizePatchOperation(operation: unknown, prompt: string) {
   return allowed.includes(operation as DocumentPatchOperation)
     ? (operation as DocumentPatchOperation)
     : inferPatchOperation(prompt)
+}
+
+function createConversationOnlyPlan(
+  modelRoutingSummary: string[] = [],
+  thinkingEffort = useAppStore.getState().flowThinkingEffort,
+): AgentRunPlan {
+  return {
+    needsWebSearch: false,
+    subAgents: [],
+    toolCalls: [],
+    writeIntent: false,
+    replyMode: 'conversation_only',
+    conversationGoal: '自然回应用户的简短寒暄，并等待下一步请求。',
+    routingRationale: '检测到简短寒暄，跳过规划器、工具和多 Agent 调度。',
+    taskComplexity: 'simple',
+    taskType: 'conversation',
+    classificationConfidence: 1,
+    maxAgentCount: 0,
+    modelRoutingSummary,
+    agentBudgetLabel: `寒暄直达：${describeThinkingEffort(thinkingEffort)}模式不创建 Agent 任务`,
+  }
 }
 
 function uniqueAgents(agents: FlowAgentId[], maxCount = 5) {
@@ -1903,6 +2331,10 @@ function maxAgentsForClassification(
   hiveEnabled = false,
   thinkingEffort: FlowThinkingEffort = useAppStore.getState().flowThinkingEffort,
 ) {
+  if (!canUseSecretarySubAgents(thinkingEffort)) {
+    return 0
+  }
+
   if (hiveEnabled) {
     const hardwareLimit = useAppStore.getState().hardwareCapabilityProfile.maxHiveAgents
     return Math.max(4, Math.min(hardwareLimit, classification.expectedAgentCount || hardwareLimit))

@@ -147,6 +147,14 @@ export default function App() {
           tone: quotaHealthTone as 'ok' | 'warn',
         }]
       : []),
+    ...(runtimeMetadata?.quota?.autoMonthlyRemaining !== undefined || runtimeMetadata?.quota?.autoDailyUnlimited === true
+      ? [{
+          label: runtimeMetadata.quota.autoDailyUnlimited === true
+            ? `Auto 月余 ${runtimeMetadata.quota.autoMonthlyRemaining ?? '-'} · 日限额不限`
+            : `Auto 月余 ${runtimeMetadata.quota.autoMonthlyRemaining ?? '-'} · 日余 ${runtimeMetadata.quota.autoDailyRemaining ?? '-'}`,
+          tone: 'neutral' as const,
+        }]
+      : []),
     { label: `v${addinVersion}`, tone: 'neutral' },
   ] as const
 
@@ -716,7 +724,11 @@ export default function App() {
           </strong>
           <span>
             {runtimeMetadata?.quota
-              ? `剩余 ${runtimeMetadata.quota.pointsBalance} 积分${quotaSyncSuffix}`
+              ? `剩余 ${runtimeMetadata.quota.pointsBalance} 积分${quotaSyncSuffix}${runtimeMetadata.quota.autoDailyUnlimited === true
+                ? ` · Auto 月余 ${runtimeMetadata.quota.autoMonthlyRemaining ?? '-'} · 日限额不限`
+                : runtimeMetadata.quota.autoMonthlyRemaining !== undefined
+                  ? ` · Auto 月余 ${runtimeMetadata.quota.autoMonthlyRemaining} · 日余 ${runtimeMetadata.quota.autoDailyRemaining ?? '-'}`
+                  : ''}`
               : session
                 ? quotaSyncStatus === 'error'
                   ? `积分同步失败${runtimeMetadata?.quotaSync.error ? `：${runtimeMetadata.quotaSync.error}` : ''}`

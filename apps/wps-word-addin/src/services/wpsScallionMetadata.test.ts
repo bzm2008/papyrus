@@ -63,6 +63,53 @@ describe('WPS Scallion runtime metadata', () => {
     )
   })
 
+  it('labels a Free Auto-only model without claiming it is manually selectable', () => {
+    const [model] = parseWpsModelPayload({
+      data: [{
+        id: 'agnes-2.0-flash',
+        name: 'Agnes 2.0 Flash',
+        plan_available: false,
+        manual_available: false,
+        auto_available: true,
+        auto_only: true,
+      }],
+    })
+
+    expect(getWpsModelAccess(model)).toEqual(expect.objectContaining({
+      usable: false,
+      label: '仅 Auto 可用',
+    }))
+  })
+
+  it('shows Free Auto monthly quota with no daily cap', () => {
+    expect(
+      normalizeWpsQuota({
+        points_balance: 503,
+        plan: {
+          key: 'free',
+          name: 'Free',
+          auto_monthly_calls: 300,
+          auto_daily_calls: null,
+          auto_daily_unlimited: true,
+        },
+        auto: {
+          monthly_limit: 300,
+          daily_limit: null,
+          daily_unlimited: true,
+          monthly_remaining: 288,
+          daily_remaining: null,
+        },
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        autoMonthlyCalls: 300,
+        autoDailyCalls: null,
+        autoDailyRemaining: null,
+        autoDailyUnlimited: true,
+      }),
+    )
+  })
+
   it('keeps a successful model directory when the quota request fails', async () => {
     vi.stubGlobal(
       'fetch',
