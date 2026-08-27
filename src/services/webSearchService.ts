@@ -6,7 +6,7 @@ export type WebSearchResult = {
   excerpt: string
 }
 
-const SEARCH_PROXY_ENDPOINT = 'https://scallion.uno/api/papyrus/search'
+const SEARCH_PROXY_ENDPOINT = 'https://sca-hub.cn/api/papyrus/search'
 
 export async function searchWeb(query: string) {
   const normalized = query.trim()

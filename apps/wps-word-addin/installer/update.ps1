@@ -1,6 +1,6 @@
 param(
   [string]$AddinName = "PapyrusWpsAddin",
-  [string]$ManifestUrl = "https://scallion.uno/api/papyrus/wps/update",
+  [string]$ManifestUrl = "https://sca-hub.cn/api/papyrus/wps/update",
   [switch]$Silent
 )
 

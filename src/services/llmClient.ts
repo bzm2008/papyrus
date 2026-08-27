@@ -607,11 +607,11 @@ export async function fetchScallionProxyModelCatalog(
     return { models: [] }
   }
 
-  // The gateway's /models response is the sole directory authority. Do not
-  // add the legacy include_unavailable switch: older gateways used it to
-  // expose provider-side models outside the Papyrus catalogue.
-  void options
-  const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models`
+  // The gateway remains the sole directory authority. Ask it to include
+  // plan-restricted catalog entries so the UI can explain manual/Auto access;
+  // the server still filters out models outside its public Papyrus catalog.
+  const includeUnavailable = options.includeUnavailable !== false
+  const endpoint = `${provider.baseUrl.replace(/\/+$/, '')}/models${includeUnavailable ? '?include_unavailable=1' : ''}`
   const headers: Record<string, string> = {}
   const apiKey = resolveProviderApiKey(provider)
 

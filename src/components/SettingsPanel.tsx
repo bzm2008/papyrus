@@ -328,7 +328,7 @@ export function SettingsPanel() {
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <a
-                          href={scallionQuota?.topUpUrl ?? 'https://scallion.uno/pricing'}
+                          href={scallionQuota?.topUpUrl ?? 'https://sca-hub.cn/pricing'}
                           target="_blank"
                           rel="noreferrer"
                           className="papyrus-control inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs"
@@ -337,7 +337,7 @@ export function SettingsPanel() {
                           获取更多额度
                         </a>
                         <a
-                          href={scallionQuota?.upgradeUrl ?? 'https://scallion.uno/pricing'}
+                        href={scallionQuota?.upgradeUrl ?? 'https://sca-hub.cn/pricing'}
                           target="_blank"
                           rel="noreferrer"
                           className="papyrus-primary-button inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs"
@@ -358,7 +358,7 @@ export function SettingsPanel() {
                             ? '登录失败，请稍后重试。'
                             : authStatus === 'expired'
                               ? '设备码已过期，请重新登录。'
-                              : '点击后会打开 scallion.uno 授权页。'}
+                              : '点击后会打开 Scallion 授权页。'}
                       </div>
                       <button
                         type="button"
@@ -407,7 +407,7 @@ export function SettingsPanel() {
                     <div>
                       <div className="text-sm font-semibold text-[#2f2b22]">自动更新</div>
                       <div className="mt-1 text-xs text-[#8f897a]">
-                        Endpoint: https://scallion.uno/api/papyrus/update
+                        Endpoint: https://sca-hub.cn/api/papyrus/update
                       </div>
                     </div>
                     <button

@@ -319,6 +319,32 @@ test('OTA endpoint validation requires matching signed HTTPS assets for every pl
   assert.ok(failures.some((failure) => failure.includes('legacy OTA manifest is missing signed HTTPS asset for linux-x86_64')))
 })
 
+test('OTA endpoint validation checks an optional signed Debian asset checksum', () => {
+  const manifest = {
+    version: '1.1.0',
+    platforms: {
+      'windows-x86_64': { url: 'https://example.test/Papyrus_1.1.0_x64-setup.exe', signature: 'windows-signature' },
+      'linux-x86_64': { url: 'https://example.test/Papyrus_1.1.0_amd64.AppImage', signature: 'linux-signature' },
+      'darwin-x86_64': { url: 'https://example.test/Papyrus_1.1.0_x64.app.tar.gz', signature: 'mac-signature' },
+      'darwin-aarch64': { url: 'https://example.test/Papyrus_1.1.0_aarch64.app.tar.gz', signature: 'arm-signature' },
+      'linux-x86_64-deb': { url: 'https://example.test/Papyrus_1.1.0_amd64.deb', signature: 'deb-signature' },
+    },
+  }
+  const missingChecksum = _internal.validateOtaEndpointPair({
+    expectedVersion: '1.1.0',
+    canonical: manifest,
+    legacy: structuredClone(manifest),
+  })
+  assert.equal(missingChecksum.filter((failure) => failure.includes('Debian asset')).length, 2)
+
+  manifest.platforms['linux-x86_64-deb'].sha256 = 'a'.repeat(64)
+  assert.deepEqual(_internal.validateOtaEndpointPair({
+    expectedVersion: '1.1.0',
+    canonical: manifest,
+    legacy: structuredClone(manifest),
+  }), [])
+})
+
 test('null CSP fails closed', async () => {
   const rootDir = await fixture()
   try {
@@ -470,6 +496,30 @@ test('update manifest base64-wraps the complete minisign sidecar for Tauri', asy
     assert.notEqual(signature, MINISIGN_SIDECAR)
     assert.equal(Buffer.from(signature, 'base64').toString('base64'), signature)
     assert.equal(Buffer.from(signature, 'base64').toString('utf8'), MINISIGN_SIDECAR)
+  } finally {
+    await cleanup(rootDir)
+  }
+})
+
+test('update manifest includes the independently signed Debian asset checksum', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'papyrus-update-manifest-deb-'))
+  try {
+    const artifactsDir = path.join(rootDir, 'artifacts')
+    const output = path.join(rootDir, 'latest.json')
+    await fs.mkdir(artifactsDir)
+    await writeUpdaterAssets(artifactsDir)
+    const deb = Buffer.from('signed Debian package fixture')
+    await fs.writeFile(path.join(artifactsDir, 'Papyrus_1.1.0_amd64.deb'), deb)
+    await fs.writeFile(path.join(artifactsDir, 'Papyrus_1.1.0_amd64.deb.sig'), MINISIGN_SIDECAR)
+
+    const result = runManifestBuilder(artifactsDir, output)
+
+    assert.equal(result.status, 0, result.stderr)
+    const manifest = JSON.parse(await fs.readFile(output, 'utf8'))
+    const entry = manifest.platforms['linux-x86_64-deb']
+    assert.equal(entry.url, 'https://github.com/bzm2008/papyrus/releases/download/v1.1.0/Papyrus_1.1.0_amd64.deb')
+    assert.equal(entry.sha256, createHash('sha256').update(deb).digest('hex'))
+    assert.equal(Buffer.from(entry.signature, 'base64').toString('utf8'), MINISIGN_SIDECAR)
   } finally {
     await cleanup(rootDir)
   }

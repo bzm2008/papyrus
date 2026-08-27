@@ -281,7 +281,7 @@ describe('Scallion production contract', () => {
     const models = await fetchScallionProxyModels(defaultProviderConfigs.qwen36)
 
     expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(
-      'https://scallion.uno/api/papyrus/llm/models',
+      'https://sca-hub.cn/api/papyrus/llm/models?include_unavailable=1',
     )
     expect(models).toEqual([
       expect.objectContaining({

@@ -335,6 +335,10 @@ export function validateOtaEndpointPair({ expectedVersion, canonical, legacy }) 
         failures.push(`${label} OTA manifest is missing signed HTTPS asset for ${platform}`)
       }
     }
+    const debian = manifest?.platforms?.['linux-x86_64-deb']
+    if (debian && (!isSignedHttpsAsset(debian) || !/^[a-f0-9]{64}$/i.test(debian.sha256 ?? ''))) {
+      failures.push(`${label} OTA manifest Debian asset must include signed HTTPS asset and sha256`)
+    }
   }
   if (canonical?.version !== legacy?.version) {
     failures.push('canonical and legacy OTA manifests must report the same version')

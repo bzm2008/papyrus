@@ -8,8 +8,8 @@ import {
   type ScallionUser,
 } from '../stores/useAppStore'
 
-const SCALLION_QUOTA_API = 'https://scallion.uno/api/papyrus/llm/quota'
-const DEFAULT_UPGRADE_URL = 'https://scallion.uno/pricing'
+const SCALLION_QUOTA_API = 'https://sca-hub.cn/api/papyrus/llm/quota'
+const DEFAULT_UPGRADE_URL = 'https://sca-hub.cn/pricing'
 const SCALLION_REQUEST_TIMEOUT_MS = 15_000
 
 let quotaRefreshInFlight: { token: string; promise: Promise<ScallionQuota | undefined> } | undefined

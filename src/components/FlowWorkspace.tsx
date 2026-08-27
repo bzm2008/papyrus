@@ -428,7 +428,7 @@ export function FlowWorkspace() {
               <div className="flex min-w-0 items-center gap-2">
                 <div className="truncate text-[13px] font-semibold text-[#20201d]">秘书模式</div>
                 <a
-                  href={scallionQuota?.upgradeUrl ?? 'https://scallion.uno/pricing'}
+                  href={scallionQuota?.upgradeUrl ?? 'https://sca-hub.cn/pricing'}
                   target="_blank"
                   rel="noreferrer"
                   title="查看套餐与升级"

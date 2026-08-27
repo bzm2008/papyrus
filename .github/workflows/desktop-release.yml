@@ -152,6 +152,27 @@ jobs:
           cp "$arm" "release-assets/Papyrus_${version}_aarch64.app.tar.gz"
           cp "$arm_sig" "release-assets/Papyrus_${version}_aarch64.app.tar.gz.sig"
           find release-assets -type f -path '*/release/bundle/macos/Papyrus.app.tar.gz*' -delete
+      - name: Normalize Linux release assets
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          deb="$(find release-assets -type f -path '*x86_64-unknown-linux-gnu*/release/bundle/deb/*.deb' | head -n 1)"
+          appimage="$(find release-assets -type f -path '*x86_64-unknown-linux-gnu*/release/bundle/appimage/*.AppImage' | head -n 1)"
+          appimage_sig="$(find release-assets -type f -path '*x86_64-unknown-linux-gnu*/release/bundle/appimage/*.AppImage.sig' | head -n 1)"
+          test -n "$deb" && test -n "$appimage" && test -n "$appimage_sig"
+          cp "$deb" "release-assets/Papyrus_${version}_amd64.deb"
+          cp "$appimage" "release-assets/Papyrus_${version}_amd64.AppImage"
+          cp "$appimage_sig" "release-assets/Papyrus_${version}_amd64.AppImage.sig"
+          find release-assets -type f -path '*x86_64-unknown-linux-gnu*/release/bundle/deb/*.deb' -delete
+          find release-assets -type f -path '*x86_64-unknown-linux-gnu*/release/bundle/appimage/*.AppImage*' -delete
+      - name: Sign Debian system updater asset
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          deb="$(find release-assets -type f -name "Papyrus_${version}_amd64.deb" | head -n 1)"
+          test -n "$deb"
+          npx tauri signer sign "$deb"
+          test -s "$deb.sig"
       - name: Build signed OTA manifest
         run: node scripts/build-papyrus-update-manifest.mjs --artifacts release-assets --version "${{ steps.version.outputs.version }}" --output release-assets/latest.json
       - name: Generate Debian release checksums

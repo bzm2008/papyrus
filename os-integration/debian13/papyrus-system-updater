@@ -5,10 +5,10 @@
 set -eu
 
 CANONICAL_MANIFEST_URL="https://sca-hub.cn/api/papyrus/update"
-APP_ROOT=${PAPYRUS_INSTALL_ROOT:-/opt/papyrus}
+APP_ROOT=/opt/papyrus
 VERSION_FILE="$APP_ROOT/VERSION"
-PUBLIC_KEY=${PAPYRUS_UPDATER_PUBLIC_KEY:-/usr/share/papyrus/papyrus-updater.key.pub}
-WORK_DIR=${PAPYRUS_UPDATE_WORK_DIR:-/var/cache/papyrus-updater}
+PUBLIC_KEY=/usr/share/papyrus/papyrus-updater.key.pub
+WORK_DIR=/var/cache/papyrus-updater
 MODE=${1:---install-latest}
 
 if [ "$MODE" != "--install-latest" ] && [ "$MODE" != "--dry-run" ]; then
@@ -63,11 +63,13 @@ data = json.load(open(manifest_path, encoding="utf-8"))
 version = str(data.get("version", ""))
 platforms = data.get("platforms") or {}
 linux = platforms.get("linux-x86_64") or platforms.get("linux-amd64") or {}
-url = str(linux.get("url", ""))
-signature = str(linux.get("signature", ""))
+debian = platforms.get("linux-x86_64-deb") or platforms.get("linux-amd64-deb") or {}
+url = str(debian.get("url", ""))
+signature = str(debian.get("signature", ""))
+sha256 = str(debian.get("sha256", ""))
 parsed = urlparse(url)
-if not version or not url or not signature:
-    raise SystemExit("manifest missing Linux version, URL, or signature")
+if not version or not url or not signature or not sha256:
+    raise SystemExit("manifest missing Debian version, URL, signature, or sha256")
 if parsed.scheme != "https" or parsed.netloc != "github.com":
     raise SystemExit("Linux update URL must be an official HTTPS GitHub release asset")
 if "/bzm2008/papyrus/releases/download/v" not in parsed.path:
@@ -76,10 +78,10 @@ leaf = parsed.path.rsplit("/", 1)[-1]
 if not (leaf.startswith("Papyrus_") and leaf.endswith("_amd64.deb")):
     raise SystemExit("Linux system updater accepts only Papyrus amd64 .deb assets")
 with open(metadata_path, "w", encoding="utf-8") as handle:
-    handle.write(version + "\t" + url + "\t" + signature)
+    handle.write(version + "\t" + url + "\t" + signature + "\t" + sha256)
 PY
 
-IFS="$(printf '\t')" read -r target_version artifact_url manifest_signature <"$metadata"
+IFS="$(printf '\t')" read -r target_version artifact_url manifest_signature expected_sha256 <"$metadata"
 
 if ! dpkg --compare-versions "$target_version" gt "$installed_version"; then
     echo "Papyrus is already at $installed_version; refusing downgrade or reinstall to $target_version."
@@ -87,7 +89,25 @@ if ! dpkg --compare-versions "$target_version" gt "$installed_version"; then
 fi
 
 curl --fail --silent --show-error --location "$artifact_url" --output "$artifact"
-printf '%s\n' "$manifest_signature" >"$signature"
+actual_sha256=$(sha256sum "$artifact" | awk '{print $1}')
+if [ "$actual_sha256" != "$expected_sha256" ]; then
+    echo "Papyrus Debian package checksum mismatch." >&2
+    exit 1
+fi
+python3 - "$manifest_signature" "$signature" <<'PY'
+import base64
+import sys
+
+wrapped, output = sys.argv[1:3]
+try:
+    document = base64.b64decode(wrapped, validate=True).decode("utf-8")
+except Exception as error:
+    raise SystemExit(f"invalid Debian minisign wrapper: {error}")
+if not document.startswith("untrusted comment:") or "\ntrusted comment:" not in document:
+    raise SystemExit("invalid Debian minisign document")
+with open(output, "w", encoding="utf-8") as handle:
+    handle.write(document if document.endswith("\n") else document + "\n")
+PY
 minisign_pubkey=$(python3 - "$PUBLIC_KEY" <<'PY'
 import base64
 import sys

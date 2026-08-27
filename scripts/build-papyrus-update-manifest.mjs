@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import path from 'node:path'
 import process from 'node:process'
 
@@ -24,6 +25,7 @@ function platformForAsset(name) {
   const lower = name.toLowerCase()
   if (lower.endsWith('.exe') && (lower.includes('setup') || lower.includes('nsis'))) return 'windows-x86_64'
   if (lower.endsWith('.appimage')) return 'linux-x86_64'
+  if (lower.endsWith('.deb')) return 'linux-x86_64-deb'
   if (lower.endsWith('.app.tar.gz')) {
     if (lower.includes('aarch64') || lower.includes('arm64')) return 'darwin-aarch64'
     if (lower.includes('x86_64') || lower.includes('x64') || lower.includes('intel')) return 'darwin-x86_64'
@@ -64,6 +66,9 @@ for (const [assetPath, signature] of signatures) {
   platforms[platform] = {
     signature: Buffer.from(signature, 'utf8').toString('base64'),
     url: `https://github.com/${owner}/${repo}/releases/download/v${version}/${encodeURIComponent(name)}`,
+  }
+  if (platform === 'linux-x86_64-deb') {
+    platforms[platform].sha256 = createHash('sha256').update(await fs.readFile(assetPath)).digest('hex')
   }
 }
 

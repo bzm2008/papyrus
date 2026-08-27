@@ -1,6 +1,6 @@
 import type { ScallionSession, ScallionUser } from '../types'
 
-const AUTH_API = 'https://scallion.uno/api/papyrus/auth'
+const AUTH_API = 'https://sca-hub.cn/api/papyrus/auth'
 const STORAGE_KEY = 'papyrus.wps.scallion.session'
 
 type DeviceResponse = {

@@ -6,8 +6,8 @@ import type {
   WpsScallionRuntimeMetadata,
 } from '../types'
 
-const MODELS_API = 'https://scallion.uno/api/papyrus/llm/models'
-const QUOTA_API = 'https://scallion.uno/api/papyrus/llm/quota'
+const MODELS_API = 'https://sca-hub.cn/api/papyrus/llm/models'
+const QUOTA_API = 'https://sca-hub.cn/api/papyrus/llm/quota'
 const REQUEST_TIMEOUT_MS = 15_000
 
 type RawModel = {

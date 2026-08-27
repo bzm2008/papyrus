@@ -219,7 +219,7 @@ describe('normalizeQuota', () => {
     await refreshScallionQuota()
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://scallion.uno/api/papyrus/llm/quota',
+      'https://sca-hub.cn/api/papyrus/llm/quota',
       expect.objectContaining({
         headers: { Authorization: 'Bearer jwt-token' },
         signal: expect.any(AbortSignal),
@@ -238,8 +238,8 @@ describe('normalizeQuota', () => {
         unit: '积分',
         isMember: false,
         memberPriceLabel: '9.9 元/月',
-        upgradeUrl: 'https://scallion.uno/pricing',
-        topUpUrl: 'https://scallion.uno/pricing',
+        upgradeUrl: 'https://sca-hub.cn/pricing',
+        topUpUrl: 'https://sca-hub.cn/pricing',
         updatedAt: 100,
       },
     })
